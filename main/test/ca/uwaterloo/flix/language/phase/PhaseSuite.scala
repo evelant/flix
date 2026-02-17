@@ -32,6 +32,7 @@ class PhaseSuite extends Suites(
   new TestRedundancy,
   new TestResolver,
   new TestSafety,
+  new TestTerminator,
   new TestStratifier,
   new TestTyper,
   new TestWeeder,
