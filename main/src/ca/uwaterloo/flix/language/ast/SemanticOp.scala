@@ -25,6 +25,22 @@ object SemanticOp {
   sealed trait BinaryOp extends SemanticOp
 
   /**
+    * Exception Operators.
+    */
+  sealed trait ExnOp extends SemanticOp
+
+  object ExnOp {
+
+    /**
+      * Returns a stable kind id for the static type of its operand.
+      *
+      * Used to implement portable exceptions (`Exn`) without relying on JVM `Class` objects.
+      */
+    case object KindId extends ExnOp with UnaryOp
+
+  }
+
+  /**
     * Boolean Operators.
     */
   sealed trait BoolOp extends SemanticOp
@@ -94,6 +110,101 @@ object SemanticOp {
       * Greater or equal.
       */
     case object Ge extends CharOp with BinaryOp
+
+    /**
+      * Returns `true` if the character is a Unicode letter.
+      */
+    case object IsLetter extends CharOp with UnaryOp
+
+    /**
+      * Returns `true` if the character is a Unicode digit.
+      */
+    case object IsDigit extends CharOp with UnaryOp
+
+    /**
+      * Returns `true` if the character is a Unicode letter or digit.
+      */
+    case object IsLetterOrDigit extends CharOp with UnaryOp
+
+    /**
+      * Returns `true` if the character is lowercase.
+      */
+    case object IsLowerCase extends CharOp with UnaryOp
+
+    /**
+      * Returns `true` if the character is uppercase.
+      */
+    case object IsUpperCase extends CharOp with UnaryOp
+
+    /**
+      * Returns `true` if the character is titlecase.
+      */
+    case object IsTitleCase extends CharOp with UnaryOp
+
+    /**
+      * Returns `true` if the character is whitespace.
+      */
+    case object IsWhitespace extends CharOp with UnaryOp
+
+    /**
+      * Returns `true` if the character is defined.
+      */
+    case object IsDefined extends CharOp with UnaryOp
+
+    /**
+      * Returns `true` if the character is an ISO control character.
+      */
+    case object IsISOControl extends CharOp with UnaryOp
+
+    /**
+      * Returns `true` if the character is mirrored.
+      */
+    case object IsMirrored extends CharOp with UnaryOp
+
+    /**
+      * Returns `true` if the character is a surrogate code unit.
+      */
+    case object IsSurrogate extends CharOp with UnaryOp
+
+    /**
+      * Returns `true` if the given characters represent a valid Unicode surrogate pair.
+      */
+    case object IsSurrogatePair extends CharOp with BinaryOp
+
+    /**
+      * Converts the character to lowercase.
+      */
+    case object ToLowerCase extends CharOp with UnaryOp
+
+    /**
+      * Converts the character to uppercase.
+      */
+    case object ToUpperCase extends CharOp with UnaryOp
+
+    /**
+      * Converts the character to titlecase.
+      */
+    case object ToTitleCase extends CharOp with UnaryOp
+
+    /**
+      * Returns the numeric value of the character, or `-1` if none.
+      */
+    case object GetNumericValue extends CharOp with UnaryOp
+
+    /**
+      * Returns the supplementary code point value of the surrogate pair.
+      */
+    case object ToCodePoint extends CharOp with BinaryOp
+
+    /**
+      * Returns the numeric value of the character in the given radix, or `-1` if none.
+      */
+    case object Digit extends CharOp with BinaryOp
+
+    /**
+      * Returns the character representation of `n` in the given radix, or `\\u0000` if none.
+      */
+    case object ForDigit extends CharOp with BinaryOp
 
   }
 
@@ -662,6 +773,582 @@ object SemanticOp {
       * Concatenate.
       */
     case object Concat extends StringOp with BinaryOp
+
+    /**
+      * Returns the length of the string.
+      */
+    case object Length extends StringOp with UnaryOp
+
+    /**
+      * Returns the character at the given index in the string.
+      */
+    case object CharAt extends StringOp with BinaryOp
+
+    /**
+      * Returns the lower case version of the string.
+      */
+    case object ToLowerCase extends StringOp with UnaryOp
+
+    /**
+      * Returns the upper case version of the string.
+      */
+    case object ToUpperCase extends StringOp with UnaryOp
+
+    /**
+      * Returns the string repeated `n` times.
+      */
+    case object Repeat extends StringOp with BinaryOp
+
+  }
+
+  /**
+    * Parsing Operators.
+    *
+    * These operators exist to allow a portable stdlib implementation without JVM interop.
+    */
+  sealed trait ParseOp extends SemanticOp
+
+  object ParseOp {
+
+    /**
+      * Parses the given string as an Int8, returning (success, value).
+      */
+    case object Int8FromString extends ParseOp with UnaryOp
+
+    /**
+      * Parses the given string as an Int16, returning (success, value).
+      */
+    case object Int16FromString extends ParseOp with UnaryOp
+
+    /**
+      * Parses the given string as an Int32, returning (success, value).
+      */
+    case object Int32FromString extends ParseOp with UnaryOp
+
+    /**
+      * Parses the given string as an Int64, returning (success, value).
+      */
+    case object Int64FromString extends ParseOp with UnaryOp
+
+    /**
+      * Parses the given string as a Float32, returning (success, value).
+      */
+    case object Float32FromString extends ParseOp with UnaryOp
+
+    /**
+      * Parses the given string as a Float64, returning (success, value).
+      */
+    case object Float64FromString extends ParseOp with UnaryOp
+
+    /**
+      * Parses the given (radix, string) tuple as an Int32, returning (success, value).
+      */
+    case object Int32Parse extends ParseOp with UnaryOp
+
+    /**
+      * Parses the given (radix, string) tuple as an Int64, returning (success, value).
+      */
+    case object Int64Parse extends ParseOp with UnaryOp
+
+  }
+
+  /**
+    * StringBuilder Operators.
+    *
+    * These operators exist to allow a portable stdlib implementation without JVM interop.
+    */
+  sealed trait StringBuilderOp extends SemanticOp
+
+  object StringBuilderOp {
+
+    /**
+      * Returns a new mutable string builder handle for the given region.
+      */
+    case object New extends StringBuilderOp with UnaryOp
+
+    /**
+      * Appends a string to the given string builder handle.
+      */
+    case object AppendString extends StringBuilderOp with UnaryOp
+
+    /**
+      * Appends a code point to the given string builder handle.
+      */
+    case object AppendCodePoint extends StringBuilderOp with UnaryOp
+
+    /**
+      * Returns the character at the given index in the string builder handle.
+      */
+    case object CharAt extends StringBuilderOp with UnaryOp
+
+    /**
+      * Returns the length of the string builder handle.
+      */
+    case object Length extends StringBuilderOp with UnaryOp
+
+    /**
+      * Sets the length of the string builder handle.
+      */
+    case object SetLength extends StringBuilderOp with UnaryOp
+
+    /**
+      * Returns the string representation of the string builder handle.
+      */
+    case object ToString extends StringBuilderOp with UnaryOp
+
+  }
+
+  /**
+    * Regex Operators.
+    *
+    * These operators exist to allow a portable stdlib implementation without JVM interop.
+    */
+  sealed trait RegexOp extends SemanticOp
+
+  object RegexOp {
+
+    /**
+      * Returns the int value of the CanonEq flag.
+      */
+    case object FlagCanonEq extends RegexOp with UnaryOp
+
+    /**
+      * Returns the int value of the CaseInsensitive flag.
+      */
+    case object FlagCaseInsensitive extends RegexOp with UnaryOp
+
+    /**
+      * Returns the int value of the Comments flag.
+      */
+    case object FlagComments extends RegexOp with UnaryOp
+
+    /**
+      * Returns the int value of the Dotall flag.
+      */
+    case object FlagDotall extends RegexOp with UnaryOp
+
+    /**
+      * Returns the int value of the Literal flag.
+      */
+    case object FlagLiteral extends RegexOp with UnaryOp
+
+    /**
+      * Returns the int value of the Multiline flag.
+      */
+    case object FlagMultiline extends RegexOp with UnaryOp
+
+    /**
+      * Returns the int value of the UnicodeCase flag.
+      */
+    case object FlagUnicodeCase extends RegexOp with UnaryOp
+
+    /**
+      * Returns the int value of the UnicodeCharacterClass flag.
+      */
+    case object FlagUnicodeCharacterClass extends RegexOp with UnaryOp
+
+    /**
+      * Returns the int value of the UnixLines flag.
+      */
+    case object FlagUnixLines extends RegexOp with UnaryOp
+
+    /**
+      * Compiles the given regular expression pattern.
+      */
+    case object Compile extends RegexOp with UnaryOp
+
+    /**
+      * Compiles the given regular expression pattern with flags.
+      */
+    case object CompileWithFlags extends RegexOp with UnaryOp
+
+    /**
+      * Tries to compile the given regular expression pattern.
+      *
+      * Returns a tuple: (success, regex, errorMessage).
+      */
+    case object TryCompile extends RegexOp with UnaryOp
+
+    /**
+      * Tries to compile the given regular expression pattern with flags.
+      *
+      * Returns a tuple: (success, regex, errorMessage).
+      */
+    case object TryCompileWithFlags extends RegexOp with UnaryOp
+
+    /**
+      * Returns the quoted literal regex for the given string.
+      */
+    case object Quote extends RegexOp with UnaryOp
+
+    /**
+      * Returns the pattern string of the regex.
+      */
+    case object Pattern extends RegexOp with UnaryOp
+
+    /**
+      * Returns the flags of the regex.
+      */
+    case object Flags extends RegexOp with UnaryOp
+
+    /**
+      * Splits the given string around matches of the regex.
+      */
+    case object Split extends RegexOp with UnaryOp
+
+    /**
+      * Creates a new matcher for the given regex and input string.
+      */
+    case object NewMatcher extends RegexOp with UnaryOp
+
+    /**
+      * Returns true if the entire input matches.
+      */
+    case object MatcherMatches extends RegexOp with UnaryOp
+
+    /**
+      * Attempts to find the next match.
+      */
+    case object MatcherFind extends RegexOp with UnaryOp
+
+    /**
+      * Attempts to find the next match from the given position.
+      */
+    case object MatcherFindFrom extends RegexOp with UnaryOp
+
+    /**
+      * Returns true if the input matches starting at the beginning (lookingAt).
+      */
+    case object MatcherLookingAt extends RegexOp with UnaryOp
+
+    /**
+      * Replaces all matches with the given replacement string.
+      */
+    case object MatcherReplaceAll extends RegexOp with UnaryOp
+
+    /**
+      * Replaces the first match with the given replacement string.
+      */
+    case object MatcherReplaceFirst extends RegexOp with UnaryOp
+
+    /**
+      * Sets the bounds of the matcher's region.
+      */
+    case object MatcherSetBounds extends RegexOp with UnaryOp
+
+    /**
+      * Returns the start position of the current match.
+      */
+    case object MatcherStart extends RegexOp with UnaryOp
+
+    /**
+      * Returns the end position of the current match.
+      */
+    case object MatcherEnd extends RegexOp with UnaryOp
+
+    /**
+      * Returns the group content at the given index.
+      */
+    case object MatcherGroup extends RegexOp with UnaryOp
+
+    /**
+      * Returns the number of groups in the matcher.
+      */
+    case object MatcherGroupCount extends RegexOp with UnaryOp
+
+  }
+
+  /**
+    * Primitive conversion to String.
+    *
+    * These operators exist to allow a portable stdlib implementation without JVM interop.
+    */
+  sealed trait ToStringOp extends SemanticOp
+
+  object ToStringOp {
+
+    case object CharToString extends ToStringOp with UnaryOp
+
+    case object Float32ToString extends ToStringOp with UnaryOp
+
+    case object Float64ToString extends ToStringOp with UnaryOp
+
+    case object Int8ToString extends ToStringOp with UnaryOp
+
+    case object Int16ToString extends ToStringOp with UnaryOp
+
+    case object Int32ToString extends ToStringOp with UnaryOp
+
+    case object Int64ToString extends ToStringOp with UnaryOp
+
+  }
+
+  /**
+    * Primitive numeric conversions.
+    *
+    * These operators exist to allow a portable stdlib implementation without JVM interop.
+    */
+  sealed trait ConvertOp extends SemanticOp
+
+  object ConvertOp {
+
+    case object Int8ToInt16 extends ConvertOp with UnaryOp
+
+    case object Int8ToInt32 extends ConvertOp with UnaryOp
+
+    case object Int8ToInt64 extends ConvertOp with UnaryOp
+
+    case object Int8ToFloat32 extends ConvertOp with UnaryOp
+
+    case object Int8ToFloat64 extends ConvertOp with UnaryOp
+
+    case object Int16ToInt8 extends ConvertOp with UnaryOp
+
+    case object Int16ToInt32 extends ConvertOp with UnaryOp
+
+    case object Int16ToInt64 extends ConvertOp with UnaryOp
+
+    case object Int16ToFloat32 extends ConvertOp with UnaryOp
+
+    case object Int16ToFloat64 extends ConvertOp with UnaryOp
+
+    case object Int32ToInt8 extends ConvertOp with UnaryOp
+
+    case object Int32ToInt16 extends ConvertOp with UnaryOp
+
+    case object Int32ToInt64 extends ConvertOp with UnaryOp
+
+    case object Int32ToFloat32 extends ConvertOp with UnaryOp
+
+    case object Int32ToFloat64 extends ConvertOp with UnaryOp
+
+    case object Int64ToInt8 extends ConvertOp with UnaryOp
+
+    case object Int64ToInt16 extends ConvertOp with UnaryOp
+
+    case object Int64ToInt32 extends ConvertOp with UnaryOp
+
+    case object Int64ToFloat32 extends ConvertOp with UnaryOp
+
+    case object Int64ToFloat64 extends ConvertOp with UnaryOp
+
+    case object Float32ToInt8 extends ConvertOp with UnaryOp
+
+    case object Float32ToInt16 extends ConvertOp with UnaryOp
+
+    case object Float32ToInt32 extends ConvertOp with UnaryOp
+
+    case object Float32ToInt64 extends ConvertOp with UnaryOp
+
+    case object Float32ToFloat64 extends ConvertOp with UnaryOp
+
+    case object Float64ToInt8 extends ConvertOp with UnaryOp
+
+    case object Float64ToInt16 extends ConvertOp with UnaryOp
+
+    case object Float64ToInt32 extends ConvertOp with UnaryOp
+
+    case object Float64ToInt64 extends ConvertOp with UnaryOp
+
+    case object Float64ToFloat32 extends ConvertOp with UnaryOp
+
+  }
+
+  /**
+    * Primitive operations with IO effect.
+    *
+    * These operators exist to allow a portable stdlib implementation without JVM interop.
+    */
+  sealed trait IoOp extends SemanticOp
+
+  object IoOp {
+
+    case object Print extends IoOp with UnaryOp
+
+    case object EPrint extends IoOp with UnaryOp
+
+    case object Readln extends IoOp with UnaryOp
+
+    case object Println extends IoOp with UnaryOp
+
+    case object EPrintln extends IoOp with UnaryOp
+
+    /**
+      * Suspends the current thread for the given number of milliseconds.
+      */
+    case object SleepMillis extends IoOp with UnaryOp
+
+    /**
+      * Exits the current process with the given exit code.
+      */
+    case object Exit extends IoOp with UnaryOp
+
+    case object NewId extends IoOp with UnaryOp
+
+    /**
+      * Reads from a TCP socket.
+      */
+    case object TcpSocketRead extends IoOp with UnaryOp
+
+    /**
+      * Writes to a TCP socket.
+      */
+    case object TcpSocketWrite extends IoOp with UnaryOp
+
+    /**
+      * Connects to a TCP server, returning a new socket handle.
+      */
+    case object TcpSocketConnect extends IoOp with UnaryOp
+
+    /**
+      * Closes a TCP socket.
+      */
+    case object TcpSocketClose extends IoOp with UnaryOp
+
+    /**
+      * Binds a TCP server socket, returning a new server handle.
+      */
+    case object TcpServerBind extends IoOp with UnaryOp
+
+    /**
+      * Accepts a TCP server connection, returning a new socket handle.
+      */
+    case object TcpServerAccept extends IoOp with UnaryOp
+
+    /**
+      * Closes a TCP server socket.
+      */
+    case object TcpServerClose extends IoOp with UnaryOp
+
+    /**
+      * Writes to a process stdin stream.
+      */
+    case object ProcessStdinWrite extends IoOp with UnaryOp
+
+    /**
+      * Executes a process, returning a new process handle id.
+      */
+    case object ProcessExec extends IoOp with UnaryOp
+
+    /**
+      * Returns the exit value of a process.
+      */
+    case object ProcessExitValue extends IoOp with UnaryOp
+
+    /**
+      * Returns true iff a process is alive.
+      */
+    case object ProcessIsAlive extends IoOp with UnaryOp
+
+    /**
+      * Returns the pid of a process.
+      */
+    case object ProcessPid extends IoOp with UnaryOp
+
+    /**
+      * Stops a process.
+      */
+    case object ProcessStop extends IoOp with UnaryOp
+
+    /**
+      * Waits for a process to exit.
+      */
+    case object ProcessWaitFor extends IoOp with UnaryOp
+
+    /**
+      * Waits with a timeout for a process to exit.
+      */
+    case object ProcessWaitForTimeout extends IoOp with UnaryOp
+
+    /**
+      * Reads from a process stdout stream.
+      */
+    case object ProcessStdoutRead extends IoOp with UnaryOp
+
+    /**
+      * Reads from a process stderr stream.
+      */
+    case object ProcessStderrRead extends IoOp with UnaryOp
+
+    /**
+      * Releases a process handle from the runtime handle table.
+      */
+    case object ProcessRelease extends IoOp with UnaryOp
+
+    /**
+      * Executes an HTTP request, returning status code, response headers, and body.
+      */
+    case object HttpRequest extends IoOp with UnaryOp
+
+    case object EnvGetArgs extends IoOp with UnaryOp
+
+    case object EnvGetEnvPairs extends IoOp with UnaryOp
+
+    case object EnvGetVar extends IoOp with UnaryOp
+
+    case object EnvGetProp extends IoOp with UnaryOp
+
+    case object EnvVirtualProcessors extends IoOp with UnaryOp
+
+  }
+
+  /**
+    * Platform-specific but pure operations.
+    *
+    * These operators exist to allow a portable stdlib implementation without JVM interop.
+    */
+  sealed trait PlatformOp extends SemanticOp
+
+  object PlatformOp {
+
+    case object FileSeparator extends PlatformOp with UnaryOp
+
+    case object PathSeparator extends PlatformOp with UnaryOp
+
+    case object LineSeparator extends PlatformOp with UnaryOp
+
+  }
+
+  /**
+    * Primitive operations on boxed values / null.
+    *
+    * These operators exist to allow a portable stdlib implementation without JVM interop.
+    */
+  sealed trait ObjectOp extends SemanticOp
+
+  object ObjectOp {
+
+    /**
+      * Returns true iff the given value is the null reference at runtime.
+      */
+    case object IsNull extends ObjectOp with UnaryOp
+
+  }
+
+  /**
+    * Primitive hashing operations.
+    *
+    * These operators exist to allow a portable stdlib implementation without JVM interop.
+    */
+  sealed trait HashOp extends SemanticOp
+
+  object HashOp {
+
+    case object CharHash extends HashOp with UnaryOp
+
+    case object Float32Hash extends HashOp with UnaryOp
+
+    case object Float64Hash extends HashOp with UnaryOp
+
+    case object Int8Hash extends HashOp with UnaryOp
+
+    case object Int16Hash extends HashOp with UnaryOp
+
+    case object Int32Hash extends HashOp with UnaryOp
+
+    case object Int64Hash extends HashOp with UnaryOp
+
+    case object StringHash extends HashOp with UnaryOp
 
   }
 

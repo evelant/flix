@@ -190,6 +190,9 @@ object Eraser {
         case AtomicOp.PutStaticField(_) => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
         case AtomicOp.Throw => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
         case AtomicOp.Spawn => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
+        case AtomicOp.ChannelNew => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
+        case AtomicOp.ChannelGet => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
+        case AtomicOp.ChannelPut => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
         case AtomicOp.Lazy => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
         case AtomicOp.Force =>
           castExp(ErasedAst.Expr.ApplyAtomic(op, es, erase(tpe), purity, loc), t, purity, loc)
@@ -287,6 +290,9 @@ object Eraser {
       case BigInt => BigInt
       case String => String
       case Regex => Regex
+      case StringBuilderHandle => StringBuilderHandle
+      case RegexMatcher => RegexMatcher
+      case ChannelHandle => ChannelHandle
       case Region => Region
       case Null => Null
       case Array(tpe) => SimpleType.mkArray(visitType(tpe))

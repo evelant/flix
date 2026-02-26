@@ -22,7 +22,7 @@ import ca.uwaterloo.flix.language.ast.shared.{BoundBy, Constant, Modifiers, Muta
 import ca.uwaterloo.flix.language.ast.{Purity, Symbol, *}
 import ca.uwaterloo.flix.language.dbg.AstPrinter.*
 import ca.uwaterloo.flix.util.collection.{ListOps, MapOps}
-import ca.uwaterloo.flix.util.{InternalCompilerException, ParOps}
+import ca.uwaterloo.flix.util.{CompilationTarget, InternalCompilerException, ParOps}
 
 import scala.annotation.tailrec
 
@@ -123,7 +123,7 @@ object Simplifier {
       val es = exps.map(visitExp)
       val purity = simplifyEffect(eff)
       op match {
-        case AtomicOp.Binary(SemanticOp.StringOp.Concat) =>
+        case AtomicOp.Binary(SemanticOp.StringOp.Concat) if flix.options.target == CompilationTarget.Jvm =>
           // Translate to InvokeMethod exp
           val strClass = Class.forName("java.lang.String")
           val method = strClass.getMethod("concat", strClass)
@@ -314,6 +314,12 @@ object Simplifier {
 
           case TypeConstructor.Regex => SimpleType.Regex
 
+          case TypeConstructor.StringBuilderHandle => SimpleType.StringBuilderHandle
+
+          case TypeConstructor.RegexMatcher => SimpleType.RegexMatcher
+
+          case TypeConstructor.ChannelHandle => SimpleType.ChannelHandle
+
           case TypeConstructor.RecordRowEmpty => SimpleType.RecordEmpty
 
           case TypeConstructor.Sender => throw InternalCompilerException("Unexpected Sender", tpe.loc)
@@ -486,6 +492,12 @@ object Simplifier {
           case TypeConstructor.Str => cst
 
           case TypeConstructor.Regex => cst
+
+          case TypeConstructor.StringBuilderHandle => cst
+
+          case TypeConstructor.RegexMatcher => cst
+
+          case TypeConstructor.ChannelHandle => cst
 
           case TypeConstructor.RecordRowEmpty => cst
 

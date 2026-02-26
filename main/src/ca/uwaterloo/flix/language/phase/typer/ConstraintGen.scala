@@ -192,6 +192,13 @@ object ConstraintGen {
         (resTpe, resEff)
 
       case KindedAst.Expr.Unary(sop, exp, tvar, _) => sop match {
+        case SemanticOp.ExnOp.KindId =>
+          val (_, eff) = visitExp(exp)
+          c.unifyType(Type.Int32, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
         case SemanticOp.BoolOp.Not =>
           val (tpe, eff) = visitExp(exp)
           c.expectType(expected = Type.Bool, actual = tpe, exp.loc)
@@ -246,6 +253,737 @@ object ConstraintGen {
           c.unifyType(Type.Int64, tvar, exp.loc)
           val resTpe = tvar
           val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.ToStringOp.CharToString =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Char, actual = tpe, exp.loc)
+          c.unifyType(Type.Str, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.ToStringOp.Float32ToString =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Float32, actual = tpe, exp.loc)
+          c.unifyType(Type.Str, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.ToStringOp.Float64ToString =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Float64, actual = tpe, exp.loc)
+          c.unifyType(Type.Str, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.ToStringOp.Int8ToString =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Int8, actual = tpe, exp.loc)
+          c.unifyType(Type.Str, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.ToStringOp.Int16ToString =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Int16, actual = tpe, exp.loc)
+          c.unifyType(Type.Str, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.ToStringOp.Int32ToString =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Int32, actual = tpe, exp.loc)
+          c.unifyType(Type.Str, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.ToStringOp.Int64ToString =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Int64, actual = tpe, exp.loc)
+          c.unifyType(Type.Str, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case op: SemanticOp.ConvertOp =>
+          val (expectedTpe, resultTpe) = op match {
+            case SemanticOp.ConvertOp.Int8ToInt16 => (Type.Int8, Type.Int16)
+            case SemanticOp.ConvertOp.Int8ToInt32 => (Type.Int8, Type.Int32)
+            case SemanticOp.ConvertOp.Int8ToInt64 => (Type.Int8, Type.Int64)
+            case SemanticOp.ConvertOp.Int8ToFloat32 => (Type.Int8, Type.Float32)
+            case SemanticOp.ConvertOp.Int8ToFloat64 => (Type.Int8, Type.Float64)
+            case SemanticOp.ConvertOp.Int16ToInt8 => (Type.Int16, Type.Int8)
+            case SemanticOp.ConvertOp.Int16ToInt32 => (Type.Int16, Type.Int32)
+            case SemanticOp.ConvertOp.Int16ToInt64 => (Type.Int16, Type.Int64)
+            case SemanticOp.ConvertOp.Int16ToFloat32 => (Type.Int16, Type.Float32)
+            case SemanticOp.ConvertOp.Int16ToFloat64 => (Type.Int16, Type.Float64)
+            case SemanticOp.ConvertOp.Int32ToInt8 => (Type.Int32, Type.Int8)
+            case SemanticOp.ConvertOp.Int32ToInt16 => (Type.Int32, Type.Int16)
+            case SemanticOp.ConvertOp.Int32ToInt64 => (Type.Int32, Type.Int64)
+            case SemanticOp.ConvertOp.Int32ToFloat32 => (Type.Int32, Type.Float32)
+            case SemanticOp.ConvertOp.Int32ToFloat64 => (Type.Int32, Type.Float64)
+            case SemanticOp.ConvertOp.Int64ToInt8 => (Type.Int64, Type.Int8)
+            case SemanticOp.ConvertOp.Int64ToInt16 => (Type.Int64, Type.Int16)
+            case SemanticOp.ConvertOp.Int64ToInt32 => (Type.Int64, Type.Int32)
+            case SemanticOp.ConvertOp.Int64ToFloat32 => (Type.Int64, Type.Float32)
+            case SemanticOp.ConvertOp.Int64ToFloat64 => (Type.Int64, Type.Float64)
+            case SemanticOp.ConvertOp.Float32ToInt8 => (Type.Float32, Type.Int8)
+            case SemanticOp.ConvertOp.Float32ToInt16 => (Type.Float32, Type.Int16)
+            case SemanticOp.ConvertOp.Float32ToInt32 => (Type.Float32, Type.Int32)
+            case SemanticOp.ConvertOp.Float32ToInt64 => (Type.Float32, Type.Int64)
+            case SemanticOp.ConvertOp.Float32ToFloat64 => (Type.Float32, Type.Float64)
+            case SemanticOp.ConvertOp.Float64ToInt8 => (Type.Float64, Type.Int8)
+            case SemanticOp.ConvertOp.Float64ToInt16 => (Type.Float64, Type.Int16)
+            case SemanticOp.ConvertOp.Float64ToInt32 => (Type.Float64, Type.Int32)
+            case SemanticOp.ConvertOp.Float64ToInt64 => (Type.Float64, Type.Int64)
+            case SemanticOp.ConvertOp.Float64ToFloat32 => (Type.Float64, Type.Float32)
+          }
+
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = expectedTpe, actual = tpe, exp.loc)
+          c.unifyType(resultTpe, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.PlatformOp.FileSeparator =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Unit, actual = tpe, exp.loc)
+          c.unifyType(Type.Str, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.PlatformOp.PathSeparator =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Unit, actual = tpe, exp.loc)
+          c.unifyType(Type.Str, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.PlatformOp.LineSeparator =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Unit, actual = tpe, exp.loc)
+          c.unifyType(Type.Str, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.ObjectOp.IsNull =>
+          val (_, eff) = visitExp(exp)
+          c.unifyType(Type.Bool, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.StringOp.Length =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Str, actual = tpe, exp.loc)
+          c.unifyType(Type.Int32, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.StringOp.ToLowerCase | SemanticOp.StringOp.ToUpperCase =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Str, actual = tpe, exp.loc)
+          c.unifyType(Type.Str, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.ParseOp.Int8FromString =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Str, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Int8), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.ParseOp.Int16FromString =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Str, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Int16), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.ParseOp.Int32FromString =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Str, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Int32), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.ParseOp.Int64FromString =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Str, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Int64), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.ParseOp.Float32FromString =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Str, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Float32), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.ParseOp.Float64FromString =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Str, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Float64), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.ParseOp.Int32Parse =>
+          val argTpe = Type.mkTuple(List(Type.Int32, Type.Str), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Int32), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.ParseOp.Int64Parse =>
+          val argTpe = Type.mkTuple(List(Type.Int32, Type.Str), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Int64), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.StringBuilderOp.New =>
+          val regionVar = freshVar(Kind.Eff, exp.loc)
+          val regionType = Type.mkRegionToStar(regionVar, exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = regionType, actual = tpe, exp.loc)
+          c.unifyType(Type.StringBuilderHandle, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, regionVar, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.StringBuilderOp.AppendString =>
+          val regionVar = freshVar(Kind.Eff, exp.loc)
+          val regionType = Type.mkRegionToStar(regionVar, exp.loc)
+          val argTpe = Type.mkTuple(List(regionType, Type.StringBuilderHandle, Type.Str), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.Unit, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, regionVar, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.StringBuilderOp.AppendCodePoint =>
+          val regionVar = freshVar(Kind.Eff, exp.loc)
+          val regionType = Type.mkRegionToStar(regionVar, exp.loc)
+          val argTpe = Type.mkTuple(List(regionType, Type.StringBuilderHandle, Type.Int32), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.Unit, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, regionVar, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.StringBuilderOp.CharAt =>
+          val regionVar = freshVar(Kind.Eff, exp.loc)
+          val regionType = Type.mkRegionToStar(regionVar, exp.loc)
+          val argTpe = Type.mkTuple(List(regionType, Type.StringBuilderHandle, Type.Int32), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.Char, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, regionVar, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.StringBuilderOp.Length =>
+          val regionVar = freshVar(Kind.Eff, exp.loc)
+          val regionType = Type.mkRegionToStar(regionVar, exp.loc)
+          val argTpe = Type.mkTuple(List(regionType, Type.StringBuilderHandle), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.Int32, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, regionVar, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.StringBuilderOp.SetLength =>
+          val regionVar = freshVar(Kind.Eff, exp.loc)
+          val regionType = Type.mkRegionToStar(regionVar, exp.loc)
+          val argTpe = Type.mkTuple(List(regionType, Type.StringBuilderHandle, Type.Int32), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.Unit, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, regionVar, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.StringBuilderOp.ToString =>
+          val regionVar = freshVar(Kind.Eff, exp.loc)
+          val regionType = Type.mkRegionToStar(regionVar, exp.loc)
+          val argTpe = Type.mkTuple(List(regionType, Type.StringBuilderHandle), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.Str, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, regionVar, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.RegexOp.FlagCanonEq
+             | SemanticOp.RegexOp.FlagCaseInsensitive
+             | SemanticOp.RegexOp.FlagComments
+             | SemanticOp.RegexOp.FlagDotall
+             | SemanticOp.RegexOp.FlagLiteral
+             | SemanticOp.RegexOp.FlagMultiline
+             | SemanticOp.RegexOp.FlagUnicodeCase
+             | SemanticOp.RegexOp.FlagUnicodeCharacterClass
+             | SemanticOp.RegexOp.FlagUnixLines =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Unit, actual = tpe, exp.loc)
+          c.unifyType(Type.Int32, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.RegexOp.Compile =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Str, actual = tpe, exp.loc)
+          c.unifyType(Type.Regex, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.RegexOp.CompileWithFlags =>
+          val argTpe = Type.mkTuple(List(Type.Int32, Type.Str), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.Regex, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.RegexOp.TryCompile =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Str, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Regex, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.RegexOp.TryCompileWithFlags =>
+          val argTpe = Type.mkTuple(List(Type.Int32, Type.Str), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Regex, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.RegexOp.Quote =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Str, actual = tpe, exp.loc)
+          c.unifyType(Type.Str, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.RegexOp.Pattern =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Regex, actual = tpe, exp.loc)
+          c.unifyType(Type.Str, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.RegexOp.Flags =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Regex, actual = tpe, exp.loc)
+          c.unifyType(Type.Int32, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.RegexOp.Split =>
+          val regionVar = freshVar(Kind.Eff, exp.loc)
+          val regionType = Type.mkRegionToStar(regionVar, exp.loc)
+          val argTpe = Type.mkTuple(List(regionType, Type.Regex, Type.Str), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.mkArray(Type.Str, regionVar, exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, regionVar, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.RegexOp.NewMatcher =>
+          val regionVar = freshVar(Kind.Eff, exp.loc)
+          val regionType = Type.mkRegionToStar(regionVar, exp.loc)
+          val argTpe = Type.mkTuple(List(regionType, Type.Regex, Type.Str), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.RegexMatcher, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, regionVar, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.RegexOp.MatcherMatches
+             | SemanticOp.RegexOp.MatcherFind
+             | SemanticOp.RegexOp.MatcherLookingAt =>
+          val regionVar = freshVar(Kind.Eff, exp.loc)
+          val regionType = Type.mkRegionToStar(regionVar, exp.loc)
+          val argTpe = Type.mkTuple(List(regionType, Type.RegexMatcher), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.Bool, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, regionVar, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.RegexOp.MatcherFindFrom =>
+          val regionVar = freshVar(Kind.Eff, exp.loc)
+          val regionType = Type.mkRegionToStar(regionVar, exp.loc)
+          val argTpe = Type.mkTuple(List(regionType, Type.RegexMatcher, Type.Int32), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.Bool, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, regionVar, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.RegexOp.MatcherReplaceAll
+             | SemanticOp.RegexOp.MatcherReplaceFirst =>
+          val regionVar = freshVar(Kind.Eff, exp.loc)
+          val regionType = Type.mkRegionToStar(regionVar, exp.loc)
+          val argTpe = Type.mkTuple(List(regionType, Type.RegexMatcher, Type.Str), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.Str, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, regionVar, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.RegexOp.MatcherSetBounds =>
+          val regionVar = freshVar(Kind.Eff, exp.loc)
+          val regionType = Type.mkRegionToStar(regionVar, exp.loc)
+          val argTpe = Type.mkTuple(List(regionType, Type.RegexMatcher, Type.Int32, Type.Int32), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.Unit, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, regionVar, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.RegexOp.MatcherStart
+             | SemanticOp.RegexOp.MatcherEnd
+             | SemanticOp.RegexOp.MatcherGroupCount =>
+          val regionVar = freshVar(Kind.Eff, exp.loc)
+          val regionType = Type.mkRegionToStar(regionVar, exp.loc)
+          val argTpe = Type.mkTuple(List(regionType, Type.RegexMatcher), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.Int32, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, regionVar, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.RegexOp.MatcherGroup =>
+          val regionVar = freshVar(Kind.Eff, exp.loc)
+          val regionType = Type.mkRegionToStar(regionVar, exp.loc)
+          val argTpe = Type.mkTuple(List(regionType, Type.RegexMatcher, Type.Int32), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.Str, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, regionVar, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.CharOp.IsLetter | SemanticOp.CharOp.IsDigit | SemanticOp.CharOp.IsLetterOrDigit
+             | SemanticOp.CharOp.IsLowerCase | SemanticOp.CharOp.IsUpperCase | SemanticOp.CharOp.IsTitleCase
+             | SemanticOp.CharOp.IsWhitespace | SemanticOp.CharOp.IsDefined | SemanticOp.CharOp.IsISOControl
+             | SemanticOp.CharOp.IsMirrored | SemanticOp.CharOp.IsSurrogate =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Char, actual = tpe, exp.loc)
+          c.unifyType(Type.Bool, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.CharOp.ToLowerCase | SemanticOp.CharOp.ToUpperCase | SemanticOp.CharOp.ToTitleCase =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Char, actual = tpe, exp.loc)
+          c.unifyType(Type.Char, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.CharOp.GetNumericValue =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Char, actual = tpe, exp.loc)
+          c.unifyType(Type.Int32, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.HashOp.CharHash =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Char, actual = tpe, exp.loc)
+          c.unifyType(Type.Int32, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.HashOp.Float32Hash =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Float32, actual = tpe, exp.loc)
+          c.unifyType(Type.Int32, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.HashOp.Float64Hash =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Float64, actual = tpe, exp.loc)
+          c.unifyType(Type.Int32, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.HashOp.Int8Hash =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Int8, actual = tpe, exp.loc)
+          c.unifyType(Type.Int32, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.HashOp.Int16Hash =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Int16, actual = tpe, exp.loc)
+          c.unifyType(Type.Int32, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.HashOp.Int32Hash =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Int32, actual = tpe, exp.loc)
+          c.unifyType(Type.Int32, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.HashOp.Int64Hash =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Int64, actual = tpe, exp.loc)
+          c.unifyType(Type.Int32, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.HashOp.StringHash =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Str, actual = tpe, exp.loc)
+          c.unifyType(Type.Int32, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.Print | SemanticOp.IoOp.EPrint | SemanticOp.IoOp.Println | SemanticOp.IoOp.EPrintln =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Str, actual = tpe, exp.loc)
+          c.unifyType(Type.Unit, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.Readln =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Unit, actual = tpe, exp.loc)
+          c.unifyType(Type.Str, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.SleepMillis =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Int64, actual = tpe, exp.loc)
+          c.unifyType(Type.Unit, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.Exit =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Int32, actual = tpe, exp.loc)
+          c.unifyType(Type.Unit, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.NewId =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Unit, actual = tpe, exp.loc)
+          c.unifyType(Type.Int64, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.TcpSocketRead |
+             SemanticOp.IoOp.TcpSocketWrite |
+             SemanticOp.IoOp.ProcessStdinWrite |
+             SemanticOp.IoOp.ProcessStdoutRead |
+             SemanticOp.IoOp.ProcessStderrRead =>
+          val regionVar = freshVar(Kind.Eff, exp.loc)
+          val argTpe = Type.mkTuple(List(Type.Int64, Type.mkArray(Type.Int8, regionVar, exp.loc)), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, regionVar, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.TcpSocketConnect |
+             SemanticOp.IoOp.TcpServerBind =>
+          val argTpe = Type.mkTuple(List(Type.mkVector(Type.Int8, exp.loc), Type.Int32), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Int64, Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.TcpServerAccept =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Int64, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Int64, Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.ProcessExec =>
+          val regionVar1 = freshVar(Kind.Eff, exp.loc)
+          val regionVar2 = freshVar(Kind.Eff, exp.loc)
+          val argTpe = Type.mkTuple(List(
+            Type.mkArray(Type.Str, regionVar1, exp.loc),
+            Type.Bool,
+            Type.Str,
+            Type.mkArray(Type.Str, regionVar2, exp.loc)
+          ), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Int64, Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, regionVar1, regionVar2, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.ProcessExitValue =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Int64, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Int32, Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.ProcessIsAlive =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Int64, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Bool, Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.ProcessPid =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Int64, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Int64, Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.ProcessStop =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Int64, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Unit, Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.ProcessWaitFor =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Int64, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Int32, Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.ProcessWaitForTimeout =>
+          val argTpe = Type.mkTuple(List(Type.Int64, Type.Int64), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Bool, Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.TcpSocketClose | SemanticOp.IoOp.TcpServerClose | SemanticOp.IoOp.ProcessRelease =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Int64, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.HttpRequest =>
+          val regionVar = freshVar(Kind.Eff, exp.loc)
+          val argTpe = Type.mkTuple(List(
+            Type.Str,
+            Type.Str,
+            Type.mkArray(Type.Str, regionVar, exp.loc),
+            Type.Bool,
+            Type.Str
+          ), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Int32, Type.mkVector(Type.Str, exp.loc), Type.Str, Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, regionVar, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.EnvGetArgs | SemanticOp.IoOp.EnvGetEnvPairs =>
+          val regionVar = freshVar(Kind.Eff, exp.loc)
+          val regionType = Type.mkRegionToStar(regionVar, exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = regionType, actual = tpe, exp.loc)
+          c.unifyType(Type.mkArray(Type.Str, regionVar, exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, regionVar, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.EnvGetVar | SemanticOp.IoOp.EnvGetProp =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Str, actual = tpe, exp.loc)
+          c.unifyType(Type.Str, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.EnvVirtualProcessors =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Unit, actual = tpe, exp.loc)
+          c.unifyType(Type.Int32, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
           (resTpe, resEff)
       }
 
@@ -379,6 +1117,66 @@ object ConstraintGen {
           val (tpe2, eff2) = visitExp(exp2)
           c.expectType(expected = Type.Str, actual = tpe1, exp1.loc)
           c.expectType(expected = Type.Str, actual = tpe2, exp2.loc)
+          c.unifyType(tvar, Type.Str, loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff1, eff2, loc)
+          (resTpe, resEff)
+
+        case SemanticOp.CharOp.Digit =>
+          val (tpe1, eff1) = visitExp(exp1)
+          val (tpe2, eff2) = visitExp(exp2)
+          c.expectType(expected = Type.Char, actual = tpe1, exp1.loc)
+          c.expectType(expected = Type.Int32, actual = tpe2, exp2.loc)
+          c.unifyType(tvar, Type.Int32, loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff1, eff2, loc)
+          (resTpe, resEff)
+
+        case SemanticOp.CharOp.IsSurrogatePair =>
+          val (tpe1, eff1) = visitExp(exp1)
+          val (tpe2, eff2) = visitExp(exp2)
+          c.expectType(expected = Type.Char, actual = tpe1, exp1.loc)
+          c.expectType(expected = Type.Char, actual = tpe2, exp2.loc)
+          c.unifyType(tvar, Type.Bool, loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff1, eff2, loc)
+          (resTpe, resEff)
+
+        case SemanticOp.CharOp.ToCodePoint =>
+          val (tpe1, eff1) = visitExp(exp1)
+          val (tpe2, eff2) = visitExp(exp2)
+          c.expectType(expected = Type.Char, actual = tpe1, exp1.loc)
+          c.expectType(expected = Type.Char, actual = tpe2, exp2.loc)
+          c.unifyType(tvar, Type.Int32, loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff1, eff2, loc)
+          (resTpe, resEff)
+
+        case SemanticOp.CharOp.ForDigit =>
+          val (tpe1, eff1) = visitExp(exp1)
+          val (tpe2, eff2) = visitExp(exp2)
+          c.expectType(expected = Type.Int32, actual = tpe1, exp1.loc)
+          c.expectType(expected = Type.Int32, actual = tpe2, exp2.loc)
+          c.unifyType(tvar, Type.Char, loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff1, eff2, loc)
+          (resTpe, resEff)
+
+        case SemanticOp.StringOp.CharAt =>
+          val (tpe1, eff1) = visitExp(exp1)
+          val (tpe2, eff2) = visitExp(exp2)
+          c.expectType(expected = Type.Str, actual = tpe1, exp1.loc)
+          c.expectType(expected = Type.Int32, actual = tpe2, exp2.loc)
+          c.unifyType(tvar, Type.Char, loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff1, eff2, loc)
+          (resTpe, resEff)
+
+        case SemanticOp.StringOp.Repeat =>
+          val (tpe1, eff1) = visitExp(exp1)
+          val (tpe2, eff2) = visitExp(exp2)
+          c.expectType(expected = Type.Str, actual = tpe1, exp1.loc)
+          c.expectType(expected = Type.Int32, actual = tpe2, exp2.loc)
           c.unifyType(tvar, Type.Str, loc)
           val resTpe = tvar
           val resEff = Type.mkUnion(eff1, eff2, loc)

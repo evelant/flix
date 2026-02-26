@@ -175,6 +175,9 @@ object FormatType {
       case DisplayType.BigInt => true
       case DisplayType.Str => true
       case DisplayType.Regex => true
+      case DisplayType.StringBuilderHandle => true
+      case DisplayType.RegexMatcher => true
+      case DisplayType.ChannelHandle => true
       case DisplayType.Array => true
       case DisplayType.ArrayWithoutRegion => true
       case DisplayType.Vector => true
@@ -255,6 +258,9 @@ object FormatType {
       case DisplayType.BigInt => "BigInt"
       case DisplayType.Str => "String"
       case DisplayType.Regex => "Regex"
+      case DisplayType.StringBuilderHandle => "StringBuilderHandle"
+      case DisplayType.RegexMatcher => "RegexMatcher"
+      case DisplayType.ChannelHandle => "ChannelHandle"
       case DisplayType.Array => "Array"
       case DisplayType.ArrayWithoutRegion => "ArrayWithoutRegion"
       case DisplayType.Vector => "Vector"

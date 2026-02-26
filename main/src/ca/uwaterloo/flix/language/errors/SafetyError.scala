@@ -7,6 +7,7 @@ import ca.uwaterloo.flix.language.ast.{SourceLocation, Symbol, Type, TypedAst}
 import ca.uwaterloo.flix.language.errors.Highlighter.highlight
 import ca.uwaterloo.flix.language.fmt.FormatType
 import ca.uwaterloo.flix.util.Formatter
+import ca.uwaterloo.flix.util.CompilationTarget
 
 /** A common super-type for safety errors. */
 sealed trait SafetyError extends CompilationMessage {
@@ -50,6 +51,68 @@ object SafetyError {
          |  "github:xxx/yyy" = { version = "1.2.3", security = "unrestricted" }
          |
          |Learn more: https://doc.flix.dev/packages.html#security
+         |""".stripMargin
+    }
+  }
+
+  /**
+    * An error raised to indicate that Java interop is not available under the portable stdlib profile.
+    */
+  case class JavaInteropNotSupportedInPortableProfile(feature: String, loc: SourceLocation) extends SafetyError {
+    def code: ErrorCode = ErrorCode.E6021
+
+    def summary: String = "Java interop is not supported under the portable stdlib profile."
+
+    def message(fmt: Formatter)(implicit root: Option[TypedAst.Root]): String = {
+      import fmt.*
+      s""">> Java interop is not supported under the portable stdlib profile.
+         |
+         |${highlight(loc, "not supported", fmt)}
+         |
+         |Feature: ${red(feature)}
+         |
+         |${underline("Explanation:")} The portable stdlib profile is intended for non-JVM targets
+         |(e.g. future LLVM-based backends) and therefore disallows JVM-specific features such as:
+         |
+         |  - importing Java classes,
+         |  - constructing Java objects, and
+         |  - invoking Java methods / accessing Java fields.
+         |
+         |${underline("To fix:")}
+         |
+         |  - If you need Java interop, compile with: ${cyan("--Xstdlib-profile jvm")}
+         |  - Otherwise, remove the Java interop usage (or move it behind a JVM-only overlay).
+         |""".stripMargin
+    }
+  }
+
+  /**
+    * An error raised to indicate that a non-JVM compilation target requires the portable stdlib profile.
+    */
+  case class PortableStdlibProfileRequiredForTarget(target: CompilationTarget, loc: SourceLocation) extends SafetyError {
+    def code: ErrorCode = ErrorCode.E6022
+
+    def summary: String = "Non-JVM compilation targets require the portable stdlib profile."
+
+    def message(fmt: Formatter)(implicit root: Option[TypedAst.Root]): String = {
+      import fmt.*
+      val targetText = target match {
+        case CompilationTarget.Jvm => "jvm"
+        case CompilationTarget.LlvmNative => "llvm-native"
+        case CompilationTarget.LlvmWasm => "llvm-wasm"
+      }
+      s""">> Non-JVM compilation targets require the portable stdlib profile.
+         |
+         |Target: ${red(targetText)}
+         |
+         |${underline("Explanation:")} Non-JVM targets (e.g. LLVM-based backends) cannot use JVM-only
+         |stdlib overlays or Java interop. The portable stdlib profile provides a JVM-independent
+         |baseline intended to run on both the JVM and future native/wasm targets.
+         |
+         |${underline("To fix:")}
+         |
+         |  - Compile with: ${cyan("--Xstdlib-profile portable")}
+         |  - Or select the JVM target: ${cyan("--Xtarget jvm")}
          |""".stripMargin
     }
   }

@@ -44,6 +44,9 @@ object TypeConstructorPrinter {
     case TypeConstructor.BigInt => DocAst.Type.BigInt
     case TypeConstructor.Str => DocAst.Type.Str
     case TypeConstructor.Regex => DocAst.Type.Regex
+    case TypeConstructor.StringBuilderHandle => DocAst.Type.AsIs("StringBuilderHandle")
+    case TypeConstructor.RegexMatcher => DocAst.Type.AsIs("RegexMatcher")
+    case TypeConstructor.ChannelHandle => DocAst.Type.AsIs("ChannelHandle")
     case TypeConstructor.Arrow(arity) => DocAst.Type.AsIs(s"Arrow($arity)")
     case TypeConstructor.ArrowWithoutEffect(arity) => DocAst.Type.AsIs(s"ArrowWithoutEffect($arity)")
     case TypeConstructor.RecordRowEmpty => DocAst.Type.RecordRowEmpty

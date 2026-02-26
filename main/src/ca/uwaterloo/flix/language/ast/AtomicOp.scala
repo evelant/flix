@@ -96,6 +96,12 @@ object AtomicOp {
 
   case object Spawn extends AtomicOp
 
+  case object ChannelNew extends AtomicOp
+
+  case object ChannelGet extends AtomicOp
+
+  case object ChannelPut extends AtomicOp
+
   case object Lazy extends AtomicOp
 
   case object Force extends AtomicOp

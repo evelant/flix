@@ -95,6 +95,12 @@ jar {
         include '**/ClassList.txt'
     }
 
+    // LLVM-native bring-up runtime support (Zig source).
+    from('runtime/src') {
+        include 'flix_rt_llvm.zig'
+        into 'runtime/src'
+    }
+
     duplicatesStrategy = 'exclude'
 }
 

@@ -9,7 +9,7 @@ import ca.uwaterloo.flix.language.ast.{ChangeSet, RigidityEnv, SourceLocation, S
 import ca.uwaterloo.flix.language.dbg.AstPrinter.*
 import ca.uwaterloo.flix.language.errors.SafetyError
 import ca.uwaterloo.flix.language.errors.SafetyError.*
-import ca.uwaterloo.flix.util.{JvmUtils, ParOps}
+import ca.uwaterloo.flix.util.{CompilationTarget, JvmUtils, ParOps, StdlibProfile}
 
 import java.math.BigInteger
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -29,26 +29,52 @@ object Safety {
     val instances = changeSet.updateStaleValueLists(root.instances, oldRoot.instances, (i1: TypedAst.Instance, i2: TypedAst.Instance) => i1.tpe.typeConstructor == i2.tpe.typeConstructor)(ParOps.parMapValueList(_)(visitInstance))
     val uses = changeSet.updateStaleValueLists(root.uses, oldRoot.uses, (uoi1: UseOrImport, uoi2: UseOrImport) => uoi1 == uoi2)(ParOps.parMapValueList(_)(visitUseOrImport))
 
+    // Validate option combinations that affect portability and target selection.
+    checkTargetOptions()
+
+    // Additional portable-only validation not covered by the existing Safety traversal.
+    checkRootPortable(root)
+
     (root.copy(defs = defs, traits = traits, instances = instances, uses = uses), sctx.errors.asScala.toList)
+  }
+
+  /**
+    * Emits errors for invalid option combinations related to the selected compilation target.
+    */
+  private def checkTargetOptions()(implicit sctx: SharedContext, flix: Flix): Unit = {
+    flix.options.target match {
+      case CompilationTarget.Jvm => ()
+      case _ =>
+        if (!isPortableProfile) {
+          sctx.errors.add(PortableStdlibProfileRequiredForTarget(flix.options.target, SourceLocation.Unknown))
+        }
+    }
   }
 
   /** Checks the safety and well-formedness of `defn`. */
   private def visitDef(defn: Def)(implicit sctx: SharedContext, root: Root, flix: Flix): Def = {
     implicit val renv: RigidityEnv = RigidityEnv.ofRigidVars(defn.spec.tparams.map(_.sym))
     checkSpecPermissions(defn.spec)
+    checkSpecPortable(defn.spec)
     visitExp(defn.exp)
     defn
   }
 
   /** Checks the safety and well-formedness of `trt`. */
   private def visitTrait(trt: Trait)(implicit sctx: SharedContext, root: Root, flix: Flix): Trait = {
-    trt.assocs.foreach(as => as.tpe.foreach(t => checkIOPermissions(t.effects, as.loc)))
+    trt.assocs.foreach { as =>
+      as.tpe.foreach { t =>
+        checkIOPermissions(t.effects, as.loc)
+        checkPortableType(t)
+      }
+    }
     trt.sigs.foreach(visitSig)
     trt
   }
 
   /** Checks the safety and well-formedness of `inst`. */
   private def visitInstance(inst: TypedAst.Instance)(implicit sctx: SharedContext, root: Root, flix: Flix): TypedAst.Instance = {
+    checkPortableType(inst.tpe)
     inst.assocs.foreach(as => checkIOPermissions(as.tpe.effects, as.loc))
     inst.econstrs.foreach { constr =>
       checkIOPermissions(constr.tpe1.effects, constr.loc)
@@ -62,6 +88,7 @@ object Safety {
   private def visitSig(sig: Sig)(implicit sctx: SharedContext, root: Root, flix: Flix): Unit = {
     implicit val renv: RigidityEnv = RigidityEnv.ofRigidVars(sig.spec.tparams.map(_.sym))
     checkSpecPermissions(sig.spec)
+    checkSpecPortable(sig.spec)
     sig.exp.foreach(visitExp(_))
   }
 
@@ -76,7 +103,12 @@ object Safety {
     *   - [[Expr.NewObject]] are valid (see [[checkObjectImplementation]]).
     *   - [[Expr.FixpointConstraintSet]] are valid (see [[checkConstraint]]).
     */
-  private def visitExp(exp0: Expr)(implicit renv: RigidityEnv, sctx: SharedContext, root: Root, flix: Flix): Unit = exp0 match {
+  private def visitExp(exp0: Expr)(implicit renv: RigidityEnv, sctx: SharedContext, root: Root, flix: Flix): Unit = {
+    // Under the portable stdlib profile we hard-reject all JVM-specific type constructors.
+    checkPortableType(exp0.tpe)
+    checkPortableType(exp0.eff)
+
+    exp0 match {
     case Expr.Cst(_, _, _) =>
       ()
 
@@ -238,12 +270,17 @@ object Safety {
     case Expr.Ascribe(exp, _, _, _, _, _) =>
       visitExp(exp)
 
-    case Expr.InstanceOf(exp, _, _) =>
+    case Expr.InstanceOf(exp, _, loc) =>
+      checkPortableJavaInterop("instanceOf", loc)
       visitExp(exp)
 
-    case cast@Expr.CheckedCast(castType, exp, _, _, _) =>
+    case cast@Expr.CheckedCast(castType, exp, _, _, loc) =>
       castType match {
-        case CheckedCastType.TypeCast => checkCheckedTypeCast(cast)
+        case CheckedCastType.TypeCast =>
+          checkPortableJavaInterop("checked cast", loc)
+          if (!isPortableProfile) {
+            checkCheckedTypeCast(cast)
+          }
         case CheckedCastType.EffectCast => ()
       }
       visitExp(exp)
@@ -285,37 +322,61 @@ object Safety {
       visitExp(exp2)
 
     case Expr.InvokeConstructor(_, args, _, _, loc) =>
-      checkPermissions(loc.security, loc)
+      checkPortableJavaInterop("constructor invocation", loc)
+      if (!isPortableProfile) {
+        checkPermissions(loc.security, loc)
+      }
       args.foreach(visitExp)
 
     case Expr.InvokeMethod(_, exp, args, _, _, loc) =>
-      checkPermissions(loc.security, loc)
+      checkPortableJavaInterop("method invocation", loc)
+      if (!isPortableProfile) {
+        checkPermissions(loc.security, loc)
+      }
       visitExp(exp)
       args.foreach(visitExp)
 
     case Expr.InvokeStaticMethod(_, args, _, _, loc) =>
-      checkPermissions(loc.security, loc)
+      checkPortableJavaInterop("static method invocation", loc)
+      if (!isPortableProfile) {
+        checkPermissions(loc.security, loc)
+      }
       args.foreach(visitExp)
 
     case Expr.GetField(_, exp, _, _, loc) =>
-      checkPermissions(loc.security, loc)
+      checkPortableJavaInterop("field access", loc)
+      if (!isPortableProfile) {
+        checkPermissions(loc.security, loc)
+      }
       visitExp(exp)
 
     case Expr.PutField(_, exp1, exp2, _, _, loc) =>
-      checkPermissions(loc.security, loc)
+      checkPortableJavaInterop("field update", loc)
+      if (!isPortableProfile) {
+        checkPermissions(loc.security, loc)
+      }
       visitExp(exp1)
       visitExp(exp2)
 
     case Expr.GetStaticField(_, _, _, loc) =>
-      checkPermissions(loc.security, loc)
+      checkPortableJavaInterop("static field access", loc)
+      if (!isPortableProfile) {
+        checkPermissions(loc.security, loc)
+      }
 
     case Expr.PutStaticField(_, exp, _, _, loc) =>
-      checkPermissions(loc.security, loc)
+      checkPortableJavaInterop("static field update", loc)
+      if (!isPortableProfile) {
+        checkPermissions(loc.security, loc)
+      }
       visitExp(exp)
 
     case newObject@Expr.NewObject(_, _, _, _, methods, loc) =>
-      checkPermissions(loc.security, loc)
-      checkObjectImplementation(newObject)
+      checkPortableJavaInterop("new object", loc)
+      if (!isPortableProfile) {
+        checkPermissions(loc.security, loc)
+        checkObjectImplementation(newObject)
+      }
       methods.foreach(method => visitExp(method.exp))
 
     case Expr.NewChannel(exp, _, _, _) =>
@@ -379,16 +440,132 @@ object Safety {
     case Expr.Error(_, _, _) =>
       ()
 
+    }
   }
 
   /** Emits an error if `useOrImport` is an [[UseOrImport.Import]] and its security context does not permit it. */
-  private def visitUseOrImport(useOrImport: UseOrImport)(implicit sctx: SharedContext): UseOrImport = useOrImport match {
+  private def visitUseOrImport(useOrImport: UseOrImport)(implicit sctx: SharedContext, flix: Flix): UseOrImport = useOrImport match {
     case UseOrImport.Use(_, _, _) =>
       useOrImport
 
     case UseOrImport.Import(_, _, loc) =>
-      checkPermissions(loc.security, loc)
+      checkPortableJavaInterop("import", loc)
+      if (!isPortableProfile) {
+        checkPermissions(loc.security, loc)
+      }
       useOrImport
+  }
+
+  /** Returns `true` iff the portable stdlib profile is active. */
+  private def isPortableProfile(implicit flix: Flix): Boolean =
+    flix.options.stdlibProfile == StdlibProfile.Portable
+
+  /**
+    * Emits an error if the portable stdlib profile is active (regardless of security context).
+    *
+    * The portable profile is intended for non-JVM targets and therefore disallows any JVM interop.
+    */
+  private def checkPortableJavaInterop(feature: String, loc: SourceLocation)(implicit sctx: SharedContext, flix: Flix): Unit = {
+    if (isPortableProfile) {
+      sctx.errors.add(JavaInteropNotSupportedInPortableProfile(feature, loc))
+    }
+  }
+
+  /** Emits errors if `spec` references JVM-specific types under the portable stdlib profile. */
+  private def checkSpecPortable(spec: Spec)(implicit sctx: SharedContext, flix: Flix): Unit = {
+    checkPortableType(spec.declaredScheme.base)
+    spec.fparams.foreach(fp => checkPortableType(fp.tpe))
+    checkPortableType(spec.retTpe)
+    checkPortableType(spec.eff)
+    spec.tconstrs.foreach(tc => checkPortableType(tc.arg))
+    spec.econstrs.foreach { ec =>
+      checkPortableType(ec.tpe1)
+      checkPortableType(ec.tpe2)
+    }
+  }
+
+  /**
+    * Emits errors if `tpe0` contains JVM-specific types under the portable stdlib profile.
+    *
+    * This is intentionally strict: the portable profile must not rely on JVM-only types such as `Native(...)`.
+    */
+  private def checkPortableType(tpe0: Type)(implicit sctx: SharedContext, flix: Flix): Unit = {
+    if (!isPortableProfile) return
+
+    def visit(tpe: Type): Unit = tpe match {
+      case Type.Var(_, _) => ()
+
+      case Type.Cst(tc, loc) =>
+        tc match {
+          case TypeConstructor.Native(_) =>
+            sctx.errors.add(JavaInteropNotSupportedInPortableProfile("Native type", loc))
+          case TypeConstructor.JvmConstructor(_) =>
+            sctx.errors.add(JavaInteropNotSupportedInPortableProfile("Jvm constructor type", loc))
+          case TypeConstructor.JvmMethod(_) =>
+            sctx.errors.add(JavaInteropNotSupportedInPortableProfile("Jvm method type", loc))
+          case TypeConstructor.JvmField(_) =>
+            sctx.errors.add(JavaInteropNotSupportedInPortableProfile("Jvm field type", loc))
+          case _ => ()
+        }
+
+      case Type.Apply(tpe1, tpe2, _) =>
+        visit(tpe1)
+        visit(tpe2)
+
+      case Type.Alias(_, args, tpe, _) =>
+        args.foreach(visit)
+        visit(tpe)
+
+      case Type.AssocType(_, arg, _, _) =>
+        visit(arg)
+
+      case Type.JvmToType(tpe, loc) =>
+        sctx.errors.add(JavaInteropNotSupportedInPortableProfile("JvmToType", loc))
+        visit(tpe)
+
+      case Type.JvmToEff(tpe, loc) =>
+        sctx.errors.add(JavaInteropNotSupportedInPortableProfile("JvmToEff", loc))
+        visit(tpe)
+
+      case Type.UnresolvedJvmType(member, loc) =>
+        sctx.errors.add(JavaInteropNotSupportedInPortableProfile("Unresolved JVM type", loc))
+        member.getTypeArguments.foreach(visit)
+    }
+
+    visit(tpe0)
+  }
+
+  /**
+    * Emits errors for JVM-only types that appear outside defs/traits/instances/uses,
+    * e.g. in type aliases, enums, structs, and effect op signatures.
+    */
+  private def checkRootPortable(root: Root)(implicit sctx: SharedContext, flix: Flix): Unit = {
+    if (!isPortableProfile) return
+
+    root.typeAliases.values.foreach(ta => checkPortableType(ta.tpe))
+
+    root.enums.values.foreach { enm =>
+      enm.cases.values.foreach { caze =>
+        caze.tpes.foreach(checkPortableType)
+        checkPortableType(caze.sc.base)
+      }
+    }
+
+    root.structs.values.foreach { struct =>
+      checkPortableType(struct.sc.base)
+      struct.fields.values.foreach(f => checkPortableType(f.tpe))
+    }
+
+    root.restrictableEnums.values.foreach { renm =>
+      renm.cases.values.foreach { rcaze =>
+        rcaze.tpes.foreach(checkPortableType)
+        checkPortableType(rcaze.sc.base)
+      }
+    }
+
+    root.effects.values.foreach { eff =>
+      eff.ops.foreach(op => checkSpecPortable(op.spec))
+    }
   }
 
   /** Emits an error if `ctx` is not [[SecurityContext.Unrestricted]]. */

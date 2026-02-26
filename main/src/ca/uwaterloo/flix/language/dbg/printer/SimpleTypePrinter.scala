@@ -38,6 +38,9 @@ object SimpleTypePrinter {
     case SimpleType.BigInt => Type.BigInt
     case SimpleType.String => Type.Str
     case SimpleType.Regex => Type.Regex
+    case SimpleType.StringBuilderHandle => Type.AsIs("StringBuilderHandle")
+    case SimpleType.RegexMatcher => Type.AsIs("RegexMatcher")
+    case SimpleType.ChannelHandle => Type.AsIs("ChannelHandle")
     case SimpleType.Region => Type.Region
     case SimpleType.Null => Type.Null
     case SimpleType.Array(tpe) => Type.Array(print(tpe))

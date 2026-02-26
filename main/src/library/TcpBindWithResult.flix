@@ -22,16 +22,11 @@ eff TcpBindWithResult {
 }
 
 pub mod TcpBindWithResult {
-    import java.net.InetAddress
-    import java.net.ServerSocket
-    use IoError.ErrorKind
+
     use IoError.IoError
 
-    import java.io.IOException
-    import java.lang.IllegalArgumentException
-
     ///
-    /// Handles the `Tcp` effect of the given function `f`.
+    /// Handles the `TcpBindWithResult` effect of the given function `f`.
     ///
     /// In other words, re-interprets the `TcpBindWithResult` effect using the `IO` effect.
     ///
@@ -40,15 +35,11 @@ pub mod TcpBindWithResult {
             f(x)
         } with handler TcpBindWithResult {
             def bind(ip, port, resume) = {
-                try {
-                    let inet: InetAddress = InetAddress.getByAddress(IpAddr.toBytes(ip));
-                    let maxQueueLength = 50;
-                    let socket = new ServerSocket(Int16.toInt32(port), maxQueueLength, inet);
-                    let server = TcpServer.TcpServer(socket);
-                    resume(Ok(server))
-                } catch {
-                    case ex: IllegalArgumentException => resume(Err(IoError(ErrorKind.InvalidInput, ex.getMessage())))
-                    case ex: IOException              => resume(Err(IoError(ErrorKind.Other, ex.getMessage())))
+                let (ok, id, kind, msg) = %%TCP_SERVER_BIND%%((IpAddr.toBytes(ip), Int16.toInt32(port)));
+                if (ok) {
+                    resume(Ok(TcpServer.TcpServer(id)))
+                } else {
+                    resume(Err(IoError(IoError.errorKindFromCode(kind), msg)))
                 }
             }
         }

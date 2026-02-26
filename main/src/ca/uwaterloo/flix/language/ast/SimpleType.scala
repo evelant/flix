@@ -72,6 +72,12 @@ object SimpleType {
 
   case object Regex extends SimpleType
 
+  case object StringBuilderHandle extends SimpleType
+
+  case object RegexMatcher extends SimpleType
+
+  case object ChannelHandle extends SimpleType
+
   case object Region extends SimpleType
 
   case object Null extends SimpleType
@@ -147,7 +153,7 @@ object SimpleType {
       case Int16 => Int16
       case Int32 => Int32
       case Int64 => Int64
-      case Void | AnyType | Unit | BigDecimal | BigInt | String | Regex | Region | Array(_) |
+      case Void | AnyType | Unit | BigDecimal | BigInt | String | Regex | StringBuilderHandle | RegexMatcher | ChannelHandle | Region | Array(_) |
            Lazy(_) | Tuple(_) | Enum(_, _) | Struct(_, _) | Arrow(_, _) | RecordEmpty |
            RecordExtend(_, _, _) | ExtensibleEmpty | ExtensibleExtend(_, _, _) | Native(_) | Null =>
         SimpleType.Object

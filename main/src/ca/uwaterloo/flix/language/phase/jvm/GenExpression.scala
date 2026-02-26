@@ -25,6 +25,7 @@ import ca.uwaterloo.flix.language.ast.{SimpleType, *}
 import ca.uwaterloo.flix.language.phase.jvm.JvmName.MethodDescriptor
 import ca.uwaterloo.flix.language.phase.jvm.JvmName.MethodDescriptor.mkDescriptor
 import ca.uwaterloo.flix.util.InternalCompilerException
+import ca.uwaterloo.flix.util.StdlibProfile
 import ca.uwaterloo.flix.util.collection.ListOps
 import org.objectweb.asm
 import org.objectweb.asm.*
@@ -203,10 +204,16 @@ object GenExpression {
 
       case AtomicOp.Unary(sop) =>
         val List(exp) = exps
-        compileExpr(exp)
 
         sop match {
+          case ExnOp.KindId =>
+            // Evaluate the operand (for sequencing), discard the value, then push the kind id.
+            compileExpr(exp)
+            BytecodeInstructions.xPop(BackendType.toBackendType(exp.tpe))
+            BytecodeInstructions.pushInt(ExnKindId.of(exp.tpe))
+
           case SemanticOp.BoolOp.Not =>
+            compileExpr(exp)
             val condElse = new Label()
             val condEnd = new Label()
             mv.visitJumpInsn(IFNE, condElse)
@@ -216,30 +223,3587 @@ object GenExpression {
             mv.visitInsn(ICONST_0)
             mv.visitLabel(condEnd)
 
-          case Float32Op.Neg => mv.visitInsn(FNEG)
+          case Float32Op.Neg =>
+            compileExpr(exp)
+            mv.visitInsn(FNEG)
 
-          case Float64Op.Neg => mv.visitInsn(DNEG)
+          case Float64Op.Neg =>
+            compileExpr(exp)
+            mv.visitInsn(DNEG)
 
           case Int8Op.Neg =>
+            compileExpr(exp)
             mv.visitInsn(INEG)
             mv.visitInsn(I2B) // Sign extend so sign bit is also changed
 
           case Int16Op.Neg =>
+            compileExpr(exp)
             mv.visitInsn(INEG)
             mv.visitInsn(I2S) // Sign extend so sign bit is also changed
 
-          case Int32Op.Neg => mv.visitInsn(INEG)
+          case Int32Op.Neg =>
+            compileExpr(exp)
+            mv.visitInsn(INEG)
 
-          case Int64Op.Neg => mv.visitInsn(LNEG)
+          case Int64Op.Neg =>
+            compileExpr(exp)
+            mv.visitInsn(LNEG)
 
           case Int8Op.Not | Int16Op.Not | Int32Op.Not =>
+            compileExpr(exp)
             mv.visitInsn(ICONST_M1)
             mv.visitInsn(IXOR)
 
           case Int64Op.Not =>
+            compileExpr(exp)
             mv.visitInsn(ICONST_M1)
             mv.visitInsn(I2L)
             mv.visitInsn(LXOR)
+
+          case ToStringOp.CharToString =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "toString",
+              mkDescriptor(BackendType.Char)(BackendType.String).toDescriptor, false)
+
+          case ToStringOp.Float32ToString =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Float.toInternalName, "toString",
+              mkDescriptor(BackendType.Float32)(BackendType.String).toDescriptor, false)
+
+          case ToStringOp.Float64ToString =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Double.toInternalName, "toString",
+              mkDescriptor(BackendType.Float64)(BackendType.String).toDescriptor, false)
+
+          case ToStringOp.Int8ToString =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Byte.toInternalName, "toString",
+              mkDescriptor(BackendType.Int8)(BackendType.String).toDescriptor, false)
+
+          case ToStringOp.Int16ToString =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Short.toInternalName, "toString",
+              mkDescriptor(BackendType.Int16)(BackendType.String).toDescriptor, false)
+
+          case ToStringOp.Int32ToString =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Integer.toInternalName, "toString",
+              mkDescriptor(BackendType.Int32)(BackendType.String).toDescriptor, false)
+
+          case ToStringOp.Int64ToString =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Long.toInternalName, "toString",
+              mkDescriptor(BackendType.Int64)(BackendType.String).toDescriptor, false)
+
+          case op: ConvertOp =>
+            compileExpr(exp)
+            op match {
+              case ConvertOp.Int8ToInt16 => mv.visitInsn(I2S)
+              case ConvertOp.Int8ToInt32 => ()
+              case ConvertOp.Int8ToInt64 => mv.visitInsn(I2L)
+              case ConvertOp.Int8ToFloat32 => mv.visitInsn(I2F)
+              case ConvertOp.Int8ToFloat64 => mv.visitInsn(I2D)
+              case ConvertOp.Int16ToInt8 => mv.visitInsn(I2B)
+              case ConvertOp.Int16ToInt32 => ()
+              case ConvertOp.Int16ToInt64 => mv.visitInsn(I2L)
+              case ConvertOp.Int16ToFloat32 => mv.visitInsn(I2F)
+              case ConvertOp.Int16ToFloat64 => mv.visitInsn(I2D)
+              case ConvertOp.Int32ToInt8 => mv.visitInsn(I2B)
+              case ConvertOp.Int32ToInt16 => mv.visitInsn(I2S)
+              case ConvertOp.Int32ToInt64 => mv.visitInsn(I2L)
+              case ConvertOp.Int32ToFloat32 => mv.visitInsn(I2F)
+              case ConvertOp.Int32ToFloat64 => mv.visitInsn(I2D)
+              case ConvertOp.Int64ToInt8 =>
+                mv.visitInsn(L2I)
+                mv.visitInsn(I2B)
+              case ConvertOp.Int64ToInt16 =>
+                mv.visitInsn(L2I)
+                mv.visitInsn(I2S)
+              case ConvertOp.Int64ToInt32 => mv.visitInsn(L2I)
+              case ConvertOp.Int64ToFloat32 => mv.visitInsn(L2F)
+              case ConvertOp.Int64ToFloat64 => mv.visitInsn(L2D)
+              case ConvertOp.Float32ToInt8 =>
+                mv.visitInsn(F2I)
+                mv.visitInsn(I2B)
+              case ConvertOp.Float32ToInt16 =>
+                mv.visitInsn(F2I)
+                mv.visitInsn(I2S)
+              case ConvertOp.Float32ToInt32 => mv.visitInsn(F2I)
+              case ConvertOp.Float32ToInt64 => mv.visitInsn(F2L)
+              case ConvertOp.Float32ToFloat64 => mv.visitInsn(F2D)
+              case ConvertOp.Float64ToInt8 =>
+                mv.visitInsn(D2I)
+                mv.visitInsn(I2B)
+              case ConvertOp.Float64ToInt16 =>
+                mv.visitInsn(D2I)
+                mv.visitInsn(I2S)
+              case ConvertOp.Float64ToInt32 => mv.visitInsn(D2I)
+              case ConvertOp.Float64ToInt64 => mv.visitInsn(D2L)
+              case ConvertOp.Float64ToFloat32 => mv.visitInsn(D2F)
+            }
+
+          case PlatformOp.FileSeparator =>
+            compileExpr(exp)
+            mv.visitInsn(POP)
+            mv.visitFieldInsn(GETSTATIC, JvmName.File.toInternalName, "separator", JvmName.String.toDescriptor)
+
+          case PlatformOp.PathSeparator =>
+            compileExpr(exp)
+            mv.visitInsn(POP)
+            mv.visitFieldInsn(GETSTATIC, JvmName.File.toInternalName, "pathSeparator", JvmName.String.toDescriptor)
+
+          case PlatformOp.LineSeparator =>
+            compileExpr(exp)
+            mv.visitInsn(POP)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.System.toInternalName, "lineSeparator",
+              mkDescriptor()(BackendType.String).toDescriptor, false)
+
+          case ObjectOp.IsNull =>
+            import BytecodeInstructions.*
+            val erasedExpTpe = BackendType.toErasedBackendType(exp.tpe)
+            compileExpr(exp)
+            erasedExpTpe match {
+              case BackendType.Object =>
+                val isNull = new Label()
+                val end = new Label()
+
+                DUP()
+                mv.visitJumpInsn(IFNULL, isNull)
+                POP()
+                ICONST_0()
+                mv.visitJumpInsn(GOTO, end)
+
+                mv.visitLabel(isNull)
+                POP()
+                ICONST_1()
+                mv.visitLabel(end)
+
+              case _ =>
+                if (erasedExpTpe.is64BitWidth) POP2() else POP()
+                ICONST_0()
+            }
+
+          case StringOp.Length =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.String.toInternalName, "length",
+              mkDescriptor()(BackendType.Int32).toDescriptor, false)
+
+          case StringOp.ToLowerCase =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.String.toInternalName, "toLowerCase",
+              mkDescriptor()(BackendType.String).toDescriptor, false)
+
+          case StringOp.ToUpperCase =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.String.toInternalName, "toUpperCase",
+              mkDescriptor()(BackendType.String).toDescriptor, false)
+
+          case ParseOp.Int8FromString =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            val tryStart = new Label()
+            val tryEnd = new Label()
+            val handlerStart = new Label()
+            val after = new Label()
+
+            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, JvmName.NumberFormatException.toInternalName)
+
+            mv.visitLabel(tryStart)
+            NEW(tupleType.jvmName)
+            DUP()
+            pushBool(true)
+            compileExpr(exp)
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.String.toInternalName, "strip",
+              mkDescriptor()(BackendType.String).toDescriptor, false)
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESTATIC, JvmName.Byte.toInternalName, "parseByte",
+              mkDescriptor(BackendType.String)(BackendType.Int8).toDescriptor, false)
+            INVOKESPECIAL(tupleType.Constructor)
+            mv.visitLabel(tryEnd)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(handlerStart)
+            POP()
+            NEW(tupleType.jvmName)
+            DUP()
+            pushBool(false)
+            ICONST_0()
+            INVOKESPECIAL(tupleType.Constructor)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(after)
+
+          case ParseOp.Int16FromString =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            val tryStart = new Label()
+            val tryEnd = new Label()
+            val handlerStart = new Label()
+            val after = new Label()
+
+            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, JvmName.NumberFormatException.toInternalName)
+
+            mv.visitLabel(tryStart)
+            NEW(tupleType.jvmName)
+            DUP()
+            pushBool(true)
+            compileExpr(exp)
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.String.toInternalName, "strip",
+              mkDescriptor()(BackendType.String).toDescriptor, false)
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESTATIC, JvmName.Short.toInternalName, "parseShort",
+              mkDescriptor(BackendType.String)(BackendType.Int16).toDescriptor, false)
+            INVOKESPECIAL(tupleType.Constructor)
+            mv.visitLabel(tryEnd)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(handlerStart)
+            POP()
+            NEW(tupleType.jvmName)
+            DUP()
+            pushBool(false)
+            ICONST_0()
+            INVOKESPECIAL(tupleType.Constructor)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(after)
+
+          case ParseOp.Int32FromString =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            val tryStart = new Label()
+            val tryEnd = new Label()
+            val handlerStart = new Label()
+            val after = new Label()
+
+            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, JvmName.NumberFormatException.toInternalName)
+
+            mv.visitLabel(tryStart)
+            NEW(tupleType.jvmName)
+            DUP()
+            pushBool(true)
+            compileExpr(exp)
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.String.toInternalName, "strip",
+              mkDescriptor()(BackendType.String).toDescriptor, false)
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESTATIC, JvmName.Integer.toInternalName, "parseInt",
+              mkDescriptor(BackendType.String)(BackendType.Int32).toDescriptor, false)
+            INVOKESPECIAL(tupleType.Constructor)
+            mv.visitLabel(tryEnd)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(handlerStart)
+            POP()
+            NEW(tupleType.jvmName)
+            DUP()
+            pushBool(false)
+            ICONST_0()
+            INVOKESPECIAL(tupleType.Constructor)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(after)
+
+          case ParseOp.Int64FromString =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            val tryStart = new Label()
+            val tryEnd = new Label()
+            val handlerStart = new Label()
+            val after = new Label()
+
+            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, JvmName.NumberFormatException.toInternalName)
+
+            mv.visitLabel(tryStart)
+            NEW(tupleType.jvmName)
+            DUP()
+            pushBool(true)
+            compileExpr(exp)
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.String.toInternalName, "strip",
+              mkDescriptor()(BackendType.String).toDescriptor, false)
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESTATIC, JvmName.Long.toInternalName, "parseLong",
+              mkDescriptor(BackendType.String)(BackendType.Int64).toDescriptor, false)
+            INVOKESPECIAL(tupleType.Constructor)
+            mv.visitLabel(tryEnd)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(handlerStart)
+            POP()
+            NEW(tupleType.jvmName)
+            DUP()
+            pushBool(false)
+            LCONST_0()
+            INVOKESPECIAL(tupleType.Constructor)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(after)
+
+          case ParseOp.Float32FromString =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            val tryStart = new Label()
+            val tryEnd = new Label()
+            val handlerStart = new Label()
+            val after = new Label()
+
+            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, JvmName.NumberFormatException.toInternalName)
+
+            mv.visitLabel(tryStart)
+            NEW(tupleType.jvmName)
+            DUP()
+            pushBool(true)
+            compileExpr(exp)
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.String.toInternalName, "strip",
+              mkDescriptor()(BackendType.String).toDescriptor, false)
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESTATIC, JvmName.Float.toInternalName, "parseFloat",
+              mkDescriptor(BackendType.String)(BackendType.Float32).toDescriptor, false)
+            INVOKESPECIAL(tupleType.Constructor)
+            mv.visitLabel(tryEnd)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(handlerStart)
+            POP()
+            NEW(tupleType.jvmName)
+            DUP()
+            pushBool(false)
+            mv.visitInsn(FCONST_0)
+            INVOKESPECIAL(tupleType.Constructor)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(after)
+
+          case ParseOp.Float64FromString =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            val tryStart = new Label()
+            val tryEnd = new Label()
+            val handlerStart = new Label()
+            val after = new Label()
+
+            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, JvmName.NumberFormatException.toInternalName)
+
+            mv.visitLabel(tryStart)
+            NEW(tupleType.jvmName)
+            DUP()
+            pushBool(true)
+            compileExpr(exp)
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.String.toInternalName, "strip",
+              mkDescriptor()(BackendType.String).toDescriptor, false)
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESTATIC, JvmName.Double.toInternalName, "parseDouble",
+              mkDescriptor(BackendType.String)(BackendType.Float64).toDescriptor, false)
+            INVOKESPECIAL(tupleType.Constructor)
+            mv.visitLabel(tryEnd)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(handlerStart)
+            POP()
+            NEW(tupleType.jvmName)
+            DUP()
+            pushBool(false)
+            mv.visitInsn(DCONST_0)
+            INVOKESPECIAL(tupleType.Constructor)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(after)
+
+          case ParseOp.Int32Parse =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            val tryStart = new Label()
+            val tryEnd = new Label()
+            val handlerStart = new Label()
+            val after = new Label()
+
+            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, JvmName.NumberFormatException.toInternalName)
+
+            mv.visitLabel(tryStart)
+            NEW(tupleType.jvmName)
+            DUP()
+            pushBool(true)
+
+            // Extract (radix, string) from the tuple argument.
+            val SimpleType.Tuple(argElmTypes) = exp.tpe
+            val argTupleType = BackendObjType.Tuple(argElmTypes.map(BackendType.toBackendType))
+            compileExpr(exp) // tuple
+            DUP() // tuple, tuple
+            GETFIELD(argTupleType.IndexField(1)) // tuple, str
+            CHECKCAST(JvmName.String) // tuple, str
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.String.toInternalName, "strip",
+              mkDescriptor()(BackendType.String).toDescriptor, false)
+            SWAP() // str, tuple
+            GETFIELD(argTupleType.IndexField(0)) // str, radix
+
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESTATIC, JvmName.Integer.toInternalName, "parseInt",
+              mkDescriptor(BackendType.String, BackendType.Int32)(BackendType.Int32).toDescriptor, false)
+            INVOKESPECIAL(tupleType.Constructor)
+            mv.visitLabel(tryEnd)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(handlerStart)
+            POP()
+            NEW(tupleType.jvmName)
+            DUP()
+            pushBool(false)
+            ICONST_0()
+            INVOKESPECIAL(tupleType.Constructor)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(after)
+
+          case ParseOp.Int64Parse =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            val tryStart = new Label()
+            val tryEnd = new Label()
+            val handlerStart = new Label()
+            val after = new Label()
+
+            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, JvmName.NumberFormatException.toInternalName)
+
+            mv.visitLabel(tryStart)
+            NEW(tupleType.jvmName)
+            DUP()
+            pushBool(true)
+
+            // Extract (radix, string) from the tuple argument.
+            val SimpleType.Tuple(argElmTypes) = exp.tpe
+            val argTupleType = BackendObjType.Tuple(argElmTypes.map(BackendType.toBackendType))
+            compileExpr(exp) // tuple
+            DUP() // tuple, tuple
+            GETFIELD(argTupleType.IndexField(1)) // tuple, str
+            CHECKCAST(JvmName.String) // tuple, str
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.String.toInternalName, "strip",
+              mkDescriptor()(BackendType.String).toDescriptor, false)
+            SWAP() // str, tuple
+            GETFIELD(argTupleType.IndexField(0)) // str, radix
+
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESTATIC, JvmName.Long.toInternalName, "parseLong",
+              mkDescriptor(BackendType.String, BackendType.Int32)(BackendType.Int64).toDescriptor, false)
+            INVOKESPECIAL(tupleType.Constructor)
+            mv.visitLabel(tryEnd)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(handlerStart)
+            POP()
+            NEW(tupleType.jvmName)
+            DUP()
+            pushBool(false)
+            LCONST_0()
+            INVOKESPECIAL(tupleType.Constructor)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(after)
+
+          case StringBuilderOp.New =>
+            import BytecodeInstructions.*
+            compileExpr(exp)
+            POP()
+            NEW(JvmName.StringBuilder)
+            DUP()
+            invokeConstructor(JvmName.StringBuilder, MethodDescriptor.NothingToVoid)
+
+          case CharOp.IsLetter =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "isLetter",
+              mkDescriptor(BackendType.Char)(BackendType.Bool).toDescriptor, false)
+
+          case CharOp.IsDigit =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "isDigit",
+              mkDescriptor(BackendType.Char)(BackendType.Bool).toDescriptor, false)
+
+          case CharOp.IsLetterOrDigit =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "isLetterOrDigit",
+              mkDescriptor(BackendType.Char)(BackendType.Bool).toDescriptor, false)
+
+          case CharOp.IsLowerCase =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "isLowerCase",
+              mkDescriptor(BackendType.Char)(BackendType.Bool).toDescriptor, false)
+
+          case CharOp.IsUpperCase =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "isUpperCase",
+              mkDescriptor(BackendType.Char)(BackendType.Bool).toDescriptor, false)
+
+          case CharOp.IsTitleCase =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "isTitleCase",
+              mkDescriptor(BackendType.Char)(BackendType.Bool).toDescriptor, false)
+
+          case CharOp.IsWhitespace =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "isWhitespace",
+              mkDescriptor(BackendType.Char)(BackendType.Bool).toDescriptor, false)
+
+          case CharOp.IsDefined =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "isDefined",
+              mkDescriptor(BackendType.Char)(BackendType.Bool).toDescriptor, false)
+
+	          case CharOp.IsISOControl =>
+	            compileExpr(exp)
+	            mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "isISOControl",
+	              mkDescriptor(BackendType.Char)(BackendType.Bool).toDescriptor, false)
+
+	          case StringBuilderOp.AppendString =>
+	            import BytecodeInstructions.*
+	            val SimpleType.Tuple(elmTypes) = exp.tpe
+	            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+	            compileExpr(exp) // tuple
+	            DUP() // tuple, tuple
+	            GETFIELD(tupleType.IndexField(1)) // tuple, handle
+	            CHECKCAST(JvmName.StringBuilder) // tuple, sb
+	            SWAP() // sb, tuple
+	            DUP() // sb, tuple, tuple
+	            GETFIELD(tupleType.IndexField(2)) // sb, tuple, str
+	            CHECKCAST(JvmName.String) // sb, tuple, str
+	            SWAP() // sb, str, tuple
+	            POP() // sb, str
+	            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.StringBuilder.toInternalName, "append",
+	              mkDescriptor(BackendType.String)(JvmName.StringBuilder.toTpe).toDescriptor, false)
+	            POP()
+	            GETSTATIC(BackendObjType.Unit.SingletonField)
+
+          case StringBuilderOp.AppendCodePoint =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = exp.tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            compileExpr(exp) // tuple
+            DUP() // tuple, tuple
+            GETFIELD(tupleType.IndexField(1)) // tuple, handle
+            CHECKCAST(JvmName.StringBuilder) // tuple, sb
+            SWAP() // sb, tuple
+            DUP() // sb, tuple, tuple
+            GETFIELD(tupleType.IndexField(2)) // sb, tuple, cp
+            SWAP() // sb, cp, tuple
+            POP() // sb, cp
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.StringBuilder.toInternalName, "appendCodePoint",
+              mkDescriptor(BackendType.Int32)(JvmName.StringBuilder.toTpe).toDescriptor, false)
+            POP()
+            GETSTATIC(BackendObjType.Unit.SingletonField)
+
+          case StringBuilderOp.CharAt =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = exp.tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            compileExpr(exp) // tuple
+            DUP() // tuple, tuple
+            GETFIELD(tupleType.IndexField(1)) // tuple, handle
+            CHECKCAST(JvmName.StringBuilder) // tuple, sb
+            SWAP() // sb, tuple
+            DUP() // sb, tuple, tuple
+            GETFIELD(tupleType.IndexField(2)) // sb, tuple, idx
+            SWAP() // sb, idx, tuple
+            POP() // sb, idx
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.StringBuilder.toInternalName, "charAt",
+              mkDescriptor(BackendType.Int32)(BackendType.Char).toDescriptor, false)
+
+          case StringBuilderOp.Length =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = exp.tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            compileExpr(exp) // tuple
+            GETFIELD(tupleType.IndexField(1)) // handle
+            CHECKCAST(JvmName.StringBuilder) // sb
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.StringBuilder.toInternalName, "length",
+              mkDescriptor()(BackendType.Int32).toDescriptor, false)
+
+          case StringBuilderOp.SetLength =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = exp.tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            compileExpr(exp) // tuple
+            DUP() // tuple, tuple
+            GETFIELD(tupleType.IndexField(1)) // tuple, handle
+            CHECKCAST(JvmName.StringBuilder) // tuple, sb
+            SWAP() // sb, tuple
+            DUP() // sb, tuple, tuple
+            GETFIELD(tupleType.IndexField(2)) // sb, tuple, newLength
+            SWAP() // sb, newLength, tuple
+            POP() // sb, newLength
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.StringBuilder.toInternalName, "setLength",
+              mkDescriptor(BackendType.Int32)(VoidableType.Void).toDescriptor, false)
+            GETSTATIC(BackendObjType.Unit.SingletonField)
+
+          case StringBuilderOp.ToString =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = exp.tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            compileExpr(exp) // tuple
+            GETFIELD(tupleType.IndexField(1)) // handle
+            CHECKCAST(JvmName.StringBuilder) // sb
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.StringBuilder.toInternalName, "toString",
+              mkDescriptor()(BackendType.String).toDescriptor, false)
+
+          case RegexOp.FlagCanonEq =>
+            compileExpr(exp)
+            mv.visitInsn(POP)
+            mv.visitFieldInsn(GETSTATIC, JvmName.Regex.toInternalName, "CANON_EQ", BackendType.Int32.toDescriptor)
+
+          case RegexOp.FlagCaseInsensitive =>
+            compileExpr(exp)
+            mv.visitInsn(POP)
+            mv.visitFieldInsn(GETSTATIC, JvmName.Regex.toInternalName, "CASE_INSENSITIVE", BackendType.Int32.toDescriptor)
+
+          case RegexOp.FlagComments =>
+            compileExpr(exp)
+            mv.visitInsn(POP)
+            mv.visitFieldInsn(GETSTATIC, JvmName.Regex.toInternalName, "COMMENTS", BackendType.Int32.toDescriptor)
+
+          case RegexOp.FlagDotall =>
+            compileExpr(exp)
+            mv.visitInsn(POP)
+            mv.visitFieldInsn(GETSTATIC, JvmName.Regex.toInternalName, "DOTALL", BackendType.Int32.toDescriptor)
+
+          case RegexOp.FlagLiteral =>
+            compileExpr(exp)
+            mv.visitInsn(POP)
+            mv.visitFieldInsn(GETSTATIC, JvmName.Regex.toInternalName, "LITERAL", BackendType.Int32.toDescriptor)
+
+          case RegexOp.FlagMultiline =>
+            compileExpr(exp)
+            mv.visitInsn(POP)
+            mv.visitFieldInsn(GETSTATIC, JvmName.Regex.toInternalName, "MULTILINE", BackendType.Int32.toDescriptor)
+
+          case RegexOp.FlagUnicodeCase =>
+            compileExpr(exp)
+            mv.visitInsn(POP)
+            mv.visitFieldInsn(GETSTATIC, JvmName.Regex.toInternalName, "UNICODE_CASE", BackendType.Int32.toDescriptor)
+
+          case RegexOp.FlagUnicodeCharacterClass =>
+            compileExpr(exp)
+            mv.visitInsn(POP)
+            mv.visitFieldInsn(GETSTATIC, JvmName.Regex.toInternalName, "UNICODE_CHARACTER_CLASS", BackendType.Int32.toDescriptor)
+
+          case RegexOp.FlagUnixLines =>
+            compileExpr(exp)
+            mv.visitInsn(POP)
+            mv.visitFieldInsn(GETSTATIC, JvmName.Regex.toInternalName, "UNIX_LINES", BackendType.Int32.toDescriptor)
+
+	          case RegexOp.Compile =>
+	            import BytecodeInstructions.*
+	            compileExpr(exp)
+	            INVOKESTATIC(ClassConstants.Regex.CompileMethod)
+
+	          case RegexOp.CompileWithFlags =>
+	            import BytecodeInstructions.*
+	            val SimpleType.Tuple(elmTypes) = exp.tpe
+	            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+	            compileExpr(exp) // tuple
+	            DUP() // tuple, tuple
+	            GETFIELD(tupleType.IndexField(1)) // tuple, patt
+	            CHECKCAST(JvmName.String) // tuple, patt
+	            SWAP() // patt, tuple
+	            GETFIELD(tupleType.IndexField(0)) // patt, flags
+	            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESTATIC, JvmName.Regex.toInternalName, "compile",
+	              mkDescriptor(BackendType.String, BackendType.Int32)(JvmName.Regex.toTpe).toDescriptor, false)
+
+          case RegexOp.TryCompile =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            val tryStart = new Label()
+            val tryEnd = new Label()
+            val handlerStart = new Label()
+            val after = new Label()
+
+            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, JvmName.Exception.toInternalName)
+
+            mv.visitLabel(tryStart)
+            NEW(tupleType.jvmName)
+            DUP()
+            pushBool(true)
+            compileExpr(exp)
+            INVOKESTATIC(ClassConstants.Regex.CompileMethod)
+            pushString("")
+            INVOKESPECIAL(tupleType.Constructor)
+            mv.visitLabel(tryEnd)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(handlerStart)
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.Throwable.toInternalName, "getMessage",
+              mkDescriptor()(BackendType.String).toDescriptor, false)
+            mv.visitVarInsn(org.objectweb.asm.Opcodes.ASTORE, 2000)
+            NEW(tupleType.jvmName)
+            DUP()
+            pushBool(false)
+            pushString("^\\\\b$")
+            INVOKESTATIC(ClassConstants.Regex.CompileMethod)
+            mv.visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 2000)
+            INVOKESPECIAL(tupleType.Constructor)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(after)
+
+          case RegexOp.TryCompileWithFlags =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            val tryStart = new Label()
+            val tryEnd = new Label()
+            val handlerStart = new Label()
+            val after = new Label()
+
+            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, JvmName.Exception.toInternalName)
+
+            mv.visitLabel(tryStart)
+            NEW(tupleType.jvmName)
+            DUP()
+            pushBool(true)
+
+            // Extract (flags, pattern) from the tuple argument.
+            val SimpleType.Tuple(argElmTypes) = exp.tpe
+            val argTupleType = BackendObjType.Tuple(argElmTypes.map(BackendType.toBackendType))
+	            compileExpr(exp) // tuple
+	            DUP() // tuple, tuple
+	            GETFIELD(argTupleType.IndexField(1)) // tuple, patt
+	            CHECKCAST(JvmName.String) // tuple, patt
+	            SWAP() // patt, tuple
+	            GETFIELD(argTupleType.IndexField(0)) // patt, flags
+
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESTATIC, JvmName.Regex.toInternalName, "compile",
+              mkDescriptor(BackendType.String, BackendType.Int32)(JvmName.Regex.toTpe).toDescriptor, false)
+            pushString("")
+            INVOKESPECIAL(tupleType.Constructor)
+            mv.visitLabel(tryEnd)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(handlerStart)
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.Throwable.toInternalName, "getMessage",
+              mkDescriptor()(BackendType.String).toDescriptor, false)
+            mv.visitVarInsn(org.objectweb.asm.Opcodes.ASTORE, 2000)
+            NEW(tupleType.jvmName)
+            DUP()
+            pushBool(false)
+            pushString("^\\\\b$")
+            INVOKESTATIC(ClassConstants.Regex.CompileMethod)
+            mv.visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 2000)
+            INVOKESPECIAL(tupleType.Constructor)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(after)
+
+          case RegexOp.Quote =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Regex.toInternalName, "quote",
+              mkDescriptor(BackendType.String)(BackendType.String).toDescriptor, false)
+
+          case RegexOp.Pattern =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.Regex.toInternalName, "pattern",
+              mkDescriptor()(BackendType.String).toDescriptor, false)
+
+          case RegexOp.Flags =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.Regex.toInternalName, "flags",
+              mkDescriptor()(BackendType.Int32).toDescriptor, false)
+
+	          case RegexOp.Split =>
+	            import BytecodeInstructions.*
+	            val SimpleType.Tuple(elmTypes) = exp.tpe
+	            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            compileExpr(exp) // tuple
+            DUP() // tuple, tuple
+            GETFIELD(tupleType.IndexField(1)) // tuple, rgx
+            CHECKCAST(JvmName.Regex) // tuple, rgx
+	            SWAP() // rgx, tuple
+	            DUP() // rgx, tuple, tuple
+	            GETFIELD(tupleType.IndexField(2)) // rgx, tuple, str
+	            CHECKCAST(JvmName.CharSequence) // rgx, tuple, str
+	            SWAP() // rgx, str, tuple
+	            POP() // rgx, str
+	            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.Regex.toInternalName, "split",
+	              mkDescriptor(JvmName.CharSequence.toTpe)(BackendType.Array(BackendType.String)).toDescriptor, false)
+
+	          case RegexOp.NewMatcher =>
+	            import BytecodeInstructions.*
+	            val SimpleType.Tuple(elmTypes) = exp.tpe
+	            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            compileExpr(exp) // tuple
+            DUP() // tuple, tuple
+            GETFIELD(tupleType.IndexField(1)) // tuple, rgx
+            CHECKCAST(JvmName.Regex) // tuple, rgx
+	            SWAP() // rgx, tuple
+	            DUP() // rgx, tuple, tuple
+	            GETFIELD(tupleType.IndexField(2)) // rgx, tuple, str
+	            CHECKCAST(JvmName.CharSequence) // rgx, tuple, str
+	            SWAP() // rgx, str, tuple
+	            POP() // rgx, str
+	            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.Regex.toInternalName, "matcher",
+	              mkDescriptor(JvmName.CharSequence.toTpe)(JvmName.RegexMatcher.toTpe).toDescriptor, false)
+
+          case RegexOp.MatcherMatches =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = exp.tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            compileExpr(exp)
+            GETFIELD(tupleType.IndexField(1))
+            CHECKCAST(JvmName.RegexMatcher)
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.RegexMatcher.toInternalName, "matches",
+              mkDescriptor()(BackendType.Bool).toDescriptor, false)
+
+          case RegexOp.MatcherFind =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = exp.tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            compileExpr(exp)
+            GETFIELD(tupleType.IndexField(1))
+            CHECKCAST(JvmName.RegexMatcher)
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.RegexMatcher.toInternalName, "find",
+              mkDescriptor()(BackendType.Bool).toDescriptor, false)
+
+          case RegexOp.MatcherFindFrom =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = exp.tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            compileExpr(exp) // tuple
+            DUP() // tuple, tuple
+            GETFIELD(tupleType.IndexField(1)) // tuple, handle
+            CHECKCAST(JvmName.RegexMatcher) // tuple, m
+            SWAP() // m, tuple
+            DUP() // m, tuple, tuple
+            GETFIELD(tupleType.IndexField(2)) // m, tuple, pos
+            SWAP() // m, pos, tuple
+            POP() // m, pos
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.RegexMatcher.toInternalName, "find",
+              mkDescriptor(BackendType.Int32)(BackendType.Bool).toDescriptor, false)
+
+          case RegexOp.MatcherLookingAt =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = exp.tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            compileExpr(exp)
+            GETFIELD(tupleType.IndexField(1))
+            CHECKCAST(JvmName.RegexMatcher)
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.RegexMatcher.toInternalName, "lookingAt",
+              mkDescriptor()(BackendType.Bool).toDescriptor, false)
+
+	          case RegexOp.MatcherReplaceAll =>
+	            import BytecodeInstructions.*
+	            val SimpleType.Tuple(elmTypes) = exp.tpe
+	            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            compileExpr(exp) // tuple
+            DUP() // tuple, tuple
+            GETFIELD(tupleType.IndexField(1)) // tuple, handle
+            CHECKCAST(JvmName.RegexMatcher) // tuple, m
+	            SWAP() // m, tuple
+	            DUP() // m, tuple, tuple
+	            GETFIELD(tupleType.IndexField(2)) // m, tuple, replacement
+	            CHECKCAST(JvmName.String) // m, tuple, replacement
+	            SWAP() // m, replacement, tuple
+	            POP() // m, replacement
+	            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.RegexMatcher.toInternalName, "replaceAll",
+	              mkDescriptor(BackendType.String)(BackendType.String).toDescriptor, false)
+
+	          case RegexOp.MatcherReplaceFirst =>
+	            import BytecodeInstructions.*
+	            val SimpleType.Tuple(elmTypes) = exp.tpe
+	            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            compileExpr(exp) // tuple
+            DUP() // tuple, tuple
+            GETFIELD(tupleType.IndexField(1)) // tuple, handle
+            CHECKCAST(JvmName.RegexMatcher) // tuple, m
+	            SWAP() // m, tuple
+	            DUP() // m, tuple, tuple
+	            GETFIELD(tupleType.IndexField(2)) // m, tuple, replacement
+	            CHECKCAST(JvmName.String) // m, tuple, replacement
+	            SWAP() // m, replacement, tuple
+	            POP() // m, replacement
+	            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.RegexMatcher.toInternalName, "replaceFirst",
+	              mkDescriptor(BackendType.String)(BackendType.String).toDescriptor, false)
+
+          case RegexOp.MatcherSetBounds =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = exp.tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            compileExpr(exp) // tuple
+            DUP() // tuple, tuple
+            GETFIELD(tupleType.IndexField(1)) // tuple, handle
+            CHECKCAST(JvmName.RegexMatcher) // tuple, m
+            SWAP() // m, tuple
+            DUP() // m, tuple, tuple
+            GETFIELD(tupleType.IndexField(2)) // m, tuple, start
+            SWAP() // m, start, tuple
+            DUP() // m, start, tuple, tuple
+            GETFIELD(tupleType.IndexField(3)) // m, start, tuple, end
+            SWAP() // m, start, end, tuple
+            POP() // m, start, end
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.RegexMatcher.toInternalName, "region",
+              mkDescriptor(BackendType.Int32, BackendType.Int32)(JvmName.RegexMatcher.toTpe).toDescriptor, false)
+            POP()
+            GETSTATIC(BackendObjType.Unit.SingletonField)
+
+          case RegexOp.MatcherStart =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = exp.tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            compileExpr(exp)
+            GETFIELD(tupleType.IndexField(1))
+            CHECKCAST(JvmName.RegexMatcher)
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.RegexMatcher.toInternalName, "start",
+              mkDescriptor()(BackendType.Int32).toDescriptor, false)
+
+          case RegexOp.MatcherEnd =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = exp.tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            compileExpr(exp)
+            GETFIELD(tupleType.IndexField(1))
+            CHECKCAST(JvmName.RegexMatcher)
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.RegexMatcher.toInternalName, "end",
+              mkDescriptor()(BackendType.Int32).toDescriptor, false)
+
+          case RegexOp.MatcherGroup =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = exp.tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            compileExpr(exp) // tuple
+            DUP() // tuple, tuple
+            GETFIELD(tupleType.IndexField(1)) // tuple, handle
+            CHECKCAST(JvmName.RegexMatcher) // tuple, m
+            SWAP() // m, tuple
+            DUP() // m, tuple, tuple
+            GETFIELD(tupleType.IndexField(2)) // m, tuple, groupIndex
+            SWAP() // m, groupIndex, tuple
+            POP() // m, groupIndex
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.RegexMatcher.toInternalName, "group",
+              mkDescriptor(BackendType.Int32)(BackendType.String).toDescriptor, false)
+
+          case RegexOp.MatcherGroupCount =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = exp.tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            compileExpr(exp)
+            GETFIELD(tupleType.IndexField(1))
+            CHECKCAST(JvmName.RegexMatcher)
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.RegexMatcher.toInternalName, "groupCount",
+              mkDescriptor()(BackendType.Int32).toDescriptor, false)
+
+          case CharOp.IsMirrored =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "isMirrored",
+              mkDescriptor(BackendType.Char)(BackendType.Bool).toDescriptor, false)
+
+          case CharOp.IsSurrogate =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "isSurrogate",
+              mkDescriptor(BackendType.Char)(BackendType.Bool).toDescriptor, false)
+
+          case CharOp.ToLowerCase =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "toLowerCase",
+              mkDescriptor(BackendType.Char)(BackendType.Char).toDescriptor, false)
+
+          case CharOp.ToUpperCase =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "toUpperCase",
+              mkDescriptor(BackendType.Char)(BackendType.Char).toDescriptor, false)
+
+          case CharOp.ToTitleCase =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "toTitleCase",
+              mkDescriptor(BackendType.Char)(BackendType.Char).toDescriptor, false)
+
+          case CharOp.GetNumericValue =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "getNumericValue",
+              mkDescriptor(BackendType.Char)(BackendType.Int32).toDescriptor, false)
+
+          case HashOp.CharHash =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "hashCode",
+              mkDescriptor(BackendType.Char)(BackendType.Int32).toDescriptor, false)
+
+          case HashOp.Float32Hash =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Float.toInternalName, "hashCode",
+              mkDescriptor(BackendType.Float32)(BackendType.Int32).toDescriptor, false)
+
+          case HashOp.Float64Hash =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Double.toInternalName, "hashCode",
+              mkDescriptor(BackendType.Float64)(BackendType.Int32).toDescriptor, false)
+
+          case HashOp.Int8Hash =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Byte.toInternalName, "hashCode",
+              mkDescriptor(BackendType.Int8)(BackendType.Int32).toDescriptor, false)
+
+          case HashOp.Int16Hash =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Short.toInternalName, "hashCode",
+              mkDescriptor(BackendType.Int16)(BackendType.Int32).toDescriptor, false)
+
+          case HashOp.Int32Hash =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Integer.toInternalName, "hashCode",
+              mkDescriptor(BackendType.Int32)(BackendType.Int32).toDescriptor, false)
+
+          case HashOp.Int64Hash =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Long.toInternalName, "hashCode",
+              mkDescriptor(BackendType.Int64)(BackendType.Int32).toDescriptor, false)
+
+          case HashOp.StringHash =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.String.toInternalName, "hashCode",
+              mkDescriptor()(BackendType.Int32).toDescriptor, false)
+
+          case IoOp.Print =>
+            BytecodeInstructions.addLoc(loc)
+            mv.visitFieldInsn(GETSTATIC, JvmName.System.toInternalName, "out", JvmName.PrintStream.toDescriptor)
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.PrintStream.toInternalName, "print",
+              mkDescriptor(BackendType.String)(VoidableType.Void).toDescriptor, false)
+            mv.visitFieldInsn(GETSTATIC, JvmName.System.toInternalName, "out", JvmName.PrintStream.toDescriptor)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.PrintStream.toInternalName, "flush",
+              mkDescriptor()(VoidableType.Void).toDescriptor, false)
+            mv.visitFieldInsn(GETSTATIC, BackendObjType.Unit.jvmName.toInternalName, BackendObjType.Unit.SingletonField.name, BackendObjType.Unit.jvmName.toDescriptor)
+
+          case IoOp.EPrint =>
+            BytecodeInstructions.addLoc(loc)
+            mv.visitFieldInsn(GETSTATIC, JvmName.System.toInternalName, "err", JvmName.PrintStream.toDescriptor)
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.PrintStream.toInternalName, "print",
+              mkDescriptor(BackendType.String)(VoidableType.Void).toDescriptor, false)
+            mv.visitFieldInsn(GETSTATIC, JvmName.System.toInternalName, "err", JvmName.PrintStream.toDescriptor)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.PrintStream.toInternalName, "flush",
+              mkDescriptor()(VoidableType.Void).toDescriptor, false)
+            mv.visitFieldInsn(GETSTATIC, BackendObjType.Unit.jvmName.toInternalName, BackendObjType.Unit.SingletonField.name, BackendObjType.Unit.jvmName.toDescriptor)
+
+          case IoOp.Readln =>
+            BytecodeInstructions.addLoc(loc)
+            compileExpr(exp)
+            mv.visitInsn(POP)
+            val jConsole = JvmName.ofClass(classOf[java.io.Console])
+            val consoleTpe = BackendType.Reference(BackendObjType.Native(jConsole))
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.System.toInternalName, "console",
+              mkDescriptor()(consoleTpe).toDescriptor, false)
+            mv.visitMethodInsn(INVOKEVIRTUAL, jConsole.toInternalName, "readLine",
+              mkDescriptor()(BackendType.String).toDescriptor, false)
+
+          case IoOp.Println =>
+            BytecodeInstructions.addLoc(loc)
+            mv.visitFieldInsn(GETSTATIC, JvmName.System.toInternalName, "out", JvmName.PrintStream.toDescriptor)
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.PrintStream.toInternalName, "println",
+              mkDescriptor(BackendType.String)(VoidableType.Void).toDescriptor, false)
+            mv.visitFieldInsn(GETSTATIC, BackendObjType.Unit.jvmName.toInternalName, BackendObjType.Unit.SingletonField.name, BackendObjType.Unit.jvmName.toDescriptor)
+
+          case IoOp.EPrintln =>
+            BytecodeInstructions.addLoc(loc)
+            mv.visitFieldInsn(GETSTATIC, JvmName.System.toInternalName, "err", JvmName.PrintStream.toDescriptor)
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.PrintStream.toInternalName, "println",
+              mkDescriptor(BackendType.String)(VoidableType.Void).toDescriptor, false)
+            mv.visitFieldInsn(GETSTATIC, BackendObjType.Unit.jvmName.toInternalName, BackendObjType.Unit.SingletonField.name, BackendObjType.Unit.jvmName.toDescriptor)
+
+          case IoOp.SleepMillis =>
+            BytecodeInstructions.addLoc(loc)
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Thread.toInternalName, "sleep",
+              mkDescriptor(BackendType.Int64)(VoidableType.Void).toDescriptor, false)
+            mv.visitFieldInsn(GETSTATIC, BackendObjType.Unit.jvmName.toInternalName, BackendObjType.Unit.SingletonField.name, BackendObjType.Unit.jvmName.toDescriptor)
+
+          case IoOp.Exit =>
+            BytecodeInstructions.addLoc(loc)
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.System.toInternalName, "exit",
+              mkDescriptor(BackendType.Int32)(VoidableType.Void).toDescriptor, false)
+            mv.visitFieldInsn(GETSTATIC, BackendObjType.Unit.jvmName.toInternalName, BackendObjType.Unit.SingletonField.name, BackendObjType.Unit.jvmName.toDescriptor)
+
+          case IoOp.NewId =>
+            import BytecodeInstructions.*
+            BytecodeInstructions.addLoc(loc)
+            compileExpr(exp)
+            POP()
+            val jGlobal = JvmName(JvmName.DevFlixRuntime, "Global")
+            INVOKESTATIC(jGlobal, "newId", mkDescriptor()(BackendType.Int64))
+
+          case IoOp.TcpSocketRead =>
+            import BytecodeInstructions.*
+            BytecodeInstructions.addLoc(loc)
+
+            val SimpleType.Tuple(retElmTypes) = tpe
+            val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+            val SimpleType.Tuple(argElmTypes) = exp.tpe
+            val argTupleType = BackendObjType.Tuple(argElmTypes.map(BackendType.toBackendType))
+
+            val jGlobal = BackendObjType.Global.jvmName
+            val jSocket = JvmName.ofClass(classOf[java.net.Socket])
+            val socketTpe = BackendType.Reference(BackendObjType.Native(jSocket))
+            val jInputStream = JvmName.ofClass(classOf[java.io.InputStream])
+            val inputStreamTpe = BackendType.Reference(BackendObjType.Native(jInputStream))
+            val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+
+            // Locals.
+            val idSlot = 2100
+            val bufSlot = 2102
+            val numSlot = 2103
+            val exSlot = 2104
+            val sockSlot = 2105
+
+            // Extract (socketId, buffer) from the tuple argument.
+            compileExpr(exp) // tuple
+            DUP() // tuple, tuple
+            GETFIELD(argTupleType.IndexField(0)) // tuple, id
+            mv.visitVarInsn(LSTORE, idSlot) // tuple
+            GETFIELD(argTupleType.IndexField(1)) // buffer
+            ASTORE(bufSlot)
+
+            // socket = Global.getTcpSocket(id)
+            LLOAD(idSlot)
+            INVOKESTATIC(jGlobal, "getTcpSocket", mkDescriptor(BackendType.Int64)(socketTpe))
+            ASTORE(sockSlot)
+
+            val hasSocket = new Label()
+            val after = new Label()
+            ALOAD(sockSlot)
+            mv.visitJumpInsn(IFNONNULL, hasSocket)
+
+            // Return (false, 0, "invalid TCP socket handle.")
+            NEW(retTupleType.jvmName)
+            DUP()
+            pushBool(false)
+            ICONST_0()
+            pushString("invalid TCP socket handle.")
+            INVOKESPECIAL(retTupleType.Constructor)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(hasSocket)
+
+            // Try-catch around socket I/O.
+            val tryStart = new Label()
+            val tryEnd = new Label()
+            val handlerStart = new Label()
+            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, jIOException.toInternalName)
+
+            mv.visitLabel(tryStart)
+            // numRead = socket.getInputStream().read(buffer)
+            ALOAD(sockSlot)
+            INVOKEVIRTUAL(jSocket, "getInputStream", mkDescriptor()(inputStreamTpe))
+            ALOAD(bufSlot)
+            INVOKEVIRTUAL(jInputStream, "read", mkDescriptor(BackendType.Array(BackendType.Int8))(BackendType.Int32))
+
+            // if (numRead == -1) numRead = 0
+            val notEof = new Label()
+            val afterEof = new Label()
+            DUP()
+            ICONST_M1()
+            mv.visitJumpInsn(IF_ICMPNE, notEof)
+            POP()
+            ICONST_0()
+            mv.visitLabel(notEof)
+            mv.visitLabel(afterEof)
+            mv.visitVarInsn(ISTORE, numSlot)
+
+            // Return (true, numRead, "")
+            NEW(retTupleType.jvmName)
+            DUP()
+            pushBool(true)
+            ILOAD(numSlot)
+            pushString("")
+            INVOKESPECIAL(retTupleType.Constructor)
+            mv.visitLabel(tryEnd)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(handlerStart)
+            ASTORE(exSlot)
+            NEW(retTupleType.jvmName)
+            DUP()
+            pushBool(false)
+            ICONST_0()
+            ALOAD(exSlot)
+            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+            INVOKESPECIAL(retTupleType.Constructor)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(after)
+
+          case IoOp.TcpSocketWrite =>
+            import BytecodeInstructions.*
+            BytecodeInstructions.addLoc(loc)
+
+            val SimpleType.Tuple(retElmTypes) = tpe
+            val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+            val SimpleType.Tuple(argElmTypes) = exp.tpe
+            val argTupleType = BackendObjType.Tuple(argElmTypes.map(BackendType.toBackendType))
+
+            val jGlobal = BackendObjType.Global.jvmName
+            val jSocket = JvmName.ofClass(classOf[java.net.Socket])
+            val socketTpe = BackendType.Reference(BackendObjType.Native(jSocket))
+            val jOutputStream = JvmName.ofClass(classOf[java.io.OutputStream])
+            val outputStreamTpe = BackendType.Reference(BackendObjType.Native(jOutputStream))
+            val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+
+            // Locals.
+            val idSlot = 2110
+            val bufSlot = 2112
+            val lenSlot = 2113
+            val exSlot = 2114
+            val sockSlot = 2115
+
+            // Extract (socketId, buffer) from the tuple argument.
+            compileExpr(exp) // tuple
+            DUP() // tuple, tuple
+            GETFIELD(argTupleType.IndexField(0)) // tuple, id
+            mv.visitVarInsn(LSTORE, idSlot) // tuple
+            GETFIELD(argTupleType.IndexField(1)) // buffer
+            ASTORE(bufSlot)
+
+            // socket = Global.getTcpSocket(id)
+            LLOAD(idSlot)
+            INVOKESTATIC(jGlobal, "getTcpSocket", mkDescriptor(BackendType.Int64)(socketTpe))
+            ASTORE(sockSlot)
+
+            val hasSocket = new Label()
+            val after = new Label()
+            ALOAD(sockSlot)
+            mv.visitJumpInsn(IFNONNULL, hasSocket)
+
+            // Return (false, 0, "invalid TCP socket handle.")
+            NEW(retTupleType.jvmName)
+            DUP()
+            pushBool(false)
+            ICONST_0()
+            pushString("invalid TCP socket handle.")
+            INVOKESPECIAL(retTupleType.Constructor)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(hasSocket)
+
+            // Try-catch around socket I/O.
+            val tryStart = new Label()
+            val tryEnd = new Label()
+            val handlerStart = new Label()
+            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, jIOException.toInternalName)
+
+            mv.visitLabel(tryStart)
+            // socket.getOutputStream().write(buffer)
+            ALOAD(sockSlot)
+            INVOKEVIRTUAL(jSocket, "getOutputStream", mkDescriptor()(outputStreamTpe))
+            ALOAD(bufSlot)
+            INVOKEVIRTUAL(jOutputStream, "write", mkDescriptor(BackendType.Array(BackendType.Int8))(VoidableType.Void))
+
+            // len = buffer.length
+            ALOAD(bufSlot)
+            ARRAYLENGTH()
+            mv.visitVarInsn(ISTORE, lenSlot)
+
+            // Return (true, len, "")
+            NEW(retTupleType.jvmName)
+            DUP()
+            pushBool(true)
+            ILOAD(lenSlot)
+            pushString("")
+            INVOKESPECIAL(retTupleType.Constructor)
+            mv.visitLabel(tryEnd)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(handlerStart)
+            ASTORE(exSlot)
+            NEW(retTupleType.jvmName)
+            DUP()
+            pushBool(false)
+            ICONST_0()
+            ALOAD(exSlot)
+            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+            INVOKESPECIAL(retTupleType.Constructor)
+            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(after)
+
+          case IoOp.TcpSocketConnect =>
+            import BytecodeInstructions.*
+            BytecodeInstructions.addLoc(loc)
+
+            val SimpleType.Tuple(retElmTypes) = tpe
+            val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+            val SimpleType.Tuple(argElmTypes) = exp.tpe
+            val argTupleType = BackendObjType.Tuple(argElmTypes.map(BackendType.toBackendType))
+
+            val jGlobal = BackendObjType.Global.jvmName
+            val jInetAddress = JvmName.ofClass(classOf[java.net.InetAddress])
+            val inetAddressTpe = BackendType.Reference(BackendObjType.Native(jInetAddress))
+            val jSocket = JvmName.ofClass(classOf[java.net.Socket])
+            val socketTpe = BackendType.Reference(BackendObjType.Native(jSocket))
+            val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+            val jIllegalArg = JvmName.ofClass(classOf[java.lang.IllegalArgumentException])
+
+            // Locals.
+            val bytesSlot = 2160
+            val portSlot = 2161
+            val inetSlot = 2162
+            val sockSlot = 2163
+            val idSlot = 2164
+            val exSlot = 2166
+
+            // Extract (addrBytes, port) from the tuple argument.
+            compileExpr(exp) // tuple
+            DUP() // tuple, tuple
+            GETFIELD(argTupleType.IndexField(0)) // tuple, bytes
+            ASTORE(bytesSlot) // tuple
+            GETFIELD(argTupleType.IndexField(1)) // port
+            mv.visitVarInsn(ISTORE, portSlot)
+
+            // Try-catch around connect.
+            val tryStart = new Label()
+            val tryEnd = new Label()
+            val handlerInvalid = new Label()
+            val handlerIo = new Label()
+            val after = new Label()
+
+            mv.visitTryCatchBlock(tryStart, tryEnd, handlerInvalid, jIllegalArg.toInternalName)
+            mv.visitTryCatchBlock(tryStart, tryEnd, handlerIo, jIOException.toInternalName)
+
+            mv.visitLabel(tryStart)
+
+            // inet = InetAddress.getByAddress(bytes)
+            ALOAD(bytesSlot)
+            INVOKESTATIC(jInetAddress, "getByAddress", mkDescriptor(BackendType.Array(BackendType.Int8))(inetAddressTpe))
+            ASTORE(inetSlot)
+
+            // sock = new Socket(inet, port)
+            NEW(jSocket)
+            DUP()
+            ALOAD(inetSlot)
+            ILOAD(portSlot)
+            INVOKESPECIAL(jSocket, JvmName.ConstructorMethod, mkDescriptor(inetAddressTpe, BackendType.Int32)(VoidableType.Void))
+            ASTORE(sockSlot)
+
+            // id = Global.newId()
+            INVOKESTATIC(jGlobal, "newId", mkDescriptor()(BackendType.Int64))
+            mv.visitVarInsn(LSTORE, idSlot)
+
+            // Global.putTcpSocket(id, sock)
+            LLOAD(idSlot)
+            ALOAD(sockSlot)
+            INVOKESTATIC(jGlobal, "putTcpSocket", mkDescriptor(BackendType.Int64, socketTpe)(VoidableType.Void))
+
+            // Return (true, id, Other, "")
+            NEW(retTupleType.jvmName)
+            DUP()
+            pushBool(true)
+            LLOAD(idSlot)
+            pushInt(14)
+            pushString("")
+            INVOKESPECIAL(retTupleType.Constructor)
+            mv.visitLabel(tryEnd)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(handlerInvalid)
+            ASTORE(exSlot)
+            NEW(retTupleType.jvmName)
+            DUP()
+            pushBool(false)
+            LCONST_0()
+            pushInt(4)
+            ALOAD(exSlot)
+            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+            INVOKESPECIAL(retTupleType.Constructor)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(handlerIo)
+            ASTORE(exSlot)
+            NEW(retTupleType.jvmName)
+            DUP()
+            pushBool(false)
+            LCONST_0()
+            pushInt(14)
+            ALOAD(exSlot)
+            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+            INVOKESPECIAL(retTupleType.Constructor)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(after)
+
+	          case IoOp.TcpSocketClose =>
+	            import BytecodeInstructions.*
+	            BytecodeInstructions.addLoc(loc)
+
+	            val SimpleType.Tuple(retElmTypes) = tpe
+	            val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+	            val jGlobal = BackendObjType.Global.jvmName
+	            val jSocket = JvmName.ofClass(classOf[java.net.Socket])
+	            val socketTpe = BackendType.Reference(BackendObjType.Native(jSocket))
+	            val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+
+	            // Locals.
+	            val idSlot = 2120
+	            val sockSlot = 2122
+	            val exSlot = 2123
+
+	            // Extract socket id.
+	            compileExpr(exp)
+	            mv.visitVarInsn(LSTORE, idSlot)
+
+	            // socket = Global.removeTcpSocket(id)
+	            LLOAD(idSlot)
+	            INVOKESTATIC(jGlobal, "removeTcpSocket", mkDescriptor(BackendType.Int64)(socketTpe))
+	            ASTORE(sockSlot)
+
+	            val hasSocket = new Label()
+	            val after = new Label()
+	            ALOAD(sockSlot)
+	            mv.visitJumpInsn(IFNONNULL, hasSocket)
+
+	            // Return (true, "")
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(true)
+	            pushString("")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(hasSocket)
+
+	            // Try-catch around socket.close().
+	            val tryStart = new Label()
+	            val tryEnd = new Label()
+	            val handlerStart = new Label()
+	            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, jIOException.toInternalName)
+
+	            mv.visitLabel(tryStart)
+	            ALOAD(sockSlot)
+	            INVOKEVIRTUAL(jSocket, "close", mkDescriptor()(VoidableType.Void))
+
+	            // Return (true, "")
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(true)
+	            pushString("")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitLabel(tryEnd)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(handlerStart)
+	            ASTORE(exSlot)
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            ALOAD(exSlot)
+	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(after)
+
+	          case IoOp.TcpServerBind =>
+	            import BytecodeInstructions.*
+	            BytecodeInstructions.addLoc(loc)
+
+	            val SimpleType.Tuple(retElmTypes) = tpe
+	            val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+	            val SimpleType.Tuple(argElmTypes) = exp.tpe
+	            val argTupleType = BackendObjType.Tuple(argElmTypes.map(BackendType.toBackendType))
+
+	            val jGlobal = BackendObjType.Global.jvmName
+	            val jInetAddress = JvmName.ofClass(classOf[java.net.InetAddress])
+	            val inetAddressTpe = BackendType.Reference(BackendObjType.Native(jInetAddress))
+	            val jServerSocket = JvmName.ofClass(classOf[java.net.ServerSocket])
+	            val serverSocketTpe = BackendType.Reference(BackendObjType.Native(jServerSocket))
+	            val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+	            val jIllegalArg = JvmName.ofClass(classOf[java.lang.IllegalArgumentException])
+
+	            // Locals.
+	            val bytesSlot = 2170
+	            val portSlot = 2171
+	            val inetSlot = 2172
+	            val serverSlot = 2173
+	            val idSlot = 2174
+	            val exSlot = 2176
+
+	            // Extract (addrBytes, port) from the tuple argument.
+	            compileExpr(exp) // tuple
+	            DUP() // tuple, tuple
+	            GETFIELD(argTupleType.IndexField(0)) // tuple, bytes
+	            ASTORE(bytesSlot) // tuple
+	            GETFIELD(argTupleType.IndexField(1)) // port
+	            mv.visitVarInsn(ISTORE, portSlot)
+
+	            // Try-catch around bind.
+	            val tryStart = new Label()
+	            val tryEnd = new Label()
+	            val handlerInvalid = new Label()
+	            val handlerIo = new Label()
+	            val after = new Label()
+
+	            mv.visitTryCatchBlock(tryStart, tryEnd, handlerInvalid, jIllegalArg.toInternalName)
+	            mv.visitTryCatchBlock(tryStart, tryEnd, handlerIo, jIOException.toInternalName)
+
+	            mv.visitLabel(tryStart)
+
+	            // inet = InetAddress.getByAddress(bytes)
+	            ALOAD(bytesSlot)
+	            INVOKESTATIC(jInetAddress, "getByAddress", mkDescriptor(BackendType.Array(BackendType.Int8))(inetAddressTpe))
+	            ASTORE(inetSlot)
+
+	            // server = new ServerSocket(port, 50, inet)
+	            NEW(jServerSocket)
+	            DUP()
+	            ILOAD(portSlot)
+	            pushInt(50)
+	            ALOAD(inetSlot)
+	            INVOKESPECIAL(jServerSocket, JvmName.ConstructorMethod, mkDescriptor(BackendType.Int32, BackendType.Int32, inetAddressTpe)(VoidableType.Void))
+	            ASTORE(serverSlot)
+
+	            // id = Global.newId()
+	            INVOKESTATIC(jGlobal, "newId", mkDescriptor()(BackendType.Int64))
+	            mv.visitVarInsn(LSTORE, idSlot)
+
+	            // Global.putTcpServer(id, server)
+	            LLOAD(idSlot)
+	            ALOAD(serverSlot)
+	            INVOKESTATIC(jGlobal, "putTcpServer", mkDescriptor(BackendType.Int64, serverSocketTpe)(VoidableType.Void))
+
+	            // Return (true, id, Other, "")
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(true)
+	            LLOAD(idSlot)
+	            pushInt(14)
+	            pushString("")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitLabel(tryEnd)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(handlerInvalid)
+	            ASTORE(exSlot)
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            LCONST_0()
+	            pushInt(4)
+	            ALOAD(exSlot)
+	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(handlerIo)
+	            ASTORE(exSlot)
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            LCONST_0()
+	            pushInt(14)
+	            ALOAD(exSlot)
+	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(after)
+
+	          case IoOp.TcpServerAccept =>
+	            import BytecodeInstructions.*
+	            BytecodeInstructions.addLoc(loc)
+
+	            val SimpleType.Tuple(retElmTypes) = tpe
+	            val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+	            val jGlobal = BackendObjType.Global.jvmName
+	            val jServerSocket = JvmName.ofClass(classOf[java.net.ServerSocket])
+	            val serverSocketTpe = BackendType.Reference(BackendObjType.Native(jServerSocket))
+	            val jSocket = JvmName.ofClass(classOf[java.net.Socket])
+	            val socketTpe = BackendType.Reference(BackendObjType.Native(jSocket))
+	            val jSocketTimeout = JvmName.ofClass(classOf[java.net.SocketTimeoutException])
+	            val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+
+	            // Locals.
+	            val serverIdSlot = 2180
+	            val serverSlot = 2182
+	            val sockSlot = 2183
+	            val sockIdSlot = 2184
+	            val exSlot = 2186
+
+	            // Extract server id.
+	            compileExpr(exp)
+	            mv.visitVarInsn(LSTORE, serverIdSlot)
+
+	            // server = Global.getTcpServer(id)
+	            LLOAD(serverIdSlot)
+	            INVOKESTATIC(jGlobal, "getTcpServer", mkDescriptor(BackendType.Int64)(serverSocketTpe))
+	            ASTORE(serverSlot)
+
+	            val hasServer = new Label()
+	            val after = new Label()
+	            ALOAD(serverSlot)
+	            mv.visitJumpInsn(IFNONNULL, hasServer)
+
+	            // Return (false, 0, Other, "invalid TCP server handle.")
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            LCONST_0()
+	            pushInt(14)
+	            pushString("invalid TCP server handle.")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(hasServer)
+
+	            // Try-catch around accept.
+	            val tryStart = new Label()
+	            val tryEnd = new Label()
+	            val handlerTimeout = new Label()
+	            val handlerIo = new Label()
+	            mv.visitTryCatchBlock(tryStart, tryEnd, handlerTimeout, jSocketTimeout.toInternalName)
+	            mv.visitTryCatchBlock(tryStart, tryEnd, handlerIo, jIOException.toInternalName)
+
+	            mv.visitLabel(tryStart)
+
+	            // sock = server.accept()
+	            ALOAD(serverSlot)
+	            INVOKEVIRTUAL(jServerSocket, "accept", mkDescriptor()(socketTpe))
+	            ASTORE(sockSlot)
+
+	            // sockId = Global.newId()
+	            INVOKESTATIC(jGlobal, "newId", mkDescriptor()(BackendType.Int64))
+	            mv.visitVarInsn(LSTORE, sockIdSlot)
+
+	            // Global.putTcpSocket(sockId, sock)
+	            LLOAD(sockIdSlot)
+	            ALOAD(sockSlot)
+	            INVOKESTATIC(jGlobal, "putTcpSocket", mkDescriptor(BackendType.Int64, socketTpe)(VoidableType.Void))
+
+	            // Return (true, sockId, Other, "")
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(true)
+	            LLOAD(sockIdSlot)
+	            pushInt(14)
+	            pushString("")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitLabel(tryEnd)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(handlerTimeout)
+	            ASTORE(exSlot)
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            LCONST_0()
+	            pushInt(10)
+	            ALOAD(exSlot)
+	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(handlerIo)
+	            ASTORE(exSlot)
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            LCONST_0()
+	            pushInt(14)
+	            ALOAD(exSlot)
+	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(after)
+
+	          case IoOp.TcpServerClose =>
+	            import BytecodeInstructions.*
+	            BytecodeInstructions.addLoc(loc)
+
+	            val SimpleType.Tuple(retElmTypes) = tpe
+	            val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+	            val jGlobal = BackendObjType.Global.jvmName
+	            val jServerSocket = JvmName.ofClass(classOf[java.net.ServerSocket])
+	            val serverSocketTpe = BackendType.Reference(BackendObjType.Native(jServerSocket))
+	            val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+
+	            // Locals.
+	            val idSlot = 2130
+	            val serverSlot = 2132
+	            val exSlot = 2133
+
+	            // Extract server id.
+	            compileExpr(exp)
+	            mv.visitVarInsn(LSTORE, idSlot)
+
+	            // server = Global.removeTcpServer(id)
+	            LLOAD(idSlot)
+	            INVOKESTATIC(jGlobal, "removeTcpServer", mkDescriptor(BackendType.Int64)(serverSocketTpe))
+	            ASTORE(serverSlot)
+
+	            val hasServer = new Label()
+	            val after = new Label()
+	            ALOAD(serverSlot)
+	            mv.visitJumpInsn(IFNONNULL, hasServer)
+
+	            // Return (true, "")
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(true)
+	            pushString("")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(hasServer)
+
+	            // Try-catch around server.close().
+	            val tryStart = new Label()
+	            val tryEnd = new Label()
+	            val handlerStart = new Label()
+	            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, jIOException.toInternalName)
+
+	            mv.visitLabel(tryStart)
+	            ALOAD(serverSlot)
+	            INVOKEVIRTUAL(jServerSocket, "close", mkDescriptor()(VoidableType.Void))
+
+	            // Return (true, "")
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(true)
+	            pushString("")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitLabel(tryEnd)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(handlerStart)
+	            ASTORE(exSlot)
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            ALOAD(exSlot)
+	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(after)
+
+	          case IoOp.ProcessExec =>
+	            import BytecodeInstructions.*
+	            BytecodeInstructions.addLoc(loc)
+
+	            val SimpleType.Tuple(retElmTypes) = tpe
+	            val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+	            val SimpleType.Tuple(argElmTypes) = exp.tpe
+	            val argTupleType = BackendObjType.Tuple(argElmTypes.map(BackendType.toBackendType))
+
+	            val jGlobal = BackendObjType.Global.jvmName
+	            val jProcess = JvmName.ofClass(classOf[java.lang.Process])
+	            val processTpe = BackendType.Reference(BackendObjType.Native(jProcess))
+	            val jProcessBuilder = JvmName.ofClass(classOf[java.lang.ProcessBuilder])
+	            val processBuilderTpe = BackendType.Reference(BackendObjType.Native(jProcessBuilder))
+	            val jFile = JvmName.ofClass(classOf[java.io.File])
+	            val fileTpe = BackendType.Reference(BackendObjType.Native(jFile))
+	            val jMap = JvmName(JvmName.JavaUtil, "Map")
+	            val jIllegalArg = JvmName.ofClass(classOf[java.lang.IllegalArgumentException])
+	            val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+
+	            // Locals.
+	            val argvSlot = 2190
+	            val hasCwdSlot = 2191
+	            val cwdSlot = 2192
+	            val envPairsSlot = 2193
+	            val pbSlot = 2194
+	            val envMapSlot = 2195
+	            val idxSlot = 2196
+	            val procSlot = 2197
+	            val idSlot = 2198
+	            val exSlot = 2200
+
+	            // Extract (argv, hasCwd, cwd, envPairs) from the tuple argument.
+	            compileExpr(exp) // tuple
+	            DUP() // tuple, tuple
+	            GETFIELD(argTupleType.IndexField(0)) // tuple, argv
+	            ASTORE(argvSlot) // tuple
+	            DUP() // tuple, tuple
+	            GETFIELD(argTupleType.IndexField(1)) // tuple, hasCwd
+	            mv.visitVarInsn(ISTORE, hasCwdSlot) // tuple
+	            DUP() // tuple, tuple
+	            GETFIELD(argTupleType.IndexField(2)) // tuple, cwd
+	            ASTORE(cwdSlot) // tuple
+	            GETFIELD(argTupleType.IndexField(3)) // envPairs
+	            ASTORE(envPairsSlot)
+
+	            // Try-catch around process execution.
+	            val tryStart = new Label()
+	            val tryEnd = new Label()
+	            val handlerInvalid = new Label()
+	            val handlerIo = new Label()
+	            val after = new Label()
+
+	            mv.visitTryCatchBlock(tryStart, tryEnd, handlerInvalid, jIllegalArg.toInternalName)
+	            mv.visitTryCatchBlock(tryStart, tryEnd, handlerIo, jIOException.toInternalName)
+
+	            mv.visitLabel(tryStart)
+
+	            // pb = new ProcessBuilder(argv)
+	            NEW(jProcessBuilder)
+	            DUP()
+	            ALOAD(argvSlot)
+	            INVOKESPECIAL(jProcessBuilder, JvmName.ConstructorMethod, mkDescriptor(BackendType.Array(BackendType.String))(VoidableType.Void))
+	            ASTORE(pbSlot)
+
+	            // env = pb.environment()
+	            ALOAD(pbSlot)
+	            INVOKEVIRTUAL(jProcessBuilder, "environment", mkDescriptor()(jMap.toTpe))
+	            ASTORE(envMapSlot)
+
+	            // for (i = 0; i < envPairs.length; i += 2) env.put(envPairs[i], envPairs[i+1])
+	            ICONST_0()
+	            mv.visitVarInsn(ISTORE, idxSlot)
+
+	            val loopStart = new Label()
+	            val loopEnd = new Label()
+	            mv.visitLabel(loopStart)
+
+	            ILOAD(idxSlot)
+	            ALOAD(envPairsSlot)
+	            ARRAYLENGTH()
+	            mv.visitJumpInsn(IF_ICMPGE, loopEnd)
+
+	            // env.put(envPairs[i], envPairs[i+1])
+	            ALOAD(envMapSlot)
+	            ALOAD(envPairsSlot)
+	            ILOAD(idxSlot)
+	            mv.visitInsn(AALOAD)
+	            ALOAD(envPairsSlot)
+	            ILOAD(idxSlot)
+	            ICONST_1()
+	            IADD()
+	            mv.visitInsn(AALOAD)
+	            INVOKEINTERFACE(jMap, "put", mkDescriptor(BackendType.Object, BackendType.Object)(BackendType.Object))
+	            POP()
+
+	            mv.visitIincInsn(idxSlot, 2)
+	            mv.visitJumpInsn(GOTO, loopStart)
+
+	            mv.visitLabel(loopEnd)
+
+	            // if (hasCwd) pb.directory(new File(cwd))
+	            val skipCwd = new Label()
+	            ILOAD(hasCwdSlot)
+	            mv.visitJumpInsn(IFEQ, skipCwd)
+
+	            ALOAD(pbSlot)
+	            NEW(jFile)
+	            DUP()
+	            ALOAD(cwdSlot)
+	            INVOKESPECIAL(jFile, JvmName.ConstructorMethod, mkDescriptor(BackendType.String)(VoidableType.Void))
+	            INVOKEVIRTUAL(jProcessBuilder, "directory", mkDescriptor(fileTpe)(processBuilderTpe))
+	            POP()
+
+	            mv.visitLabel(skipCwd)
+
+	            // proc = pb.start()
+	            ALOAD(pbSlot)
+	            INVOKEVIRTUAL(jProcessBuilder, "start", mkDescriptor()(processTpe))
+	            ASTORE(procSlot)
+
+	            // id = Global.newId()
+	            INVOKESTATIC(jGlobal, "newId", mkDescriptor()(BackendType.Int64))
+	            mv.visitVarInsn(LSTORE, idSlot)
+
+	            // Global.putProcess(id, proc)
+	            LLOAD(idSlot)
+	            ALOAD(procSlot)
+	            INVOKESTATIC(jGlobal, "putProcess", mkDescriptor(BackendType.Int64, processTpe)(VoidableType.Void))
+
+	            // Return (true, id, Other, "")
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(true)
+	            LLOAD(idSlot)
+	            pushInt(14)
+	            pushString("")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitLabel(tryEnd)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(handlerInvalid)
+	            ASTORE(exSlot)
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            LCONST_0()
+	            pushInt(4)
+	            ALOAD(exSlot)
+	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(handlerIo)
+	            ASTORE(exSlot)
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            LCONST_0()
+	            pushInt(14)
+	            ALOAD(exSlot)
+	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(after)
+
+	          case IoOp.ProcessExitValue =>
+	            import BytecodeInstructions.*
+	            BytecodeInstructions.addLoc(loc)
+
+	            val SimpleType.Tuple(retElmTypes) = tpe
+	            val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+	            val jGlobal = BackendObjType.Global.jvmName
+	            val jProcess = JvmName.ofClass(classOf[java.lang.Process])
+	            val processTpe = BackendType.Reference(BackendObjType.Native(jProcess))
+	            val jIllegalThreadState = JvmName.ofClass(classOf[java.lang.IllegalThreadStateException])
+	            val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+
+	            // Locals.
+	            val idSlot = 2210
+	            val procSlot = 2212
+	            val exitSlot = 2213
+	            val exSlot = 2214
+
+	            // Extract process id.
+	            compileExpr(exp)
+	            mv.visitVarInsn(LSTORE, idSlot)
+
+	            // proc = Global.getProcess(id)
+	            LLOAD(idSlot)
+	            INVOKESTATIC(jGlobal, "getProcess", mkDescriptor(BackendType.Int64)(processTpe))
+	            ASTORE(procSlot)
+
+	            val hasProc = new Label()
+	            val after = new Label()
+	            ALOAD(procSlot)
+	            mv.visitJumpInsn(IFNONNULL, hasProc)
+
+	            // Return (false, 0, Other, "invalid process handle.")
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            ICONST_0()
+	            pushInt(14)
+	            pushString("invalid process handle.")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(hasProc)
+
+	            val tryStart = new Label()
+	            val tryEnd = new Label()
+	            val handlerStart = new Label()
+	            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, jIllegalThreadState.toInternalName)
+	            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, jIOException.toInternalName)
+
+	            mv.visitLabel(tryStart)
+	            ALOAD(procSlot)
+	            INVOKEVIRTUAL(jProcess, "exitValue", mkDescriptor()(BackendType.Int32))
+	            mv.visitVarInsn(ISTORE, exitSlot)
+
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(true)
+	            ILOAD(exitSlot)
+	            pushInt(14)
+	            pushString("")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitLabel(tryEnd)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(handlerStart)
+	            ASTORE(exSlot)
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            ICONST_0()
+	            pushInt(14)
+	            ALOAD(exSlot)
+	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(after)
+
+	          case IoOp.ProcessIsAlive =>
+	            import BytecodeInstructions.*
+	            BytecodeInstructions.addLoc(loc)
+
+	            val SimpleType.Tuple(retElmTypes) = tpe
+	            val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+	            val jGlobal = BackendObjType.Global.jvmName
+	            val jProcess = JvmName.ofClass(classOf[java.lang.Process])
+	            val processTpe = BackendType.Reference(BackendObjType.Native(jProcess))
+	            val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+
+	            // Locals.
+	            val idSlot = 2220
+	            val procSlot = 2222
+	            val aliveSlot = 2223
+	            val exSlot = 2224
+
+	            // Extract process id.
+	            compileExpr(exp)
+	            mv.visitVarInsn(LSTORE, idSlot)
+
+	            // proc = Global.getProcess(id)
+	            LLOAD(idSlot)
+	            INVOKESTATIC(jGlobal, "getProcess", mkDescriptor(BackendType.Int64)(processTpe))
+	            ASTORE(procSlot)
+
+	            val hasProc = new Label()
+	            val after = new Label()
+	            ALOAD(procSlot)
+	            mv.visitJumpInsn(IFNONNULL, hasProc)
+
+	            // Return (false, false, Other, "invalid process handle.")
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            pushBool(false)
+	            pushInt(14)
+	            pushString("invalid process handle.")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(hasProc)
+
+	            val tryStart = new Label()
+	            val tryEnd = new Label()
+	            val handlerStart = new Label()
+	            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, jIOException.toInternalName)
+
+	            mv.visitLabel(tryStart)
+	            ALOAD(procSlot)
+	            INVOKEVIRTUAL(jProcess, "isAlive", mkDescriptor()(BackendType.Bool))
+	            mv.visitVarInsn(ISTORE, aliveSlot)
+
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(true)
+	            ILOAD(aliveSlot)
+	            pushInt(14)
+	            pushString("")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitLabel(tryEnd)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(handlerStart)
+	            ASTORE(exSlot)
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            pushBool(false)
+	            pushInt(14)
+	            ALOAD(exSlot)
+	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(after)
+
+	          case IoOp.ProcessPid =>
+	            import BytecodeInstructions.*
+	            BytecodeInstructions.addLoc(loc)
+
+	            val SimpleType.Tuple(retElmTypes) = tpe
+	            val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+	            val jGlobal = BackendObjType.Global.jvmName
+	            val jProcess = JvmName.ofClass(classOf[java.lang.Process])
+	            val processTpe = BackendType.Reference(BackendObjType.Native(jProcess))
+	            val jUnsupported = JvmName.ofClass(classOf[java.lang.UnsupportedOperationException])
+	            val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+
+	            // Locals.
+	            val idSlot = 2230
+	            val procSlot = 2232
+	            val pidSlot = 2233
+	            val exSlot = 2235
+
+	            // Extract process id.
+	            compileExpr(exp)
+	            mv.visitVarInsn(LSTORE, idSlot)
+
+	            // proc = Global.getProcess(id)
+	            LLOAD(idSlot)
+	            INVOKESTATIC(jGlobal, "getProcess", mkDescriptor(BackendType.Int64)(processTpe))
+	            ASTORE(procSlot)
+
+	            val hasProc = new Label()
+	            val after = new Label()
+	            ALOAD(procSlot)
+	            mv.visitJumpInsn(IFNONNULL, hasProc)
+
+	            // Return (false, 0, Other, "invalid process handle.")
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            LCONST_0()
+	            pushInt(14)
+	            pushString("invalid process handle.")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(hasProc)
+
+	            val tryStart = new Label()
+	            val tryEnd = new Label()
+	            val handlerUnsupported = new Label()
+	            val handlerIo = new Label()
+	            mv.visitTryCatchBlock(tryStart, tryEnd, handlerUnsupported, jUnsupported.toInternalName)
+	            mv.visitTryCatchBlock(tryStart, tryEnd, handlerIo, jIOException.toInternalName)
+
+	            mv.visitLabel(tryStart)
+	            ALOAD(procSlot)
+	            INVOKEVIRTUAL(jProcess, "pid", mkDescriptor()(BackendType.Int64))
+	            mv.visitVarInsn(LSTORE, pidSlot)
+
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(true)
+	            LLOAD(pidSlot)
+	            pushInt(14)
+	            pushString("")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitLabel(tryEnd)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(handlerUnsupported)
+	            ASTORE(exSlot)
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            LCONST_0()
+	            pushInt(12)
+	            ALOAD(exSlot)
+	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(handlerIo)
+	            ASTORE(exSlot)
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            LCONST_0()
+	            pushInt(14)
+	            ALOAD(exSlot)
+	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(after)
+
+	          case IoOp.ProcessStop =>
+	            import BytecodeInstructions.*
+	            BytecodeInstructions.addLoc(loc)
+
+	            val SimpleType.Tuple(retElmTypes) = tpe
+	            val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+	            val jGlobal = BackendObjType.Global.jvmName
+	            val jProcess = JvmName.ofClass(classOf[java.lang.Process])
+	            val processTpe = BackendType.Reference(BackendObjType.Native(jProcess))
+	            val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+
+	            // Locals.
+	            val idSlot = 2240
+	            val procSlot = 2242
+	            val exSlot = 2243
+
+	            // Extract process id.
+	            compileExpr(exp)
+	            mv.visitVarInsn(LSTORE, idSlot)
+
+	            // proc = Global.getProcess(id)
+	            LLOAD(idSlot)
+	            INVOKESTATIC(jGlobal, "getProcess", mkDescriptor(BackendType.Int64)(processTpe))
+	            ASTORE(procSlot)
+
+	            val hasProc = new Label()
+	            val after = new Label()
+	            ALOAD(procSlot)
+	            mv.visitJumpInsn(IFNONNULL, hasProc)
+
+	            // Return (false, (), Other, "invalid process handle.")
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            GETSTATIC(BackendObjType.Unit.SingletonField)
+	            pushInt(14)
+	            pushString("invalid process handle.")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(hasProc)
+
+	            val tryStart = new Label()
+	            val tryEnd = new Label()
+	            val handlerStart = new Label()
+	            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, jIOException.toInternalName)
+
+	            mv.visitLabel(tryStart)
+	            ALOAD(procSlot)
+	            INVOKEVIRTUAL(jProcess, "destroy", mkDescriptor()(VoidableType.Void))
+
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(true)
+	            GETSTATIC(BackendObjType.Unit.SingletonField)
+	            pushInt(14)
+	            pushString("")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitLabel(tryEnd)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(handlerStart)
+	            ASTORE(exSlot)
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            GETSTATIC(BackendObjType.Unit.SingletonField)
+	            pushInt(14)
+	            ALOAD(exSlot)
+	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(after)
+
+	          case IoOp.ProcessWaitFor =>
+	            import BytecodeInstructions.*
+	            BytecodeInstructions.addLoc(loc)
+
+	            val SimpleType.Tuple(retElmTypes) = tpe
+	            val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+	            val jGlobal = BackendObjType.Global.jvmName
+	            val jProcess = JvmName.ofClass(classOf[java.lang.Process])
+	            val processTpe = BackendType.Reference(BackendObjType.Native(jProcess))
+	            val jInterrupted = JvmName.ofClass(classOf[java.lang.InterruptedException])
+	            val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+
+	            // Locals.
+	            val idSlot = 2250
+	            val procSlot = 2252
+	            val exitSlot = 2253
+	            val exSlot = 2254
+
+	            // Extract process id.
+	            compileExpr(exp)
+	            mv.visitVarInsn(LSTORE, idSlot)
+
+	            // proc = Global.getProcess(id)
+	            LLOAD(idSlot)
+	            INVOKESTATIC(jGlobal, "getProcess", mkDescriptor(BackendType.Int64)(processTpe))
+	            ASTORE(procSlot)
+
+	            val hasProc = new Label()
+	            val after = new Label()
+	            ALOAD(procSlot)
+	            mv.visitJumpInsn(IFNONNULL, hasProc)
+
+	            // Return (false, 0, Other, "invalid process handle.")
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            ICONST_0()
+	            pushInt(14)
+	            pushString("invalid process handle.")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(hasProc)
+
+	            val tryStart = new Label()
+	            val tryEnd = new Label()
+	            val handlerInterrupted = new Label()
+	            val handlerIo = new Label()
+	            mv.visitTryCatchBlock(tryStart, tryEnd, handlerInterrupted, jInterrupted.toInternalName)
+	            mv.visitTryCatchBlock(tryStart, tryEnd, handlerIo, jIOException.toInternalName)
+
+	            mv.visitLabel(tryStart)
+	            ALOAD(procSlot)
+	            INVOKEVIRTUAL(jProcess, "waitFor", mkDescriptor()(BackendType.Int32))
+	            mv.visitVarInsn(ISTORE, exitSlot)
+
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(true)
+	            ILOAD(exitSlot)
+	            pushInt(14)
+	            pushString("")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitLabel(tryEnd)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(handlerInterrupted)
+	            ASTORE(exSlot)
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            ICONST_0()
+	            pushInt(2)
+	            ALOAD(exSlot)
+	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(handlerIo)
+	            ASTORE(exSlot)
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            ICONST_0()
+	            pushInt(14)
+	            ALOAD(exSlot)
+	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(after)
+
+	          case IoOp.ProcessWaitForTimeout =>
+	            import BytecodeInstructions.*
+	            BytecodeInstructions.addLoc(loc)
+
+	            val SimpleType.Tuple(retElmTypes) = tpe
+	            val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+	            val SimpleType.Tuple(argElmTypes) = exp.tpe
+	            val argTupleType = BackendObjType.Tuple(argElmTypes.map(BackendType.toBackendType))
+
+	            val jGlobal = BackendObjType.Global.jvmName
+	            val jProcess = JvmName.ofClass(classOf[java.lang.Process])
+	            val processTpe = BackendType.Reference(BackendObjType.Native(jProcess))
+	            val jInterrupted = JvmName.ofClass(classOf[java.lang.InterruptedException])
+	            val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+	            val jTimeUnit = JvmName.ofClass(classOf[java.util.concurrent.TimeUnit])
+	            val timeUnitTpe = BackendType.Reference(BackendObjType.Native(jTimeUnit))
+
+	            // Locals.
+	            val idSlot = 2260
+	            val msSlot = 2262
+	            val procSlot = 2264
+	            val resSlot = 2265
+	            val exSlot = 2266
+
+	            // Extract (processId, ms) from the tuple argument.
+	            compileExpr(exp) // tuple
+	            DUP() // tuple, tuple
+	            GETFIELD(argTupleType.IndexField(0)) // tuple, id
+	            mv.visitVarInsn(LSTORE, idSlot) // tuple
+	            GETFIELD(argTupleType.IndexField(1)) // ms
+	            mv.visitVarInsn(LSTORE, msSlot)
+
+	            // proc = Global.getProcess(id)
+	            LLOAD(idSlot)
+	            INVOKESTATIC(jGlobal, "getProcess", mkDescriptor(BackendType.Int64)(processTpe))
+	            ASTORE(procSlot)
+
+	            val hasProc = new Label()
+	            val after = new Label()
+	            ALOAD(procSlot)
+	            mv.visitJumpInsn(IFNONNULL, hasProc)
+
+	            // Return (false, false, Other, "invalid process handle.")
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            pushBool(false)
+	            pushInt(14)
+	            pushString("invalid process handle.")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(hasProc)
+
+	            val tryStart = new Label()
+	            val tryEnd = new Label()
+	            val handlerInterrupted = new Label()
+	            val handlerIo = new Label()
+	            mv.visitTryCatchBlock(tryStart, tryEnd, handlerInterrupted, jInterrupted.toInternalName)
+	            mv.visitTryCatchBlock(tryStart, tryEnd, handlerIo, jIOException.toInternalName)
+
+	            mv.visitLabel(tryStart)
+	            ALOAD(procSlot)
+	            LLOAD(msSlot)
+	            mv.visitFieldInsn(org.objectweb.asm.Opcodes.GETSTATIC, jTimeUnit.toInternalName, "MILLISECONDS", timeUnitTpe.toDescriptor)
+	            INVOKEVIRTUAL(jProcess, "waitFor", mkDescriptor(BackendType.Int64, timeUnitTpe)(BackendType.Bool))
+	            mv.visitVarInsn(ISTORE, resSlot)
+
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(true)
+	            ILOAD(resSlot)
+	            pushInt(14)
+	            pushString("")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitLabel(tryEnd)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(handlerInterrupted)
+	            ASTORE(exSlot)
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            pushBool(false)
+	            pushInt(2)
+	            ALOAD(exSlot)
+	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(handlerIo)
+	            ASTORE(exSlot)
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            pushBool(false)
+	            pushInt(14)
+	            ALOAD(exSlot)
+	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(after)
+
+	          case IoOp.ProcessStdinWrite =>
+	            import BytecodeInstructions.*
+	            BytecodeInstructions.addLoc(loc)
+
+	            val SimpleType.Tuple(retElmTypes) = tpe
+	            val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+	            val SimpleType.Tuple(argElmTypes) = exp.tpe
+	            val argTupleType = BackendObjType.Tuple(argElmTypes.map(BackendType.toBackendType))
+
+	            val jGlobal = BackendObjType.Global.jvmName
+	            val jProcess = JvmName.ofClass(classOf[java.lang.Process])
+	            val processTpe = BackendType.Reference(BackendObjType.Native(jProcess))
+	            val jOutputStream = JvmName.ofClass(classOf[java.io.OutputStream])
+	            val outputStreamTpe = BackendType.Reference(BackendObjType.Native(jOutputStream))
+	            val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+
+	            // Locals.
+	            val idSlot = 2140
+	            val bufSlot = 2142
+	            val lenSlot = 2143
+	            val exSlot = 2144
+	            val procSlot = 2145
+
+	            // Extract (processId, buffer) from the tuple argument.
+	            compileExpr(exp) // tuple
+	            DUP() // tuple, tuple
+	            GETFIELD(argTupleType.IndexField(0)) // tuple, id
+	            mv.visitVarInsn(LSTORE, idSlot) // tuple
+	            GETFIELD(argTupleType.IndexField(1)) // buffer
+	            ASTORE(bufSlot)
+
+	            // proc = Global.getProcess(id)
+	            LLOAD(idSlot)
+	            INVOKESTATIC(jGlobal, "getProcess", mkDescriptor(BackendType.Int64)(processTpe))
+	            ASTORE(procSlot)
+
+	            val hasProc = new Label()
+	            val after = new Label()
+	            ALOAD(procSlot)
+	            mv.visitJumpInsn(IFNONNULL, hasProc)
+
+	            // Return (false, 0, "invalid process handle.")
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            ICONST_0()
+	            pushString("invalid process handle.")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(hasProc)
+
+	            // Try-catch around process I/O.
+	            val tryStart = new Label()
+	            val tryEnd = new Label()
+	            val handlerStart = new Label()
+	            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, jIOException.toInternalName)
+
+	            mv.visitLabel(tryStart)
+	            // proc.getOutputStream().write(buffer)
+	            ALOAD(procSlot)
+	            INVOKEVIRTUAL(jProcess, "getOutputStream", mkDescriptor()(outputStreamTpe))
+	            ALOAD(bufSlot)
+	            INVOKEVIRTUAL(jOutputStream, "write", mkDescriptor(BackendType.Array(BackendType.Int8))(VoidableType.Void))
+
+	            // len = buffer.length
+	            ALOAD(bufSlot)
+	            ARRAYLENGTH()
+	            mv.visitVarInsn(ISTORE, lenSlot)
+
+	            // Return (true, len, "")
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(true)
+	            ILOAD(lenSlot)
+	            pushString("")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitLabel(tryEnd)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(handlerStart)
+	            ASTORE(exSlot)
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            ICONST_0()
+	            ALOAD(exSlot)
+	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(after)
+
+	          case IoOp.ProcessStdoutRead =>
+	            import BytecodeInstructions.*
+	            BytecodeInstructions.addLoc(loc)
+
+	            val SimpleType.Tuple(retElmTypes) = tpe
+	            val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+	            val SimpleType.Tuple(argElmTypes) = exp.tpe
+	            val argTupleType = BackendObjType.Tuple(argElmTypes.map(BackendType.toBackendType))
+
+	            val jGlobal = BackendObjType.Global.jvmName
+	            val jProcess = JvmName.ofClass(classOf[java.lang.Process])
+	            val processTpe = BackendType.Reference(BackendObjType.Native(jProcess))
+	            val jInputStream = JvmName.ofClass(classOf[java.io.InputStream])
+	            val inputStreamTpe = BackendType.Reference(BackendObjType.Native(jInputStream))
+	            val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+
+	            // Locals.
+	            val idSlot = 2150
+	            val bufSlot = 2152
+	            val numSlot = 2153
+	            val exSlot = 2154
+	            val procSlot = 2155
+
+	            // Extract (processId, buffer) from the tuple argument.
+	            compileExpr(exp) // tuple
+	            DUP() // tuple, tuple
+	            GETFIELD(argTupleType.IndexField(0)) // tuple, id
+	            mv.visitVarInsn(LSTORE, idSlot) // tuple
+	            GETFIELD(argTupleType.IndexField(1)) // buffer
+	            ASTORE(bufSlot)
+
+	            // proc = Global.getProcess(id)
+	            LLOAD(idSlot)
+	            INVOKESTATIC(jGlobal, "getProcess", mkDescriptor(BackendType.Int64)(processTpe))
+	            ASTORE(procSlot)
+
+	            val hasProc = new Label()
+	            val after = new Label()
+	            ALOAD(procSlot)
+	            mv.visitJumpInsn(IFNONNULL, hasProc)
+
+	            // Return (false, 0, "invalid process handle.")
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            ICONST_0()
+	            pushString("invalid process handle.")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(hasProc)
+
+	            // Try-catch around process I/O.
+	            val tryStart = new Label()
+	            val tryEnd = new Label()
+	            val handlerStart = new Label()
+	            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, jIOException.toInternalName)
+
+	            mv.visitLabel(tryStart)
+	            // numRead = proc.getInputStream().read(buffer)
+	            ALOAD(procSlot)
+	            INVOKEVIRTUAL(jProcess, "getInputStream", mkDescriptor()(inputStreamTpe))
+	            ALOAD(bufSlot)
+	            INVOKEVIRTUAL(jInputStream, "read", mkDescriptor(BackendType.Array(BackendType.Int8))(BackendType.Int32))
+
+	            // if (numRead == -1) numRead = 0
+	            val notEof = new Label()
+	            val afterEof = new Label()
+	            DUP()
+	            ICONST_M1()
+	            mv.visitJumpInsn(IF_ICMPNE, notEof)
+	            POP()
+	            ICONST_0()
+	            mv.visitLabel(notEof)
+	            mv.visitLabel(afterEof)
+	            mv.visitVarInsn(ISTORE, numSlot)
+
+	            // Return (true, numRead, "")
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(true)
+	            ILOAD(numSlot)
+	            pushString("")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitLabel(tryEnd)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(handlerStart)
+	            ASTORE(exSlot)
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            ICONST_0()
+	            ALOAD(exSlot)
+	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(after)
+
+	          case IoOp.ProcessStderrRead =>
+	            import BytecodeInstructions.*
+	            BytecodeInstructions.addLoc(loc)
+
+	            val SimpleType.Tuple(retElmTypes) = tpe
+	            val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+	            val SimpleType.Tuple(argElmTypes) = exp.tpe
+	            val argTupleType = BackendObjType.Tuple(argElmTypes.map(BackendType.toBackendType))
+
+	            val jGlobal = BackendObjType.Global.jvmName
+	            val jProcess = JvmName.ofClass(classOf[java.lang.Process])
+	            val processTpe = BackendType.Reference(BackendObjType.Native(jProcess))
+	            val jInputStream = JvmName.ofClass(classOf[java.io.InputStream])
+	            val inputStreamTpe = BackendType.Reference(BackendObjType.Native(jInputStream))
+	            val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+
+	            // Locals.
+	            val idSlot = 2160
+	            val bufSlot = 2162
+	            val numSlot = 2163
+	            val exSlot = 2164
+	            val procSlot = 2165
+
+	            // Extract (processId, buffer) from the tuple argument.
+	            compileExpr(exp) // tuple
+	            DUP() // tuple, tuple
+	            GETFIELD(argTupleType.IndexField(0)) // tuple, id
+	            mv.visitVarInsn(LSTORE, idSlot) // tuple
+	            GETFIELD(argTupleType.IndexField(1)) // buffer
+	            ASTORE(bufSlot)
+
+	            // proc = Global.getProcess(id)
+	            LLOAD(idSlot)
+	            INVOKESTATIC(jGlobal, "getProcess", mkDescriptor(BackendType.Int64)(processTpe))
+	            ASTORE(procSlot)
+
+	            val hasProc = new Label()
+	            val after = new Label()
+	            ALOAD(procSlot)
+	            mv.visitJumpInsn(IFNONNULL, hasProc)
+
+	            // Return (false, 0, "invalid process handle.")
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            ICONST_0()
+	            pushString("invalid process handle.")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(hasProc)
+
+	            // Try-catch around process I/O.
+	            val tryStart = new Label()
+	            val tryEnd = new Label()
+	            val handlerStart = new Label()
+	            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, jIOException.toInternalName)
+
+	            mv.visitLabel(tryStart)
+	            // numRead = proc.getErrorStream().read(buffer)
+	            ALOAD(procSlot)
+	            INVOKEVIRTUAL(jProcess, "getErrorStream", mkDescriptor()(inputStreamTpe))
+	            ALOAD(bufSlot)
+	            INVOKEVIRTUAL(jInputStream, "read", mkDescriptor(BackendType.Array(BackendType.Int8))(BackendType.Int32))
+
+	            // if (numRead == -1) numRead = 0
+	            val notEof = new Label()
+	            val afterEof = new Label()
+	            DUP()
+	            ICONST_M1()
+	            mv.visitJumpInsn(IF_ICMPNE, notEof)
+	            POP()
+	            ICONST_0()
+	            mv.visitLabel(notEof)
+	            mv.visitLabel(afterEof)
+	            mv.visitVarInsn(ISTORE, numSlot)
+
+	            // Return (true, numRead, "")
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(true)
+	            ILOAD(numSlot)
+	            pushString("")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitLabel(tryEnd)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(handlerStart)
+	            ASTORE(exSlot)
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            ICONST_0()
+	            ALOAD(exSlot)
+	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(after)
+
+	          case IoOp.ProcessRelease =>
+	            import BytecodeInstructions.*
+	            BytecodeInstructions.addLoc(loc)
+
+	            val SimpleType.Tuple(retElmTypes) = tpe
+	            val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+	            val jGlobal = BackendObjType.Global.jvmName
+	            val jProcess = JvmName.ofClass(classOf[java.lang.Process])
+	            val processTpe = BackendType.Reference(BackendObjType.Native(jProcess))
+
+	            // Remove the process handle (if present) and return (true, "").
+	            compileExpr(exp)
+	            INVOKESTATIC(jGlobal, "removeProcess", mkDescriptor(BackendType.Int64)(processTpe))
+	            POP()
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(true)
+	            pushString("")
+	            INVOKESPECIAL(retTupleType.Constructor)
+
+		          case IoOp.HttpRequest =>
+		            import BytecodeInstructions.*
+		            BytecodeInstructions.addLoc(loc)
+
+	            val SimpleType.Tuple(retElmTypes) = tpe
+	            val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+	            val SimpleType.Tuple(argElmTypes) = exp.tpe
+	            val argTupleType = BackendObjType.Tuple(argElmTypes.map(BackendType.toBackendType))
+
+		            val jIllegalArg = JvmName.ofClass(classOf[java.lang.IllegalArgumentException])
+		            val jConnectException = JvmName.ofClass(classOf[java.net.ConnectException])
+		            val jUnknownHost = JvmName.ofClass(classOf[java.net.UnknownHostException])
+		            val jInterrupted = JvmName.ofClass(classOf[java.lang.InterruptedException])
+		            val jHttpTimeout = JvmName.ofClass(classOf[java.net.http.HttpTimeoutException])
+		            val jUncheckedIo = JvmName.ofClass(classOf[java.io.UncheckedIOException])
+		            val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+
+	            val jURI = JvmName.ofClass(classOf[java.net.URI])
+	            val uriTpe = BackendType.Reference(BackendObjType.Native(jURI))
+
+	            val jHttpClient = JvmName.ofClass(classOf[java.net.http.HttpClient])
+	            val clientTpe = BackendType.Reference(BackendObjType.Native(jHttpClient))
+
+	            val jHttpClientBuilder = JvmName.ofClass(classOf[java.net.http.HttpClient.Builder])
+	            val clientBuilderTpe = BackendType.Reference(BackendObjType.Native(jHttpClientBuilder))
+
+	            val jHttpRedirect = JvmName.ofClass(classOf[java.net.http.HttpClient.Redirect])
+	            val redirectTpe = BackendType.Reference(BackendObjType.Native(jHttpRedirect))
+
+	            val jHttpRequest = JvmName.ofClass(classOf[java.net.http.HttpRequest])
+	            val requestTpe = BackendType.Reference(BackendObjType.Native(jHttpRequest))
+
+	            val jHttpRequestBuilder = JvmName.ofClass(classOf[java.net.http.HttpRequest.Builder])
+	            val builderTpe = BackendType.Reference(BackendObjType.Native(jHttpRequestBuilder))
+
+	            val jBodyPublishers = JvmName.ofClass(classOf[java.net.http.HttpRequest.BodyPublishers])
+	            val jBodyPublisher = JvmName.ofClass(classOf[java.net.http.HttpRequest.BodyPublisher])
+	            val bodyPublisherTpe = BackendType.Reference(BackendObjType.Native(jBodyPublisher))
+
+	            val jBodyHandlers = JvmName.ofClass(classOf[java.net.http.HttpResponse.BodyHandlers])
+	            val jHttpResponse = JvmName(List("java", "net", "http"), "HttpResponse")
+	            val responseTpe = BackendType.Reference(BackendObjType.Native(jHttpResponse))
+	            val jBodyHandler = JvmName(List("java", "net", "http"), "HttpResponse$BodyHandler")
+	            val bodyHandlerTpe = BackendType.Reference(BackendObjType.Native(jBodyHandler))
+
+	            val jHttpHeaders = JvmName.ofClass(classOf[java.net.http.HttpHeaders])
+	            val httpHeadersTpe = BackendType.Reference(BackendObjType.Native(jHttpHeaders))
+
+	            val jLocale = JvmName.ofClass(classOf[java.util.Locale])
+	            val localeTpe = BackendType.Reference(BackendObjType.Native(jLocale))
+
+	            val jMap = JvmName(JvmName.JavaUtil, "Map")
+	            val jSet = JvmName(JvmName.JavaUtil, "Set")
+	            val jList = JvmName(JvmName.JavaUtil, "List")
+	            val jOptional = JvmName(JvmName.JavaUtil, "Optional")
+	            val jIterator = JvmName.Iterator
+	            val jMapEntry = JvmName(JvmName.JavaUtil, "Map$Entry")
+	            val jArrayList = JvmName(JvmName.JavaUtil, "ArrayList")
+	            val optionalTpe = BackendType.Reference(BackendObjType.Native(jOptional))
+
+	            // Locals.
+	            val methodSlot = 2280
+	            val urlSlot = 2281
+	            val reqHeadersSlot = 2282
+	            val hasBodySlot = 2283
+	            val reqBodySlot = 2284
+	            val publisherSlot = 2285
+	            val builderSlot = 2286
+	            val requestSlot = 2287
+	            val clientSlot = 2288
+	            val handlerSlot = 2289
+	            val responseSlot = 2290
+	            val statusSlot = 2291
+	            val respBodySlot = 2292
+	            val respHeadersSlot = 2293
+	            val headerBufSlot = 2294
+	            val respMapSlot = 2295
+	            val iterSlot = 2296
+	            val entrySlot = 2297
+	            val keySlot = 2298
+	            val valuesSlot = 2299
+	            val valuesIterSlot = 2300
+	            val valueSlot = 2301
+	            val exSlot = 2302
+	            val uriSlot = 2303
+	            val schemeSlot = 2304
+	            val locationOptSlot = 2305
+	            val locationSlot = 2306
+	            val locationUriSlot = 2307
+	            val locationSchemeSlot = 2308
+
+	            val isPortable = flix.options.stdlibProfile == StdlibProfile.Portable
+
+	            // Extract (method, url, reqHeaders, hasBody, body) from the tuple argument.
+	            compileExpr(exp) // tuple
+	            DUP() // tuple, tuple
+	            GETFIELD(argTupleType.IndexField(0)) // tuple, method
+	            CHECKCAST(JvmName.String) // tuple, method
+	            ASTORE(methodSlot) // tuple
+	            DUP() // tuple, tuple
+	            GETFIELD(argTupleType.IndexField(1)) // tuple, url
+	            CHECKCAST(JvmName.String) // tuple, url
+	            ASTORE(urlSlot) // tuple
+	            DUP() // tuple, tuple
+	            GETFIELD(argTupleType.IndexField(2)) // tuple, headers
+	            mv.visitTypeInsn(org.objectweb.asm.Opcodes.CHECKCAST, BackendType.Array(BackendType.String).toDescriptor) // tuple, headers
+	            ASTORE(reqHeadersSlot) // tuple
+	            DUP() // tuple, tuple
+	            GETFIELD(argTupleType.IndexField(3)) // tuple, hasBody
+	            mv.visitVarInsn(ISTORE, hasBodySlot) // tuple
+	            GETFIELD(argTupleType.IndexField(4)) // body
+	            CHECKCAST(JvmName.String) // body
+	            ASTORE(reqBodySlot)
+
+	            val after = new Label()
+
+	            if (isPortable) {
+	              // Validate: if hasBody is false then the body must be empty.
+	              val inputOk = new Label()
+	              ILOAD(hasBodySlot)
+	              mv.visitJumpInsn(IFNE, inputOk)
+	              ALOAD(reqBodySlot)
+	              INVOKEVIRTUAL(JvmName.String, "isEmpty", mkDescriptor()(BackendType.Bool))
+	              mv.visitJumpInsn(IFNE, inputOk)
+
+	              // Return (false, 0, [], "", InvalidInput, "invalid input")
+	              NEW(retTupleType.jvmName)
+	              DUP()
+	              pushBool(false)
+	              ICONST_0()
+	              pushInt(0)
+	              ANEWARRAY(JvmName.String)
+	              pushString("")
+	              pushInt(4)
+	              pushString("invalid input")
+	              INVOKESPECIAL(retTupleType.Constructor)
+	              mv.visitJumpInsn(GOTO, after)
+
+	              mv.visitLabel(inputOk)
+	            }
+
+	            // Try-catch around HTTP request execution.
+	            val tryStart = new Label()
+	            val tryEnd = new Label()
+		            val handlerInvalid = new Label()
+		            val handlerConnect = new Label()
+		            val handlerUnknownHost = new Label()
+		            val handlerInterrupted = new Label()
+		            val handlerTimeout = new Label()
+		            val handlerUncheckedIo = new Label()
+		            val handlerIo = new Label()
+
+		            mv.visitTryCatchBlock(tryStart, tryEnd, handlerInvalid, jIllegalArg.toInternalName)
+		            mv.visitTryCatchBlock(tryStart, tryEnd, handlerConnect, jConnectException.toInternalName)
+		            mv.visitTryCatchBlock(tryStart, tryEnd, handlerUnknownHost, jUnknownHost.toInternalName)
+		            mv.visitTryCatchBlock(tryStart, tryEnd, handlerInterrupted, jInterrupted.toInternalName)
+		            mv.visitTryCatchBlock(tryStart, tryEnd, handlerTimeout, jHttpTimeout.toInternalName)
+		            mv.visitTryCatchBlock(tryStart, tryEnd, handlerUncheckedIo, jUncheckedIo.toInternalName)
+		            mv.visitTryCatchBlock(tryStart, tryEnd, handlerIo, jIOException.toInternalName)
+
+	            mv.visitLabel(tryStart)
+
+	            // uri = URI.create(url)
+	            ALOAD(urlSlot)
+	            INVOKESTATIC(jURI, "create", mkDescriptor(BackendType.String)(uriTpe))
+	            ASTORE(uriSlot)
+
+	            if (isPortable) {
+	              // If scheme is not http/https: return (false, 0, [], "", Unsupported, "unsupported URL scheme")
+	              val supportedScheme = new Label()
+	              ALOAD(uriSlot)
+	              INVOKEVIRTUAL(jURI, "getScheme", mkDescriptor()(BackendType.String))
+	              ASTORE(schemeSlot)
+
+	              ALOAD(schemeSlot)
+	              // Leave invalid/relative URI detection to HttpRequest.newBuilder (-> InvalidInput).
+	              mv.visitJumpInsn(IFNULL, supportedScheme)
+	              ALOAD(schemeSlot)
+	              pushString("http")
+	              INVOKEVIRTUAL(JvmName.String, "equalsIgnoreCase", mkDescriptor(BackendType.String)(BackendType.Bool))
+	              mv.visitJumpInsn(IFNE, supportedScheme)
+	              ALOAD(schemeSlot)
+	              pushString("https")
+	              INVOKEVIRTUAL(JvmName.String, "equalsIgnoreCase", mkDescriptor(BackendType.String)(BackendType.Bool))
+	              mv.visitJumpInsn(IFNE, supportedScheme)
+
+	              NEW(retTupleType.jvmName)
+	              DUP()
+	              pushBool(false)
+	              ICONST_0()
+	              pushInt(0)
+	              ANEWARRAY(JvmName.String)
+	              pushString("")
+	              pushInt(12)
+	              pushString("unsupported URL scheme")
+	              INVOKESPECIAL(retTupleType.Constructor)
+	              mv.visitJumpInsn(GOTO, after)
+
+	              mv.visitLabel(supportedScheme)
+	            }
+
+	            // builder = HttpRequest.newBuilder(uri)
+	            ALOAD(uriSlot)
+	            INVOKESTATIC(jHttpRequest, "newBuilder", mkDescriptor(uriTpe)(builderTpe))
+	            ASTORE(builderSlot)
+
+	            // publisher = hasBody ? BodyPublishers.ofString(body) : BodyPublishers.noBody()
+	            val noBody = new Label()
+	            val afterPub = new Label()
+	            ILOAD(hasBodySlot)
+	            mv.visitJumpInsn(IFEQ, noBody)
+	            ALOAD(reqBodySlot)
+	            INVOKESTATIC(jBodyPublishers, "ofString", mkDescriptor(BackendType.String)(bodyPublisherTpe))
+	            mv.visitJumpInsn(GOTO, afterPub)
+	            mv.visitLabel(noBody)
+	            INVOKESTATIC(jBodyPublishers, "noBody", mkDescriptor()(bodyPublisherTpe))
+	            mv.visitLabel(afterPub)
+	            ASTORE(publisherSlot)
+
+	            // builder = builder.method(method, publisher)
+	            ALOAD(builderSlot)
+	            ALOAD(methodSlot)
+	            ALOAD(publisherSlot)
+	            INVOKEINTERFACE(jHttpRequestBuilder, "method", mkDescriptor(BackendType.String, bodyPublisherTpe)(builderTpe))
+	            ASTORE(builderSlot)
+
+	            // if (reqHeaders.length > 0) builder.headers(reqHeaders)
+	            val skipHeaders = new Label()
+	            ALOAD(reqHeadersSlot)
+	            ARRAYLENGTH()
+	            mv.visitJumpInsn(IFEQ, skipHeaders)
+	            ALOAD(builderSlot)
+	            ALOAD(reqHeadersSlot)
+	            INVOKEINTERFACE(jHttpRequestBuilder, "headers", mkDescriptor(BackendType.Array(BackendType.String))(builderTpe))
+	            POP()
+	            mv.visitLabel(skipHeaders)
+
+	            // request = builder.build()
+	            ALOAD(builderSlot)
+	            INVOKEINTERFACE(jHttpRequestBuilder, "build", mkDescriptor()(requestTpe))
+	            ASTORE(requestSlot)
+
+	            if (isPortable) {
+	              // client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NORMAL).build()
+	              INVOKESTATIC(jHttpClient, "newBuilder", mkDescriptor()(clientBuilderTpe))
+	              GETSTATIC(ClassMaker.StaticField(jHttpRedirect, "NORMAL", redirectTpe))
+	              INVOKEINTERFACE(jHttpClientBuilder, "followRedirects", mkDescriptor(redirectTpe)(clientBuilderTpe))
+	              INVOKEINTERFACE(jHttpClientBuilder, "build", mkDescriptor()(clientTpe))
+	              ASTORE(clientSlot)
+	            } else {
+	              // client = HttpClient.newHttpClient()
+	              INVOKESTATIC(jHttpClient, "newHttpClient", mkDescriptor()(clientTpe))
+	              ASTORE(clientSlot)
+	            }
+
+	            // handler = BodyHandlers.ofString()
+	            INVOKESTATIC(jBodyHandlers, "ofString", mkDescriptor()(bodyHandlerTpe))
+	            ASTORE(handlerSlot)
+
+	            // response = client.send(request, handler)
+	            ALOAD(clientSlot)
+	            ALOAD(requestSlot)
+	            ALOAD(handlerSlot)
+	            INVOKEVIRTUAL(jHttpClient, "send", mkDescriptor(requestTpe, bodyHandlerTpe)(responseTpe))
+	            ASTORE(responseSlot)
+
+	            // status = response.statusCode()
+	            ALOAD(responseSlot)
+	            INVOKEINTERFACE(jHttpResponse, "statusCode", mkDescriptor()(BackendType.Int32))
+	            mv.visitVarInsn(ISTORE, statusSlot)
+
+	            if (isPortable) {
+	              // Portable contract: redirects are followed by default. If we still see a redirect with a Location header,
+	              // treat it as a failure (Unsupported if the target scheme is unsupported; otherwise Other).
+	              val notRedirect = new Label()
+	              val isRedirect = new Label()
+
+	              ILOAD(statusSlot)
+	              pushInt(301)
+	              mv.visitJumpInsn(IF_ICMPEQ, isRedirect)
+	              ILOAD(statusSlot)
+	              pushInt(302)
+	              mv.visitJumpInsn(IF_ICMPEQ, isRedirect)
+	              ILOAD(statusSlot)
+	              pushInt(303)
+	              mv.visitJumpInsn(IF_ICMPEQ, isRedirect)
+	              ILOAD(statusSlot)
+	              pushInt(307)
+	              mv.visitJumpInsn(IF_ICMPEQ, isRedirect)
+	              ILOAD(statusSlot)
+	              pushInt(308)
+	              mv.visitJumpInsn(IF_ICMPEQ, isRedirect)
+	              mv.visitJumpInsn(GOTO, notRedirect)
+
+	              mv.visitLabel(isRedirect)
+
+	              // locationOpt = response.headers().firstValue("location")
+	              ALOAD(responseSlot)
+	              INVOKEINTERFACE(jHttpResponse, "headers", mkDescriptor()(httpHeadersTpe))
+	              pushString("location")
+	              INVOKEVIRTUAL(jHttpHeaders, "firstValue", mkDescriptor(BackendType.String)(optionalTpe))
+	              ASTORE(locationOptSlot)
+
+	              // If no Location header: treat as a normal response.
+	              ALOAD(locationOptSlot)
+	              INVOKEVIRTUAL(jOptional, "isPresent", mkDescriptor()(BackendType.Bool))
+	              mv.visitJumpInsn(IFEQ, notRedirect)
+
+	              // location = (String) locationOpt.get()
+	              ALOAD(locationOptSlot)
+	              INVOKEVIRTUAL(jOptional, "get", mkDescriptor()(BackendType.Object))
+	              CHECKCAST(JvmName.String)
+	              ASTORE(locationSlot)
+
+	              // scheme = URI.create(location).getScheme()
+	              ALOAD(locationSlot)
+	              INVOKESTATIC(jURI, "create", mkDescriptor(BackendType.String)(uriTpe))
+	              ASTORE(locationUriSlot)
+	              ALOAD(locationUriSlot)
+	              INVOKEVIRTUAL(jURI, "getScheme", mkDescriptor()(BackendType.String))
+	              ASTORE(locationSchemeSlot)
+
+	              val checkRedirectScheme = new Label()
+	              val redirectOther = new Label()
+
+	              // If original request is https and redirect target is http, treat as a policy violation.
+	              // (Matches HttpClient.Redirect.NORMAL semantics; avoids silent downgrade.)
+	              ALOAD(schemeSlot)
+	              mv.visitJumpInsn(IFNULL, checkRedirectScheme)
+	              ALOAD(schemeSlot)
+	              pushString("https")
+	              INVOKEVIRTUAL(JvmName.String, "equalsIgnoreCase", mkDescriptor(BackendType.String)(BackendType.Bool))
+	              mv.visitJumpInsn(IFEQ, checkRedirectScheme)
+	              ALOAD(locationSchemeSlot)
+	              mv.visitJumpInsn(IFNULL, checkRedirectScheme)
+	              ALOAD(locationSchemeSlot)
+	              pushString("http")
+	              INVOKEVIRTUAL(JvmName.String, "equalsIgnoreCase", mkDescriptor(BackendType.String)(BackendType.Bool))
+	              mv.visitJumpInsn(IFEQ, checkRedirectScheme)
+
+	              NEW(retTupleType.jvmName)
+	              DUP()
+	              pushBool(false)
+	              ICONST_0()
+	              pushInt(0)
+	              ANEWARRAY(JvmName.String)
+	              pushString("")
+	              pushInt(9)
+	              pushString("redirect disallowed: https -> http")
+	              INVOKESPECIAL(retTupleType.Constructor)
+	              mv.visitJumpInsn(GOTO, after)
+
+	              mv.visitLabel(checkRedirectScheme)
+
+	              // If scheme is null (relative redirect), treat as Other since we didn't follow it.
+	              ALOAD(locationSchemeSlot)
+	              mv.visitJumpInsn(IFNULL, redirectOther)
+	              // If scheme is http/https, treat as Other since we didn't follow it.
+	              ALOAD(locationSchemeSlot)
+	              pushString("http")
+	              INVOKEVIRTUAL(JvmName.String, "equalsIgnoreCase", mkDescriptor(BackendType.String)(BackendType.Bool))
+	              mv.visitJumpInsn(IFNE, redirectOther)
+	              ALOAD(locationSchemeSlot)
+	              pushString("https")
+	              INVOKEVIRTUAL(JvmName.String, "equalsIgnoreCase", mkDescriptor(BackendType.String)(BackendType.Bool))
+	              mv.visitJumpInsn(IFNE, redirectOther)
+
+	              // Unsupported redirect target scheme.
+	              NEW(retTupleType.jvmName)
+	              DUP()
+	              pushBool(false)
+	              ICONST_0()
+	              pushInt(0)
+	              ANEWARRAY(JvmName.String)
+	              pushString("")
+	              pushInt(12)
+	              pushString("unsupported redirect scheme")
+	              INVOKESPECIAL(retTupleType.Constructor)
+	              mv.visitJumpInsn(GOTO, after)
+
+	              mv.visitLabel(redirectOther)
+	              NEW(retTupleType.jvmName)
+	              DUP()
+	              pushBool(false)
+	              ICONST_0()
+	              pushInt(0)
+	              ANEWARRAY(JvmName.String)
+	              pushString("")
+	              pushInt(14)
+	              pushString("redirect not followed")
+	              INVOKESPECIAL(retTupleType.Constructor)
+	              mv.visitJumpInsn(GOTO, after)
+
+	              mv.visitLabel(notRedirect)
+	            }
+
+	            // body = response.body().toString()
+	            ALOAD(responseSlot)
+	            INVOKEINTERFACE(jHttpResponse, "body", mkDescriptor()(BackendType.Object))
+	            INVOKEVIRTUAL(JvmName.Object, "toString", mkDescriptor()(BackendType.String))
+	            ASTORE(respBodySlot)
+
+	            // respMap = response.headers().map()
+	            ALOAD(responseSlot)
+	            INVOKEINTERFACE(jHttpResponse, "headers", mkDescriptor()(httpHeadersTpe))
+	            INVOKEVIRTUAL(jHttpHeaders, "map", mkDescriptor()(jMap.toTpe))
+	            ASTORE(respMapSlot)
+
+	            // headerBuf = new ArrayList()
+	            NEW(jArrayList)
+	            DUP()
+	            INVOKESPECIAL(jArrayList, JvmName.ConstructorMethod, mkDescriptor()(VoidableType.Void))
+	            ASTORE(headerBufSlot)
+
+	            // iter = respMap.entrySet().iterator()
+	            ALOAD(respMapSlot)
+	            INVOKEINTERFACE(jMap, "entrySet", mkDescriptor()(jSet.toTpe))
+	            INVOKEINTERFACE(jSet, "iterator", mkDescriptor()(jIterator.toTpe))
+	            ASTORE(iterSlot)
+
+	            val loopStart = new Label()
+	            val loopEnd = new Label()
+	            mv.visitLabel(loopStart)
+
+	            // while (iter.hasNext())
+	            ALOAD(iterSlot)
+	            INVOKEINTERFACE(jIterator, "hasNext", mkDescriptor()(BackendType.Bool))
+	            mv.visitJumpInsn(IFEQ, loopEnd)
+
+	            // entry = (Map.Entry) iter.next()
+	            ALOAD(iterSlot)
+	            INVOKEINTERFACE(jIterator, "next", mkDescriptor()(BackendType.Object))
+	            CHECKCAST(jMapEntry)
+	            ASTORE(entrySlot)
+
+	            // key = ((String) entry.getKey()).toLowerCase(Locale.ROOT)
+	            ALOAD(entrySlot)
+	            INVOKEINTERFACE(jMapEntry, "getKey", mkDescriptor()(BackendType.Object))
+	            CHECKCAST(JvmName.String)
+	            GETSTATIC(ClassMaker.StaticField(jLocale, "ROOT", localeTpe))
+	            INVOKEVIRTUAL(JvmName.String, "toLowerCase", mkDescriptor(localeTpe)(BackendType.String))
+	            ASTORE(keySlot)
+
+	            // values = (List) entry.getValue()
+	            ALOAD(entrySlot)
+	            INVOKEINTERFACE(jMapEntry, "getValue", mkDescriptor()(BackendType.Object))
+	            CHECKCAST(jList)
+	            ASTORE(valuesSlot)
+
+	            // valuesIter = values.iterator()
+	            ALOAD(valuesSlot)
+	            INVOKEINTERFACE(jList, "iterator", mkDescriptor()(jIterator.toTpe))
+	            ASTORE(valuesIterSlot)
+
+	            val innerStart = new Label()
+	            val innerEnd = new Label()
+	            mv.visitLabel(innerStart)
+
+	            // while (valuesIter.hasNext())
+	            ALOAD(valuesIterSlot)
+	            INVOKEINTERFACE(jIterator, "hasNext", mkDescriptor()(BackendType.Bool))
+	            mv.visitJumpInsn(IFEQ, innerEnd)
+
+	            // value = (String) valuesIter.next()
+	            ALOAD(valuesIterSlot)
+	            INVOKEINTERFACE(jIterator, "next", mkDescriptor()(BackendType.Object))
+	            CHECKCAST(JvmName.String)
+	            ASTORE(valueSlot)
+
+	            // headerBuf.add(key); headerBuf.add(value)
+	            ALOAD(headerBufSlot)
+	            ALOAD(keySlot)
+	            INVOKEVIRTUAL(jArrayList, "add", mkDescriptor(BackendType.Object)(BackendType.Bool))
+	            POP()
+	            ALOAD(headerBufSlot)
+	            ALOAD(valueSlot)
+	            INVOKEVIRTUAL(jArrayList, "add", mkDescriptor(BackendType.Object)(BackendType.Bool))
+	            POP()
+
+	            mv.visitJumpInsn(GOTO, innerStart)
+	            mv.visitLabel(innerEnd)
+
+	            mv.visitJumpInsn(GOTO, loopStart)
+	            mv.visitLabel(loopEnd)
+
+	            // respHeaders = (String[]) headerBuf.toArray(new String[0])
+	            ALOAD(headerBufSlot)
+	            pushInt(0)
+	            ANEWARRAY(JvmName.String)
+	            INVOKEVIRTUAL(jArrayList, "toArray", mkDescriptor(BackendType.Array(BackendType.Object))(BackendType.Array(BackendType.Object)))
+	            mv.visitTypeInsn(org.objectweb.asm.Opcodes.CHECKCAST, BackendType.Array(BackendType.String).toDescriptor)
+	            ASTORE(respHeadersSlot)
+
+	            // Return (true, status, respHeaders, body, Other, "")
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(true)
+	            ILOAD(statusSlot)
+	            ALOAD(respHeadersSlot)
+	            ALOAD(respBodySlot)
+	            pushInt(14)
+	            pushString("")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitLabel(tryEnd)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(handlerInvalid)
+	            ASTORE(exSlot)
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            ICONST_0()
+	            pushInt(0)
+	            ANEWARRAY(JvmName.String)
+	            pushString("")
+	            pushInt(4)
+	            ALOAD(exSlot)
+	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+		            mv.visitLabel(handlerConnect)
+		            ASTORE(exSlot)
+		            NEW(retTupleType.jvmName)
+		            DUP()
+		            pushBool(false)
+		            ICONST_0()
+		            pushInt(0)
+		            ANEWARRAY(JvmName.String)
+		            pushString("")
+		            pushInt(1)
+		            ALOAD(exSlot)
+		            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+		            INVOKESPECIAL(retTupleType.Constructor)
+		            mv.visitJumpInsn(GOTO, after)
+
+		            mv.visitLabel(handlerUnknownHost)
+		            ASTORE(exSlot)
+		            NEW(retTupleType.jvmName)
+		            DUP()
+		            pushBool(false)
+		            ICONST_0()
+		            pushInt(0)
+		            ANEWARRAY(JvmName.String)
+		            pushString("")
+		            pushInt(13)
+		            ALOAD(exSlot)
+		            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+		            INVOKESPECIAL(retTupleType.Constructor)
+		            mv.visitJumpInsn(GOTO, after)
+
+		            mv.visitLabel(handlerInterrupted)
+		            ASTORE(exSlot)
+		            NEW(retTupleType.jvmName)
+		            DUP()
+		            pushBool(false)
+		            ICONST_0()
+		            pushInt(0)
+		            ANEWARRAY(JvmName.String)
+		            pushString("")
+		            pushInt(2)
+		            ALOAD(exSlot)
+		            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+		            INVOKESPECIAL(retTupleType.Constructor)
+		            mv.visitJumpInsn(GOTO, after)
+
+		            mv.visitLabel(handlerTimeout)
+		            ASTORE(exSlot)
+		            NEW(retTupleType.jvmName)
+		            DUP()
+		            pushBool(false)
+		            ICONST_0()
+		            pushInt(0)
+		            ANEWARRAY(JvmName.String)
+		            pushString("")
+		            pushInt(10)
+		            ALOAD(exSlot)
+		            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+		            INVOKESPECIAL(retTupleType.Constructor)
+		            mv.visitJumpInsn(GOTO, after)
+
+		            mv.visitLabel(handlerUncheckedIo)
+		            ASTORE(exSlot)
+		            NEW(retTupleType.jvmName)
+		            DUP()
+	            pushBool(false)
+	            ICONST_0()
+	            pushInt(0)
+	            ANEWARRAY(JvmName.String)
+	            pushString("")
+	            pushInt(14)
+	            ALOAD(exSlot)
+	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(handlerIo)
+	            ASTORE(exSlot)
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            ICONST_0()
+	            pushInt(0)
+	            ANEWARRAY(JvmName.String)
+	            pushString("")
+	            pushInt(14)
+	            ALOAD(exSlot)
+	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(after)
+
+	          case IoOp.EnvGetArgs =>
+	            import BytecodeInstructions.*
+	            BytecodeInstructions.addLoc(loc)
+	            compileExpr(exp)
+            POP()
+            val jGlobal = JvmName(JvmName.DevFlixRuntime, "Global")
+            INVOKESTATIC(jGlobal, "getArgs", mkDescriptor()(BackendType.Array(BackendType.String)))
+
+          case IoOp.EnvGetEnvPairs =>
+            import BytecodeInstructions.*
+            BytecodeInstructions.addLoc(loc)
+            compileExpr(exp)
+            POP()
+
+            val jMap = JvmName(JvmName.JavaUtil, "Map")
+            val jSet = JvmName(JvmName.JavaUtil, "Set")
+            val jIterator = JvmName.Iterator
+            val jMapEntry = JvmName(JvmName.JavaUtil, "Map$Entry")
+
+            val envSlot = 2000
+            val arrSlot = 2001
+            val iterSlot = 2002
+            val idxSlot = 2003
+            val entrySlot = 2004
+
+            val tryStart = new Label()
+            val tryEnd = new Label()
+            val handlerStart = new Label()
+            val after = new Label()
+
+            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, JvmName.Exception.toInternalName)
+
+            mv.visitLabel(tryStart)
+            // val env = System.getenv()
+            INVOKESTATIC(JvmName.System, "getenv", mkDescriptor()(jMap.toTpe))
+            ASTORE(envSlot)
+
+            // val arr = new String[env.size() * 2]
+            ALOAD(envSlot)
+            INVOKEINTERFACE(jMap, "size", mkDescriptor()(BackendType.Int32))
+            ICONST_2()
+            mv.visitInsn(IMUL)
+            ANEWARRAY(JvmName.String)
+            ASTORE(arrSlot)
+
+            // val iter = env.entrySet().iterator()
+            ALOAD(envSlot)
+            INVOKEINTERFACE(jMap, "entrySet", mkDescriptor()(jSet.toTpe))
+            INVOKEINTERFACE(jSet, "iterator", mkDescriptor()(jIterator.toTpe))
+            ASTORE(iterSlot)
+
+            // var i = 0
+            ICONST_0()
+            mv.visitVarInsn(ISTORE, idxSlot)
+
+            val loopStart = new Label()
+            val loopEnd = new Label()
+            mv.visitLabel(loopStart)
+
+            // while (iter.hasNext())
+            ALOAD(iterSlot)
+            INVOKEINTERFACE(jIterator, "hasNext", mkDescriptor()(BackendType.Bool))
+            mv.visitJumpInsn(IFEQ, loopEnd)
+
+            // val entry = (Map.Entry) iter.next()
+            ALOAD(iterSlot)
+            INVOKEINTERFACE(jIterator, "next", mkDescriptor()(BackendType.Object))
+            CHECKCAST(jMapEntry)
+            ASTORE(entrySlot)
+
+            // arr[i] = (String) entry.getKey()
+            ALOAD(arrSlot)
+            ILOAD(idxSlot)
+            ALOAD(entrySlot)
+            INVOKEINTERFACE(jMapEntry, "getKey", mkDescriptor()(BackendType.Object))
+            CHECKCAST(JvmName.String)
+            mv.visitInsn(AASTORE)
+
+            // arr[i + 1] = (String) entry.getValue()
+            ALOAD(arrSlot)
+            ILOAD(idxSlot)
+            ICONST_1()
+            IADD()
+            ALOAD(entrySlot)
+            INVOKEINTERFACE(jMapEntry, "getValue", mkDescriptor()(BackendType.Object))
+            CHECKCAST(JvmName.String)
+            mv.visitInsn(AASTORE)
+
+            // i += 2
+            mv.visitIincInsn(idxSlot, 2)
+            mv.visitJumpInsn(GOTO, loopStart)
+
+            mv.visitLabel(loopEnd)
+            ALOAD(arrSlot)
+            mv.visitLabel(tryEnd)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(handlerStart)
+            // Ignore the exception and return an empty array.
+            POP()
+            pushInt(0)
+            ANEWARRAY(JvmName.String)
+
+            mv.visitLabel(after)
+
+          case IoOp.EnvGetVar =>
+            import BytecodeInstructions.*
+            BytecodeInstructions.addLoc(loc)
+
+            val argSlot = 2000
+            compileExpr(exp)
+            ASTORE(argSlot)
+
+            val tryStart = new Label()
+            val tryEnd = new Label()
+            val handlerStart = new Label()
+            val after = new Label()
+
+            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, JvmName.Exception.toInternalName)
+
+            mv.visitLabel(tryStart)
+            ALOAD(argSlot)
+            INVOKESTATIC(JvmName.System, "getenv", mkDescriptor(BackendType.String)(BackendType.String))
+            mv.visitLabel(tryEnd)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(handlerStart)
+            POP()
+            pushNull()
+            mv.visitLabel(after)
+
+          case IoOp.EnvGetProp =>
+            import BytecodeInstructions.*
+            BytecodeInstructions.addLoc(loc)
+
+            val argSlot = 2000
+            compileExpr(exp)
+            ASTORE(argSlot)
+
+            val tryStart = new Label()
+            val tryEnd = new Label()
+            val handlerStart = new Label()
+            val after = new Label()
+
+            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, JvmName.Exception.toInternalName)
+
+            mv.visitLabel(tryStart)
+            ALOAD(argSlot)
+            INVOKESTATIC(JvmName.System, "getProperty", mkDescriptor(BackendType.String)(BackendType.String))
+            mv.visitLabel(tryEnd)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(handlerStart)
+            POP()
+            pushNull()
+            mv.visitLabel(after)
+
+          case IoOp.EnvVirtualProcessors =>
+            import BytecodeInstructions.*
+            BytecodeInstructions.addLoc(loc)
+            compileExpr(exp)
+            POP()
+            val jRuntime = JvmName(JvmName.JavaLang, "Runtime")
+            INVOKESTATIC(jRuntime, "getRuntime", mkDescriptor()(jRuntime.toTpe))
+            INVOKEVIRTUAL(jRuntime, "availableProcessors", mkDescriptor()(BackendType.Int32))
         }
 
       case AtomicOp.Binary(sop) =>
@@ -581,6 +4145,42 @@ object GenExpression {
             compileExpr(exp1)
             compileExpr(exp2)
             mv.visitInsn(LREM)
+
+          case CharOp.Digit =>
+            compileExpr(exp1)
+            compileExpr(exp2)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "digit",
+              mkDescriptor(BackendType.Char, BackendType.Int32)(BackendType.Int32).toDescriptor, false)
+
+          case CharOp.IsSurrogatePair =>
+            compileExpr(exp1)
+            compileExpr(exp2)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "isSurrogatePair",
+              mkDescriptor(BackendType.Char, BackendType.Char)(BackendType.Bool).toDescriptor, false)
+
+          case CharOp.ToCodePoint =>
+            compileExpr(exp1)
+            compileExpr(exp2)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "toCodePoint",
+              mkDescriptor(BackendType.Char, BackendType.Char)(BackendType.Int32).toDescriptor, false)
+
+          case CharOp.ForDigit =>
+            compileExpr(exp1)
+            compileExpr(exp2)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "forDigit",
+              mkDescriptor(BackendType.Int32, BackendType.Int32)(BackendType.Char).toDescriptor, false)
+
+          case StringOp.CharAt =>
+            compileExpr(exp1)
+            compileExpr(exp2)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.String.toInternalName, "charAt",
+              mkDescriptor(BackendType.Int32)(BackendType.Char).toDescriptor, false)
+
+          case StringOp.Repeat =>
+            compileExpr(exp1)
+            compileExpr(exp2)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.String.toInternalName, "repeat",
+              mkDescriptor(BackendType.Int32)(BackendType.String).toDescriptor, false)
 
           case StringOp.Concat =>
             throw InternalCompilerException(s"Unexpected BinaryOperator StringOp.Concat. It should have been eliminated by Simplifier", loc)
@@ -946,6 +4546,75 @@ object GenExpression {
             GETSTATIC(BackendObjType.Unit.SingletonField)
         }
 
+      case AtomicOp.ChannelNew =>
+        import BytecodeInstructions.*
+        val List(exp) = exps
+        addLoc(loc)
+        compileExpr(exp)
+
+        // If capacity == 0 then use an unbuffered channel (SynchronousQueue),
+        // otherwise use a bounded buffered channel (ArrayBlockingQueue).
+        DUP()
+        ICONST_0()
+        val unbuffered = new Label()
+        val end = new Label()
+        mv.visitJumpInsn(IF_ICMPEQ, unbuffered)
+
+        // Buffered: new ArrayBlockingQueue(capacity)
+        NEW(JvmName.ArrayBlockingQueue)
+        DUP_X1()
+        SWAP()
+        invokeConstructor(JvmName.ArrayBlockingQueue, mkDescriptor(BackendType.Int32)(VoidableType.Void))
+        mv.visitJumpInsn(GOTO, end)
+
+        // Unbuffered: new SynchronousQueue()
+        mv.visitLabel(unbuffered)
+        POP()
+        NEW(JvmName.SynchronousQueue)
+        DUP()
+        invokeConstructor(JvmName.SynchronousQueue, MethodDescriptor.NothingToVoid)
+
+        mv.visitLabel(end)
+
+      case AtomicOp.ChannelGet =>
+        import BytecodeInstructions.*
+        val List(exp) = exps
+        val returnTpe = BackendType.toBackendType(tpe)
+        val valueField = BackendObjType.Value.fieldFromType(returnTpe)
+
+        addLoc(loc)
+        compileExpr(exp)
+        castIfNotPrim(BackendType.toBackendType(exp.tpe))
+        INVOKEINTERFACE(JvmName.BlockingQueue, "take", mkDescriptor()(BackendType.Object))
+        CHECKCAST(BackendObjType.Value.jvmName)
+        GETFIELD(valueField)
+        castIfNotPrim(returnTpe)
+
+      case AtomicOp.ChannelPut =>
+        import BytecodeInstructions.*
+        val List(chan, value) = exps
+        val erasedValueTpe = BackendType.toErasedBackendType(value.tpe)
+        val valueField = BackendObjType.Value.fieldFromType(erasedValueTpe)
+
+        addLoc(loc)
+        compileExpr(chan)
+        castIfNotPrim(BackendType.toBackendType(chan.tpe))
+
+        // Box the element value into dev.flix.runtime.Value.
+        compileExpr(value)
+        NEW(BackendObjType.Value.jvmName)
+        DUP()
+        INVOKESPECIAL(BackendObjType.Value.Constructor)
+        DUP()
+        xSwap(lowerLarge = erasedValueTpe.is64BitWidth, higherLarge = true) // two objects on top of the stack
+        PUTFIELD(valueField)
+
+        // Put the boxed element into the queue.
+        INVOKEINTERFACE(JvmName.BlockingQueue, "put", mkDescriptor(BackendType.Object)(VoidableType.Void))
+
+        // Push Unit on the stack.
+        GETSTATIC(BackendObjType.Unit.SingletonField)
+
       case AtomicOp.Lazy =>
         import BytecodeInstructions.*
         val List(exp) = exps
@@ -1012,7 +4681,7 @@ object GenExpression {
         ATHROW()
     }
 
-    case Expr.ApplyClo(exp1, exp2, ct, _, purity, loc) =>
+    case Expr.ApplyClo(exp1, exp2, ct, pcPointId, _, purity, loc) =>
       // Type of the function abstract class
       val functionInterface = JvmOps.getErasedFunctionInterfaceType(exp1.tpe)
       val closureAbstractClass = JvmOps.getErasedClosureAbstractClassType(exp1.tpe)
@@ -1052,11 +4721,13 @@ object GenExpression {
           } else {
             ctx match {
               case EffectContext(_, _, newFrame, setPc, _, pcLabels, pcCounter) =>
-                val pcPoint = pcCounter(0) + 1
-                val pcPointLabel = pcLabels(pcPoint)
+                if (pcPointId <= 0 || pcPointId >= pcLabels.length) {
+                  throw InternalCompilerException(s"Unexpected pcPointId in ApplyClo: $pcPointId.", loc)
+                }
+                val pcPointLabel = pcLabels(pcPointId)
                 val afterUnboxing = new Label()
                 pcCounter(0) += 1
-                BackendObjType.Result.unwindThunkToValue(pcPoint, newFrame, setPc)
+                BackendObjType.Result.unwindThunkToValue(pcPointId, newFrame, setPc)
                 mv.visitJumpInsn(GOTO, afterUnboxing)
 
                 mv.visitLabel(pcPointLabel)
@@ -1071,7 +4742,7 @@ object GenExpression {
           }
       }
 
-    case Expr.ApplyDef(sym, exps, ct, _, _, loc) => ct match {
+    case Expr.ApplyDef(sym, exps, ct, pcPointId, _, _, loc) => ct match {
       case ExpPosition.Tail =>
         val defJvmName = BackendObjType.Defn(sym).jvmName
         // Type of the function abstract class
@@ -1133,11 +4804,13 @@ object GenExpression {
               if (Purity.isControlPure(defn.expr.purity)) {
                 BackendObjType.Result.unwindSuspensionFreeThunk("in pure function call", loc)
               } else {
-                val pcPoint = pcCounter(0) + 1
-                val pcPointLabel = pcLabels(pcPoint)
+                if (pcPointId <= 0 || pcPointId >= pcLabels.length) {
+                  throw InternalCompilerException(s"Unexpected pcPointId in ApplyDef: $pcPointId.", loc)
+                }
+                val pcPointLabel = pcLabels(pcPointId)
                 val afterUnboxing = new Label()
                 pcCounter(0) += 1
-                BackendObjType.Result.unwindThunkToValue(pcPoint, newFrame, setPc)
+                BackendObjType.Result.unwindThunkToValue(pcPointId, newFrame, setPc)
                 mv.visitJumpInsn(GOTO, afterUnboxing)
 
                 mv.visitLabel(pcPointLabel)
@@ -1151,7 +4824,7 @@ object GenExpression {
         }
     }
 
-    case Expr.ApplyOp(sym, exps, tpe, _, loc) => ctx match {
+    case Expr.ApplyOp(sym, exps, pcPointId, tpe, _, loc) => ctx match {
       case DirectInstanceContext(_, _, _) | DirectStaticContext(_, _, _) =>
         BackendObjType.Result.crashIfSuspension("Unexpected do-expression in direct method context", loc)
 
@@ -1159,8 +4832,10 @@ object GenExpression {
         import BackendObjType.Suspension
         import BytecodeInstructions.*
 
-        val pcPoint = pcCounter(0) + 1
-        val pcPointLabel = pcLabels(pcPoint)
+        if (pcPointId <= 0 || pcPointId >= pcLabels.length) {
+          throw InternalCompilerException(s"Unexpected pcPointId in ApplyOp: $pcPointId.", loc)
+        }
+        val pcPointLabel = pcLabels(pcPointId)
         val afterUnboxing = new Label()
         val erasedResult = BackendType.toErasedBackendType(tpe)
         pcCounter(0) += 1
@@ -1190,7 +4865,7 @@ object GenExpression {
         INVOKESPECIAL(BackendObjType.FramesNil.Constructor)
         newFrame(mv)
         DUP()
-        pushInt(pcPoint)
+        pushInt(pcPointId)
         setPc(mv)
         INVOKEVIRTUAL(BackendObjType.FramesNil.PushMethod)
         // store continuation
@@ -1405,7 +5080,7 @@ object GenExpression {
       // Add the label after both the try and catch rules.
       mv.visitLabel(afterTryAndCatch)
 
-    case Expr.RunWith(exp, effUse, rules, ct, _, _, loc) =>
+    case Expr.RunWith(exp, effUse, rules, ct, pcPointId, _, _, loc) =>
       import BytecodeInstructions.*
       // exp is a Unit -> exp.tpe closure
       val effectJvmName = JvmOps.getEffectDefinitionClassName(effUse.sym)
@@ -1438,11 +5113,13 @@ object GenExpression {
             BackendObjType.Result.unwindSuspensionFreeThunk("in pure run-with call", loc)
 
           case EffectContext(_, _, newFrame, setPc, _, pcLabels, pcCounter) =>
-            val pcPoint = pcCounter(0) + 1
-            val pcPointLabel = pcLabels(pcPoint)
+            if (pcPointId <= 0 || pcPointId >= pcLabels.length) {
+              throw InternalCompilerException(s"Unexpected pcPointId in RunWith: $pcPointId.", loc)
+            }
+            val pcPointLabel = pcLabels(pcPointId)
             val afterUnboxing = new Label()
             pcCounter(0) += 1
-            BackendObjType.Result.unwindThunkToValue(pcPoint, newFrame, setPc)
+            BackendObjType.Result.unwindThunkToValue(pcPointId, newFrame, setPc)
             mv.visitJumpInsn(GOTO, afterUnboxing)
 
             mv.visitLabel(pcPointLabel)

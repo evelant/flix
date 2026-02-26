@@ -45,9 +45,9 @@ object JvmAstPrinter {
     case Expr.Cst(cst, _) => ConstantPrinter.print(cst)
     case Expr.Var(sym, _, _, _) => printVarSym(sym)
     case Expr.ApplyAtomic(op, exps, tpe, purity, _) => OpPrinter.print(op, exps.map(print), SimpleTypePrinter.print(tpe), PurityPrinter.print(purity))
-    case Expr.ApplyClo(exp1, exp2, ct, _, _, _) => DocAst.Expr.ApplyCloWithTail(print(exp1), List(print(exp2)), ct)
-    case Expr.ApplyDef(sym, exps, ct, _, _, _) => DocAst.Expr.ApplyDefWithTail(sym, exps.map(print), ct)
-    case Expr.ApplyOp(sym, exps, _, _, _) => DocAst.Expr.ApplyOp(sym, exps.map(print))
+    case Expr.ApplyClo(exp1, exp2, ct, _, _, _, _) => DocAst.Expr.ApplyCloWithTail(print(exp1), List(print(exp2)), ct)
+    case Expr.ApplyDef(sym, exps, ct, _, _, _, _) => DocAst.Expr.ApplyDefWithTail(sym, exps.map(print), ct)
+    case Expr.ApplyOp(sym, exps, _, _, _, _) => DocAst.Expr.ApplyOp(sym, exps.map(print))
     case Expr.ApplySelfTail(sym, actuals, _, _, _) => DocAst.Expr.ApplySelfTail(sym, actuals.map(print))
     case Expr.IfThenElse(exp1, exp2, exp3, _, _, _) => DocAst.Expr.IfThenElse(print(exp1), print(exp2), print(exp3))
     case Expr.Branch(exp, branches, _, _, _) => DocAst.Expr.Branch(print(exp), MapOps.mapValues(branches)(print))
@@ -58,7 +58,7 @@ object JvmAstPrinter {
     case Expr.TryCatch(exp, rules, _, _, _) => DocAst.Expr.TryCatch(print(exp), rules.map {
       case JvmAst.CatchRule(sym, _, clazz, body) => (sym, clazz, print(body))
     })
-    case Expr.RunWith(exp, effUse, rules, _, _, _, _) => DocAst.Expr.RunWithHandler(print(exp), effUse.sym, rules.map {
+    case Expr.RunWith(exp, effUse, rules, _, _, _, _, _) => DocAst.Expr.RunWithHandler(print(exp), effUse.sym, rules.map {
       case JvmAst.HandlerRule(op, fparams, body) =>
         (op.sym, fparams.map(printFormalParam), print(body))
     })

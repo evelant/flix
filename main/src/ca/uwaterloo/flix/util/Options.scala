@@ -26,6 +26,8 @@ object Options {
     */
   val Default: Options = Options(
     lib = LibLevel.All,
+    stdlibProfile = StdlibProfile.Jvm,
+    target = CompilationTarget.Jvm,
     build = Build.Development,
     entryPoint = None,
     githubToken = None,
@@ -87,6 +89,8 @@ object Options {
   * @param assumeYes      run non-interactively and assume answer to all prompts is yes.
   */
 case class Options(lib: LibLevel,
+                   stdlibProfile: StdlibProfile,
+                   target: CompilationTarget,
                    build: Build,
                    entryPoint: Option[Symbol.DefnSym],
                    githubToken: Option[String],
@@ -147,6 +151,47 @@ object LibLevel {
     */
   case object All extends LibLevel
 
+}
+
+/**
+  * An option to control which stdlib profile is used.
+  */
+sealed trait StdlibProfile
+
+object StdlibProfile {
+  /**
+    * The current JVM stdlib profile (may include Java interop and JVM-only overlays).
+    */
+  case object Jvm extends StdlibProfile
+
+  /**
+    * The portable stdlib profile intended for LLVM targets (no Java interop).
+    *
+    * Note: this profile can also be used on the JVM backend to run the portable conformance suite.
+    */
+  case object Portable extends StdlibProfile
+}
+
+/**
+  * An option to control which compilation target is used.
+  */
+sealed trait CompilationTarget
+
+object CompilationTarget {
+  /**
+    * Compile to JVM bytecode and execute on the JVM.
+    */
+  case object Jvm extends CompilationTarget
+
+  /**
+    * Compile to LLVM IR intended for native targets (x86_64/aarch64).
+    */
+  case object LlvmNative extends CompilationTarget
+
+  /**
+    * Compile to LLVM IR intended for WebAssembly.
+    */
+  case object LlvmWasm extends CompilationTarget
 }
 
 sealed trait Subeffecting

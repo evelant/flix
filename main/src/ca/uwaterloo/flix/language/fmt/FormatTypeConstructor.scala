@@ -40,6 +40,9 @@ object FormatTypeConstructor {
     case TypeConstructor.BigInt => "BigInt"
     case TypeConstructor.Str => "String"
     case TypeConstructor.Regex => "Regex"
+    case TypeConstructor.StringBuilderHandle => "StringBuilderHandle"
+    case TypeConstructor.RegexMatcher => "RegexMatcher"
+    case TypeConstructor.ChannelHandle => "ChannelHandle"
 
     // Arrows
     case TypeConstructor.Arrow(arity) => s"Arrow$arity"

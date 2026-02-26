@@ -21,7 +21,8 @@ import ca.uwaterloo.flix.language.ast.shared.{AvailableClasses, Input, SecurityC
 import ca.uwaterloo.flix.language.dbg.AstPrinter
 import ca.uwaterloo.flix.language.fmt.FormatOptions
 import ca.uwaterloo.flix.language.phase.*
-import ca.uwaterloo.flix.language.phase.jvm.{JvmBackend, JvmLoader, JvmWriter}
+import ca.uwaterloo.flix.language.phase.llvm.{LlvmBackend, LlvmNativeDriver, LlvmWriter}
+import ca.uwaterloo.flix.language.phase.jvm.{JvmBackend, JvmLoader, JvmLowerer, JvmWriter}
 import ca.uwaterloo.flix.language.phase.monomorph.Specialization
 import ca.uwaterloo.flix.language.phase.optimizer.{LambdaDrop, Optimizer}
 import ca.uwaterloo.flix.language.{CompilationMessage, GenSym}
@@ -39,6 +40,7 @@ import java.util.concurrent.ForkJoinPool
 import java.util.zip.ZipFile
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
+import scala.jdk.CollectionConverters.*
 import scala.language.implicitConversions
 import scala.util.Using
 
@@ -617,22 +619,55 @@ class Flix {
     var eraserAst = Eraser.run(tailPosAst)
     tailPosAst = null // Explicitly null-out such that the memory becomes eligible for GC.
 
-    var reducerAst = Reducer.run(eraserAst)
+    var loweredAst = Lowerer.run(eraserAst)
     eraserAst = null // Explicitly null-out such that the memory becomes eligible for GC.
 
-    // Generate JVM classes.
-    val bytecodeAst = JvmBackend.run(reducerAst)
-    reducerAst = null // Explicitly null-out such that the memory becomes eligible for GC.
+    val result = flix.options.target match {
+      case CompilationTarget.Jvm =>
+        var jvmAst = JvmLowerer.run(loweredAst)
+        loweredAst = null // Explicitly null-out such that the memory becomes eligible for GC.
 
-    val totalTime = flix.getTotalTime
+        // Generate JVM classes.
+        val bytecodeAst = JvmBackend.run(jvmAst)
+        jvmAst = null // Explicitly null-out such that the memory becomes eligible for GC.
 
-    JvmWriter.run(bytecodeAst)
-    // (Optionally) load generated JVM classes.
-    val loaderResult = JvmLoader.run(bytecodeAst)
+        val totalTime = flix.getTotalTime
 
-    // Construct the compilation result.
-    val totalSize = bytecodeAst.classes.values.map(_.bytecode.length).sum
-    val result = new CompilationResult(loaderResult.main, loaderResult.tests, loaderResult.sources, totalTime, totalSize)
+        JvmWriter.run(bytecodeAst)
+        // (Optionally) load generated JVM classes.
+        val loaderResult = JvmLoader.run(bytecodeAst)
+
+        // Construct the compilation result.
+        val totalSize = bytecodeAst.classes.values.map(_.bytecode.length).sum
+        new CompilationResult(loaderResult.main, loaderResult.tests, loaderResult.sources, totalTime, totalSize)
+
+      case _ =>
+        val hasMain = loweredAst.mainEntryPoint.nonEmpty
+        val module = LlvmBackend.run(loweredAst)
+        loweredAst = null // Explicitly null-out such that the memory becomes eligible for GC.
+
+        val totalTime = flix.getTotalTime
+        val totalSize = LlvmWriter.run(module)
+
+        flix.options.target match {
+          case CompilationTarget.LlvmNative if hasMain =>
+            val artifacts = LlvmNativeDriver.run(LlvmWriter.modulePath(flix.options.outputPath))
+            val main = Some((args: Array[String]) => {
+              val cmd = (artifacts.executable.toString :: args.toList).asJava
+              val pb = new ProcessBuilder(cmd)
+              pb.inheritIO()
+              val exit = pb.start().waitFor()
+              if (exit != 0) {
+                throw new RuntimeException(s"LLVM-native program exited with code: $exit")
+              }
+            })
+            new CompilationResult(main, Map.empty, typedAst.sources, totalTime, totalSize)
+
+          case _ =>
+            // LLVM artifacts are written to disk. We do not (yet) support running or loading them.
+            new CompilationResult(None, Map.empty, typedAst.sources, totalTime, totalSize)
+        }
+    }
 
     // Shutdown fork-join thread pool.
     shutdownForkJoinPool()
@@ -775,10 +810,20 @@ class Flix {
     * Returns a list of inputs constructed from the strings and paths passed to Flix.
     */
   private def getInputs: List[Input] = {
+    val coreLib = options.stdlibProfile match {
+      case StdlibProfile.Jvm => Library.CoreLibrary
+      case StdlibProfile.Portable => Library.CoreLibraryBase
+    }
+
+    val standardLib = options.stdlibProfile match {
+      case StdlibProfile.Jvm => Library.StandardLibrary
+      case StdlibProfile.Portable => Library.StandardLibraryPortable
+    }
+
     val lib = options.lib match {
       case LibLevel.Nix => Nil
-      case LibLevel.Min => getLibraryInputs(Library.CoreLibrary)
-      case LibLevel.All => getLibraryInputs(Library.CoreLibrary ++ Library.StandardLibrary)
+      case LibLevel.Min => getLibraryInputs(coreLib)
+      case LibLevel.All => getLibraryInputs(coreLib ++ standardLib)
     }
     inputs.values.toList ::: lib
   }

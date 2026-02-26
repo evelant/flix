@@ -62,6 +62,8 @@ object Main {
     // construct flix options.
     var options = Options(
       lib = cmdOpts.xlib,
+      stdlibProfile = cmdOpts.xstdlibProfile,
+      target = cmdOpts.xtarget,
       build = Build.Development,
       entryPoint = entryPoint,
       githubToken = githubToken,
@@ -476,6 +478,8 @@ object Main {
     xbenchmarkThroughput: Boolean = false,
     xnodeprecated: Boolean = false,
     xlib: LibLevel = LibLevel.All,
+    xstdlibProfile: StdlibProfile = StdlibProfile.Jvm,
+    xtarget: CompilationTarget = CompilationTarget.Jvm,
     xprintphases: Boolean = false,
     xsummary: Boolean = false,
     xsubeffecting: Set[Subeffecting] = Set.empty,
@@ -564,6 +568,19 @@ object Main {
       case "ins-defs" => Subeffecting.InsDefs
       case "lambdas" => Subeffecting.Lambdas
       case arg => throw new IllegalArgumentException(s"'$arg' is not a valid subeffecting option. Valid options are comma-separated combinations of 'mod-defs', 'ins-defs', and 'lambdas'.")
+    }
+
+    implicit val readStdlibProfile: scopt.Read[StdlibProfile] = scopt.Read.reads {
+      case "jvm" => StdlibProfile.Jvm
+      case "portable" => StdlibProfile.Portable
+      case arg => throw new IllegalArgumentException(s"'$arg' is not a valid stdlib profile. Valid options are 'jvm' and 'portable'.")
+    }
+
+    implicit val readCompilationTarget: scopt.Read[CompilationTarget] = scopt.Read.reads {
+      case "jvm" => CompilationTarget.Jvm
+      case "llvm-native" => CompilationTarget.LlvmNative
+      case "llvm-wasm" => CompilationTarget.LlvmWasm
+      case arg => throw new IllegalArgumentException(s"'$arg' is not a valid compilation target. Valid options are 'jvm', 'llvm-native', and 'llvm-wasm'.")
     }
 
     val parser = new scopt.OptionParser[CmdOpts]("flix") {
@@ -692,6 +709,14 @@ object Main {
       // Xlib
       opt[LibLevel]("Xlib").action((arg, c) => c.copy(xlib = arg)).
         text("[experimental] controls the amount of std. lib. to include (nix, min, all).")
+
+      // Xstdlib-profile
+      opt[StdlibProfile]("Xstdlib-profile").action((arg, c) => c.copy(xstdlibProfile = arg)).
+        text("[experimental] selects stdlib profile (jvm, portable).")
+
+      // Xtarget
+      opt[CompilationTarget]("Xtarget").action((arg, c) => c.copy(xtarget = arg)).
+        text("[experimental] selects compilation target (jvm, llvm-native, llvm-wasm).")
 
       // Xno-deprecated
       opt[Unit]("Xno-deprecated").action((_, c) => c.copy(xnodeprecated = true)).

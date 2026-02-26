@@ -1027,6 +1027,19 @@ object BackendObjType {
       cm.mkStaticMethod(GetArgsMethod, IsPublic, IsFinal, getArgsIns(_))
       cm.mkStaticMethod(SetArgsMethod, IsPublic, IsFinal, setArgsIns(_))
 
+      cm.mkField(TcpSocketsField, IsPrivate, IsFinal, NotVolatile)
+      cm.mkField(TcpServersField, IsPrivate, IsFinal, NotVolatile)
+      cm.mkField(ProcessesField, IsPrivate, IsFinal, NotVolatile)
+      cm.mkStaticMethod(PutTcpSocketMethod, IsPublic, IsFinal, putTcpSocketIns(_))
+      cm.mkStaticMethod(GetTcpSocketMethod, IsPublic, IsFinal, getTcpSocketIns(_))
+      cm.mkStaticMethod(RemoveTcpSocketMethod, IsPublic, IsFinal, removeTcpSocketIns(_))
+      cm.mkStaticMethod(PutTcpServerMethod, IsPublic, IsFinal, putTcpServerIns(_))
+      cm.mkStaticMethod(GetTcpServerMethod, IsPublic, IsFinal, getTcpServerIns(_))
+      cm.mkStaticMethod(RemoveTcpServerMethod, IsPublic, IsFinal, removeTcpServerIns(_))
+      cm.mkStaticMethod(PutProcessMethod, IsPublic, IsFinal, putProcessIns(_))
+      cm.mkStaticMethod(GetProcessMethod, IsPublic, IsFinal, getProcessIns(_))
+      cm.mkStaticMethod(RemoveProcessMethod, IsPublic, IsFinal, removeProcessIns(_))
+
       cm.closeClassMaker()
     }
 
@@ -1040,6 +1053,24 @@ object BackendObjType {
       ICONST_0()
       ANEWARRAY(JvmName.String)
       PUTSTATIC(ArgsField)
+
+      val chm = ConcurrentHashMapClass
+
+      NEW(chm)
+      DUP()
+      invokeConstructor(chm, MethodDescriptor.NothingToVoid)
+      PUTSTATIC(TcpSocketsField)
+
+      NEW(chm)
+      DUP()
+      invokeConstructor(chm, MethodDescriptor.NothingToVoid)
+      PUTSTATIC(TcpServersField)
+
+      NEW(chm)
+      DUP()
+      invokeConstructor(chm, MethodDescriptor.NothingToVoid)
+      PUTSTATIC(ProcessesField)
+
       RETURN()
     }
 
@@ -1094,6 +1125,146 @@ object BackendObjType {
     private def CounterField: StaticField = StaticField(this.jvmName, "counter", JvmName.AtomicLong.toTpe)
 
     private def ArgsField: StaticField = StaticField(this.jvmName, "args", BackendType.Array(BackendType.String))
+
+    private def ConcurrentHashMapClass: JvmName = JvmName(JvmName.JavaUtilConcurrent, "ConcurrentHashMap")
+
+    private def SocketClass: JvmName = JvmName.ofClass(classOf[java.net.Socket])
+
+    private def ServerSocketClass: JvmName = JvmName.ofClass(classOf[java.net.ServerSocket])
+
+    private def ProcessClass: JvmName = JvmName.ofClass(classOf[java.lang.Process])
+
+    private def TcpSocketsField: StaticField = StaticField(this.jvmName, "tcpSockets", ConcurrentHashMapClass.toTpe)
+
+    private def TcpServersField: StaticField = StaticField(this.jvmName, "tcpServers", ConcurrentHashMapClass.toTpe)
+
+    private def ProcessesField: StaticField = StaticField(this.jvmName, "processes", ConcurrentHashMapClass.toTpe)
+
+    private def PutTcpSocketMethod: StaticMethod =
+      StaticMethod(this.jvmName, "putTcpSocket", mkDescriptor(BackendType.Int64, SocketClass.toTpe)(VoidableType.Void))
+
+    private def GetTcpSocketMethod: StaticMethod =
+      StaticMethod(this.jvmName, "getTcpSocket", mkDescriptor(BackendType.Int64)(SocketClass.toTpe))
+
+    private def RemoveTcpSocketMethod: StaticMethod =
+      StaticMethod(this.jvmName, "removeTcpSocket", mkDescriptor(BackendType.Int64)(SocketClass.toTpe))
+
+    private def PutTcpServerMethod: StaticMethod =
+      StaticMethod(this.jvmName, "putTcpServer", mkDescriptor(BackendType.Int64, ServerSocketClass.toTpe)(VoidableType.Void))
+
+    private def GetTcpServerMethod: StaticMethod =
+      StaticMethod(this.jvmName, "getTcpServer", mkDescriptor(BackendType.Int64)(ServerSocketClass.toTpe))
+
+    private def RemoveTcpServerMethod: StaticMethod =
+      StaticMethod(this.jvmName, "removeTcpServer", mkDescriptor(BackendType.Int64)(ServerSocketClass.toTpe))
+
+    private def PutProcessMethod: StaticMethod =
+      StaticMethod(this.jvmName, "putProcess", mkDescriptor(BackendType.Int64, ProcessClass.toTpe)(VoidableType.Void))
+
+    private def GetProcessMethod: StaticMethod =
+      StaticMethod(this.jvmName, "getProcess", mkDescriptor(BackendType.Int64)(ProcessClass.toTpe))
+
+    private def RemoveProcessMethod: StaticMethod =
+      StaticMethod(this.jvmName, "removeProcess", mkDescriptor(BackendType.Int64)(ProcessClass.toTpe))
+
+    private def putTcpSocketIns(implicit mv: MethodVisitor): Unit = {
+      val chm = ConcurrentHashMapClass
+      GETSTATIC(TcpSocketsField)
+      LLOAD(0)
+      INVOKESTATIC(JvmName.Long, "valueOf", MethodDescriptor(List(BackendType.Int64), JvmName.Long.toTpe))
+      ALOAD(2)
+      INVOKEVIRTUAL(chm, "put", MethodDescriptor(List(BackendType.Object, BackendType.Object), BackendType.Object))
+      POP()
+      RETURN()
+    }
+
+    private def getTcpSocketIns(implicit mv: MethodVisitor): Unit = {
+      val chm = ConcurrentHashMapClass
+      val socket = SocketClass
+      GETSTATIC(TcpSocketsField)
+      LLOAD(0)
+      INVOKESTATIC(JvmName.Long, "valueOf", MethodDescriptor(List(BackendType.Int64), JvmName.Long.toTpe))
+      INVOKEVIRTUAL(chm, "get", MethodDescriptor(List(BackendType.Object), BackendType.Object))
+      CHECKCAST(socket)
+      ARETURN()
+    }
+
+    private def removeTcpSocketIns(implicit mv: MethodVisitor): Unit = {
+      val chm = ConcurrentHashMapClass
+      val socket = SocketClass
+      GETSTATIC(TcpSocketsField)
+      LLOAD(0)
+      INVOKESTATIC(JvmName.Long, "valueOf", MethodDescriptor(List(BackendType.Int64), JvmName.Long.toTpe))
+      INVOKEVIRTUAL(chm, "remove", MethodDescriptor(List(BackendType.Object), BackendType.Object))
+      CHECKCAST(socket)
+      ARETURN()
+    }
+
+    private def putTcpServerIns(implicit mv: MethodVisitor): Unit = {
+      val chm = ConcurrentHashMapClass
+      GETSTATIC(TcpServersField)
+      LLOAD(0)
+      INVOKESTATIC(JvmName.Long, "valueOf", MethodDescriptor(List(BackendType.Int64), JvmName.Long.toTpe))
+      ALOAD(2)
+      INVOKEVIRTUAL(chm, "put", MethodDescriptor(List(BackendType.Object, BackendType.Object), BackendType.Object))
+      POP()
+      RETURN()
+    }
+
+    private def getTcpServerIns(implicit mv: MethodVisitor): Unit = {
+      val chm = ConcurrentHashMapClass
+      val serverSocket = ServerSocketClass
+      GETSTATIC(TcpServersField)
+      LLOAD(0)
+      INVOKESTATIC(JvmName.Long, "valueOf", MethodDescriptor(List(BackendType.Int64), JvmName.Long.toTpe))
+      INVOKEVIRTUAL(chm, "get", MethodDescriptor(List(BackendType.Object), BackendType.Object))
+      CHECKCAST(serverSocket)
+      ARETURN()
+    }
+
+    private def removeTcpServerIns(implicit mv: MethodVisitor): Unit = {
+      val chm = ConcurrentHashMapClass
+      val serverSocket = ServerSocketClass
+      GETSTATIC(TcpServersField)
+      LLOAD(0)
+      INVOKESTATIC(JvmName.Long, "valueOf", MethodDescriptor(List(BackendType.Int64), JvmName.Long.toTpe))
+      INVOKEVIRTUAL(chm, "remove", MethodDescriptor(List(BackendType.Object), BackendType.Object))
+      CHECKCAST(serverSocket)
+      ARETURN()
+    }
+
+    private def putProcessIns(implicit mv: MethodVisitor): Unit = {
+      val chm = ConcurrentHashMapClass
+      GETSTATIC(ProcessesField)
+      LLOAD(0)
+      INVOKESTATIC(JvmName.Long, "valueOf", MethodDescriptor(List(BackendType.Int64), JvmName.Long.toTpe))
+      ALOAD(2)
+      INVOKEVIRTUAL(chm, "put", MethodDescriptor(List(BackendType.Object, BackendType.Object), BackendType.Object))
+      POP()
+      RETURN()
+    }
+
+    private def getProcessIns(implicit mv: MethodVisitor): Unit = {
+      val chm = ConcurrentHashMapClass
+      val proc = ProcessClass
+      GETSTATIC(ProcessesField)
+      LLOAD(0)
+      INVOKESTATIC(JvmName.Long, "valueOf", MethodDescriptor(List(BackendType.Int64), JvmName.Long.toTpe))
+      INVOKEVIRTUAL(chm, "get", MethodDescriptor(List(BackendType.Object), BackendType.Object))
+      CHECKCAST(proc)
+      ARETURN()
+    }
+
+    private def removeProcessIns(implicit mv: MethodVisitor): Unit = {
+      val chm = ConcurrentHashMapClass
+      val proc = ProcessClass
+      GETSTATIC(ProcessesField)
+      LLOAD(0)
+      INVOKESTATIC(JvmName.Long, "valueOf", MethodDescriptor(List(BackendType.Int64), JvmName.Long.toTpe))
+      INVOKEVIRTUAL(chm, "remove", MethodDescriptor(List(BackendType.Object), BackendType.Object))
+      CHECKCAST(proc)
+      ARETURN()
+    }
 
     private def arrayCopy()(implicit mv: MethodVisitor): Unit = {
       mv.visitMethodInstruction(Opcodes.INVOKESTATIC, JvmName.System, "arraycopy",

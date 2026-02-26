@@ -308,6 +308,8 @@ object Namer {
     case "BigInt" => true
     case "String" => true
     case "Regex" => true
+    case "StringBuilderHandle" => true
+    case "RegexMatcher" => true
     case _ => false
   }
 

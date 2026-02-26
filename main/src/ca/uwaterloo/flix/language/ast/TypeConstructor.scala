@@ -132,6 +132,33 @@ object TypeConstructor {
   }
 
   /**
+    * A type constructor that represents the type of string builder handles.
+    *
+    * This type exists to allow a portable stdlib implementation without JVM interop.
+    */
+  case object StringBuilderHandle extends TypeConstructor {
+    def kind: Kind = Kind.Star
+  }
+
+  /**
+    * A type constructor that represents the type of regex matcher handles.
+    *
+    * This type exists to allow a portable stdlib implementation without JVM interop.
+    */
+  case object RegexMatcher extends TypeConstructor {
+    def kind: Kind = Kind.Star
+  }
+
+  /**
+    * A type constructor that represents the type of channel handles.
+    *
+    * This type exists to allow a portable stdlib implementation without JVM interop.
+    */
+  case object ChannelHandle extends TypeConstructor {
+    def kind: Kind = Kind.Star
+  }
+
+  /**
     * A type constructor that represents the type of functions.
     */
   @IntroducedBy(Kinder.getClass)

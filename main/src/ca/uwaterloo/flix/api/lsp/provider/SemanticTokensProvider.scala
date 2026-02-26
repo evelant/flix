@@ -856,12 +856,14 @@ object SemanticTokensProvider {
     case TypeConstructor.Int16 => true
     case TypeConstructor.Int32 => true
     case TypeConstructor.Int64 => true
-    case TypeConstructor.BigInt => true
-    case TypeConstructor.Str => true
-    case TypeConstructor.Regex => true
-    case TypeConstructor.Sender => true
-    case TypeConstructor.Receiver => true
-    case TypeConstructor.Lazy => true
+	    case TypeConstructor.BigInt => true
+	    case TypeConstructor.Str => true
+	    case TypeConstructor.Regex => true
+	    case TypeConstructor.StringBuilderHandle => true
+	    case TypeConstructor.RegexMatcher => true
+	    case TypeConstructor.Sender => true
+	    case TypeConstructor.Receiver => true
+	    case TypeConstructor.Lazy => true
     case TypeConstructor.Enum(_, _) => true
     case TypeConstructor.Struct(_, _) => true
     case TypeConstructor.RestrictableEnum(_, _) => true
@@ -911,6 +913,7 @@ object SemanticTokensProvider {
     case TypeConstructor.ArrowWithoutEffect(_) => false
     case TypeConstructor.ArrayWithoutRegion => false
     case TypeConstructor.RegionWithoutRegion => false
+    case TypeConstructor.ChannelHandle => false
   }
 
   /**

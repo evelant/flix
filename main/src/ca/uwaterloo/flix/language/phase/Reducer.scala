@@ -129,21 +129,21 @@ object Reducer {
         JvmAst.Expr.ApplyAtomic(op, es, tpe, purity, loc)
 
       case ErasedAst.Expr.ApplyClo(exp1, exp2, ct, tpe, purity, loc) =>
-        if (ct == ExpPosition.NonTail && Purity.isControlImpure(purity)) lctx.addPcPoint()
+        val pcPointId = if (ct == ExpPosition.NonTail && Purity.isControlImpure(purity)) lctx.newPcPointId() else 0
         val e1 = visitExpr(exp1)
         val e2 = visitExpr(exp2)
-        JvmAst.Expr.ApplyClo(e1, e2, ct, tpe, purity, loc)
+        JvmAst.Expr.ApplyClo(e1, e2, ct, pcPointId, tpe, purity, loc)
 
       case ErasedAst.Expr.ApplyDef(sym, exps, ct, tpe, purity, loc) =>
         val defn = root.defs(sym)
-        if (ct == ExpPosition.NonTail && Purity.isControlImpure(defn.exp.purity)) lctx.addPcPoint()
+        val pcPointId = if (ct == ExpPosition.NonTail && Purity.isControlImpure(defn.exp.purity)) lctx.newPcPointId() else 0
         val es = exps.map(visitExpr)
-        JvmAst.Expr.ApplyDef(sym, es, ct, tpe, purity, loc)
+        JvmAst.Expr.ApplyDef(sym, es, ct, pcPointId, tpe, purity, loc)
 
       case ErasedAst.Expr.ApplyOp(sym, exps, tpe, purity, loc) =>
-        lctx.addPcPoint()
+        val pcPointId = lctx.newPcPointId()
         val es = exps.map(visitExpr)
-        JvmAst.Expr.ApplyOp(sym, es, tpe, purity, loc)
+        JvmAst.Expr.ApplyOp(sym, es, pcPointId, tpe, purity, loc)
 
       case ErasedAst.Expr.ApplySelfTail(sym, exps, tpe, purity, loc) =>
         val es = exps.map(visitExpr)
@@ -195,14 +195,14 @@ object Reducer {
         JvmAst.Expr.TryCatch(e, rs, tpe, purity, loc)
 
       case ErasedAst.Expr.RunWith(exp, effUse, rules, ct, tpe, purity, loc) =>
-        if (ct == ExpPosition.NonTail) lctx.addPcPoint()
+        val pcPointId = if (ct == ExpPosition.NonTail) lctx.newPcPointId() else 0
         val e = visitExpr(exp)
         val rs = rules.map {
           case ErasedAst.HandlerRule(op, fparams, body) =>
             val b = visitExpr(body)
             JvmAst.HandlerRule(op, fparams.map(visitFormalParam), b)
         }
-        JvmAst.Expr.RunWith(e, effUse, rs, ct, tpe, purity, loc)
+        JvmAst.Expr.RunWith(e, effUse, rs, ct, pcPointId, tpe, purity, loc)
 
       case ErasedAst.Expr.NewObject(name, clazz, tpe, purity, methods, loc) =>
         val specs = methods.map {
@@ -246,9 +246,12 @@ object Reducer {
     /**
       * Adds n to the private [[pcPoints]] field.
       */
-    def addPcPoint(): Unit = {
+    def newPcPointId(): Int = {
       if (isControlImpure) {
         pcPoints += 1
+        pcPoints
+      } else {
+        0
       }
     }
 
@@ -344,7 +347,7 @@ object Reducer {
       case Some((tpe, taskList)) =>
         val taskList1 = tpe match {
           case Void | AnyType | Unit | Bool | Char | Float32 | Float64 | BigDecimal | Int8 | Int16 |
-               Int32 | Int64 | BigInt | String | Regex | Region | RecordEmpty | ExtensibleEmpty |
+               Int32 | Int64 | BigInt | String | Regex | StringBuilderHandle | RegexMatcher | ChannelHandle | Region | RecordEmpty | ExtensibleEmpty |
                Native(_) | Null => taskList
           case Array(elm) => taskList.enqueue(elm)
           case Lazy(elm) => taskList.enqueue(elm)

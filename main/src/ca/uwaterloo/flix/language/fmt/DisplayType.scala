@@ -77,6 +77,12 @@ object DisplayType {
 
   case object Regex extends DisplayType
 
+  case object StringBuilderHandle extends DisplayType
+
+  case object RegexMatcher extends DisplayType
+
+  case object ChannelHandle extends DisplayType
+
   case object Array extends DisplayType
 
   case object ArrayWithoutRegion extends DisplayType
@@ -402,6 +408,9 @@ object DisplayType {
         case TypeConstructor.BigInt => BigInt
         case TypeConstructor.Str => Str
         case TypeConstructor.Regex => Regex
+        case TypeConstructor.StringBuilderHandle => StringBuilderHandle
+        case TypeConstructor.RegexMatcher => RegexMatcher
+        case TypeConstructor.ChannelHandle => ChannelHandle
 
         case TypeConstructor.Arrow(arity) =>
           val args = t.typeArguments.map(visit)

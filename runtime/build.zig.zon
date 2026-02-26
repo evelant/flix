@@ -1,0 +1,17 @@
+.{
+    .name = .flix_runtime_spikes,
+    .version = "0.0.0",
+    .fingerprint = 0xfa19d56c2342499f, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{
+        .libxev = .{
+            .path = "../vendor/libxev",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+    },
+}

@@ -2267,6 +2267,8 @@ object Resolver {
         case "BigInt" => UnkindedType.Cst(TypeConstructor.BigInt, loc)
         case "String" => UnkindedType.Cst(TypeConstructor.Str, loc)
         case "Regex" => UnkindedType.Cst(TypeConstructor.Regex, loc)
+        case "StringBuilderHandle" => UnkindedType.Cst(TypeConstructor.StringBuilderHandle, loc)
+        case "RegexMatcher" => UnkindedType.Cst(TypeConstructor.RegexMatcher, loc)
         case "Sender" => UnkindedType.Cst(TypeConstructor.Sender, loc)
         case "Receiver" => UnkindedType.Cst(TypeConstructor.Receiver, loc)
         case "Lazy" => UnkindedType.Cst(TypeConstructor.Lazy, loc)

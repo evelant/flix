@@ -148,7 +148,12 @@ object TypeReconstruction {
 
     case KindedAst.Expr.Unary(sop, exp, tvar, loc) =>
       val e = visitExp(exp)
-      val eff = e.eff
+      val eff = sop match {
+        case _: SemanticOp.IoOp =>
+          Type.mkUnion(e.eff, Type.IO, loc)
+        case _ =>
+          e.eff
+      }
       TypedAst.Expr.Unary(sop, e, subst(tvar), eff, loc)
 
     case KindedAst.Expr.Binary(sop, exp1, exp2, tvar, loc) =>
