@@ -18,7 +18,7 @@
 /// The effect used to bind a TCP server.
 ///
 eff TcpBindWithResult {
-    def bind(ip: IpAddr, port: Int16): Result[IoError, TcpServer]
+    def bind(ip: IpAddr, port: Int32): Result[IoError, TcpServer]
 }
 
 pub mod TcpBindWithResult {
@@ -35,7 +35,7 @@ pub mod TcpBindWithResult {
             f(x)
         } with handler TcpBindWithResult {
             def bind(ip, port, resume) = {
-                let (ok, id, kind, msg) = %%TCP_SERVER_BIND%%((IpAddr.toBytes(ip), Int16.toInt32(port)));
+                let (ok, id, kind, msg) = %%TCP_SERVER_BIND%%((IpAddr.toBytes(ip), port));
                 if (ok) {
                     resume(Ok(TcpServer.TcpServer(id)))
                 } else {

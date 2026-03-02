@@ -1923,12 +1923,16 @@ object Weeder2 {
 
     private def visitTryCatchRule(tree: Tree)(implicit sctx: SharedContext): Validation[CatchRule, CompilationMessage] = {
       expect(tree, TreeKind.Expr.TryCatchRuleFragment)
-      mapN(pickNameIdent(tree), pickQName(tree), pickExpr(tree)) {
-        case (ident, qname, expr) if qname.isUnqualified => CatchRule(ident, qname.ident, expr, tree.loc)
-        case (ident, qname, expr) =>
-          val error = IllegalQualifiedName(qname.loc)
-          sctx.errors.add(error)
-          CatchRule(ident, qname.ident, expr, tree.loc)
+      mapN(pickNameIdent(tree), Types.pickType(tree), pickExpr(tree)) {
+        case (ident, tpe, expr) =>
+          tpe match {
+            case Type.Ambiguous(qname, _) if !qname.isUnqualified =>
+              val error = IllegalQualifiedName(tree.loc)
+              sctx.errors.add(error)
+              CatchRule(ident, Type.Error(tree.loc), Expr.Error(error), tree.loc)
+            case _ =>
+              CatchRule(ident, tpe, expr, tree.loc)
+          }
       }
     }
 
@@ -2357,11 +2361,35 @@ object Weeder2 {
         case ("SLEEP_MILLIS", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.SleepMillis, e1, loc)
         case ("EXIT", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.Exit, e1, loc)
         case ("NEW_ID", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.NewId, e1, loc)
+        case ("FILE_EXISTS", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileExists, e1, loc)
+        case ("FILE_IS_DIRECTORY", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileIsDirectory, e1, loc)
+        case ("FILE_IS_REGULAR_FILE", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileIsRegularFile, e1, loc)
+        case ("FILE_IS_READABLE", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileIsReadable, e1, loc)
+        case ("FILE_IS_SYMBOLIC_LINK", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileIsSymbolicLink, e1, loc)
+        case ("FILE_IS_WRITABLE", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileIsWritable, e1, loc)
+        case ("FILE_IS_EXECUTABLE", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileIsExecutable, e1, loc)
+        case ("FILE_ACCESS_TIME", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileAccessTime, e1, loc)
+        case ("FILE_CREATION_TIME", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileCreationTime, e1, loc)
+        case ("FILE_MODIFICATION_TIME", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileModificationTime, e1, loc)
+        case ("FILE_SIZE", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileSize, e1, loc)
+        case ("FILE_READ", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileRead, e1, loc)
+        case ("FILE_READ_LINES", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileReadLines, e1, loc)
+        case ("FILE_READ_BYTES", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileReadBytes, e1, loc)
+        case ("FILE_LIST", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileList, e1, loc)
+        case ("FILE_WRITE", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileWrite, e1, loc)
+        case ("FILE_WRITE_BYTES", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileWriteBytes, e1, loc)
+        case ("FILE_APPEND", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileAppend, e1, loc)
+        case ("FILE_APPEND_BYTES", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileAppendBytes, e1, loc)
+        case ("FILE_TRUNCATE", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileTruncate, e1, loc)
+        case ("FILE_MKDIR", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileMkDir, e1, loc)
+        case ("FILE_MKDIRS", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileMkDirs, e1, loc)
+        case ("FILE_MK_TEMP_DIR", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileMkTempDir, e1, loc)
         case ("TCP_SOCKET_READ", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.TcpSocketRead, e1, loc)
         case ("TCP_SOCKET_WRITE", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.TcpSocketWrite, e1, loc)
         case ("TCP_SOCKET_CONNECT", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.TcpSocketConnect, e1, loc)
         case ("TCP_SOCKET_CLOSE", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.TcpSocketClose, e1, loc)
         case ("TCP_SERVER_BIND", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.TcpServerBind, e1, loc)
+        case ("TCP_SERVER_LOCAL_PORT", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.TcpServerLocalPort, e1, loc)
         case ("TCP_SERVER_ACCEPT", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.TcpServerAccept, e1, loc)
         case ("TCP_SERVER_CLOSE", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.TcpServerClose, e1, loc)
         case ("PROCESS_STDIN_WRITE", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.ProcessStdinWrite, e1, loc)

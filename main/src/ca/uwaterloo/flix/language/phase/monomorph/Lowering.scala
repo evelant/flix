@@ -631,9 +631,10 @@ object Lowering {
     * Lowers the given catch rule `rule0`.
     */
   private def lowerCatchRule(rule: TypedAst.CatchRule)(implicit ctx: Context, root: TypedAst.Root, flix: Flix): MonoAst.CatchRule = rule match {
-    case TypedAst.CatchRule(bnd, clazz, exp, _) =>
+    case TypedAst.CatchRule(bnd, catchTpe, exp, _) =>
       val e = lowerExp(exp)
-      MonoAst.CatchRule(bnd.sym, clazz, e)
+      val t = lowerType(catchTpe)
+      MonoAst.CatchRule(bnd.sym, t, e)
   }
 
   /**
@@ -909,11 +910,46 @@ object Lowering {
       case (Type.Int64, Type.Int64) => MonoAst.Expr.Cast(exp, tpe, eff, loc)
       case (Type.Float32, Type.Float32) => MonoAst.Expr.Cast(exp, tpe, eff, loc)
       case (Type.Float64, Type.Float64) => MonoAst.Expr.Cast(exp, tpe, eff, loc)
+      case (x, y) if isPrimType(x) && isAnyType(y) =>
+        MonoAst.Expr.ApplyAtomic(AtomicOp.Box, List(exp), y, eff, loc)
+      case (x, y) if isAnyType(x) && isPrimType(y) =>
+        MonoAst.Expr.ApplyAtomic(AtomicOp.Unbox, List(exp), y, eff, loc)
+      // Support boxing/unboxing when casting between primitives and Object.
+      //
+      // This is important for portable surfaces (e.g. `Exn`) that must store arbitrary Flix values in an erased field.
+      case (x, y) if isPrimType(x) && isObjectType(y) =>
+        MonoAst.Expr.ApplyAtomic(AtomicOp.Box, List(exp), y, eff, loc)
+      case (x, y) if isObjectType(x) && isPrimType(y) =>
+        MonoAst.Expr.ApplyAtomic(AtomicOp.Unbox, List(exp), y, eff, loc)
       case (x, y) if !isPrimType(x) && !isPrimType(y) => MonoAst.Expr.Cast(exp, tpe, eff, loc)
       case (x, y) =>
         val crash = MonoAst.Expr.ApplyAtomic(AtomicOp.CastError(erasedString(x), erasedString(y)), Nil, tpe, eff, loc)
         MonoAst.Expr.Stm(exp, crash, tpe, eff, loc)
     }
+  }
+
+  /**
+    * Returns `true` iff `tpe` is `AnyType`.
+    *
+    * Used as an erased/boxed value type in portable stdlib surfaces.
+    *
+    * N.B.: `tpe` must be monomorphic.
+    */
+  private def isAnyType(tpe: Type): Boolean = Type.eraseAliases(tpe) match {
+    case Type.Cst(TypeConstructor.AnyType, _) => true
+    case _ => false
+  }
+
+  /**
+    * Returns `true` iff `tpe` is `java.lang.Object`.
+    *
+    * Used as the universal erased type in the JVM backend and for portable runtime surfaces.
+    *
+    * N.B.: `tpe` must be monomorphic.
+    */
+  private def isObjectType(tpe: Type): Boolean = Type.eraseAliases(tpe) match {
+    case Type.Cst(TypeConstructor.Native(clazz), _) => clazz == classOf[java.lang.Object]
+    case _ => false
   }
 
   /**
@@ -2118,10 +2154,10 @@ object Lowering {
     case MonoAst.Expr.TryCatch(exp, rules, tpe, eff, loc) =>
       val e = substExp(exp, subst)
       val rs = rules.map {
-        case MonoAst.CatchRule(sym, clazz, exp1) =>
+        case MonoAst.CatchRule(sym, catchTpe, exp1) =>
           val s = subst.getOrElse(sym, sym)
           val e1 = substExp(exp1, subst)
-          MonoAst.CatchRule(s, clazz, e1)
+          MonoAst.CatchRule(s, catchTpe, e1)
       }
       MonoAst.Expr.TryCatch(e, rs, tpe, eff, loc)
 

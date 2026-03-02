@@ -28,4 +28,9 @@ mod Test.Portable.DnsPingSignatures {
         ()
     }
 
+    pub def runAll(): Unit = {
+        let _ = smoke01();
+        ()
+    }
+
 }

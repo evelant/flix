@@ -32,6 +32,7 @@ object Library {
     "Comparison.flix" -> LocalResource.get("/src/library/Comparison.flix"),
     "Div.flix" -> LocalResource.get("/src/library/Div.flix"),
     "Eq.flix" -> LocalResource.get("/src/library/Eq.flix"),
+    "Exn.flix" -> LocalResource.get("/src/library/Exn.flix"),
     "Hash.flix" -> LocalResource.get("/src/library/Hash.flix"),
     "JoinLattice.flix" -> LocalResource.get("/src/library/JoinLattice.flix"),
     "LowerBound.flix" -> LocalResource.get("/src/library/LowerBound.flix"),
@@ -227,12 +228,23 @@ object Library {
     "Concurrent/ReentrantLock.flix",
     "Debug.flix",
     "DecodingReader.flix",
-    "DelayMap.flix",
     "EncodingWriter.flix",
   )
 
+  /**
+    * Portable-only overlays. These files are loaded only when the stdlib profile is `portable`.
+    *
+    * They provide default handlers and implementations that do not rely on Java interop.
+    */
+  private val StandardLibraryPortableOverlay = List(
+    "portable/FileRead.flix" -> LocalResource.get("/src/library/portable/FileRead.flix"),
+    "portable/FileReadWithResult.flix" -> LocalResource.get("/src/library/portable/FileReadWithResult.flix"),
+    "portable/FileWrite.flix" -> LocalResource.get("/src/library/portable/FileWrite.flix"),
+    "portable/FileWriteWithResult.flix" -> LocalResource.get("/src/library/portable/FileWriteWithResult.flix"),
+  )
+
   val StandardLibraryPortable: List[(String, String)] =
-    StandardLibraryBase.filterNot { case (virtualPath, _) => StandardLibraryPortableExclude.contains(virtualPath) }
+    StandardLibraryBase.filterNot { case (virtualPath, _) => StandardLibraryPortableExclude.contains(virtualPath) } ++ StandardLibraryPortableOverlay
 
   /**
     * JVM-only standard overlays. These files are loaded only when the stdlib profile is `jvm`.

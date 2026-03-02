@@ -339,9 +339,9 @@ object LambdaDrop {
     case Expr.TryCatch(exp1, rules, tpe, eff, loc) =>
       val e1 = rewriteExp(exp1)
       val rs = rules.map {
-        case MonoAst.CatchRule(sym, clazz, exp2) =>
+        case MonoAst.CatchRule(sym, catchTpe, exp2) =>
           val e2 = rewriteExp(exp2)
-          MonoAst.CatchRule(sym, clazz, e2)
+          MonoAst.CatchRule(sym, catchTpe, e2)
       }
       Expr.TryCatch(e1, rs, tpe, eff, loc)
 

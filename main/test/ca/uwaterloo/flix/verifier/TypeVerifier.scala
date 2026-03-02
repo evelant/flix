@@ -202,11 +202,35 @@ object TypeVerifier {
             case SemanticOp.IoOp.SleepMillis => (SimpleType.Int64, SimpleType.Unit)
             case SemanticOp.IoOp.Exit => (SimpleType.Int32, SimpleType.Unit)
             case SemanticOp.IoOp.NewId => (SimpleType.Unit, SimpleType.Int64)
+            case SemanticOp.IoOp.FileExists => (SimpleType.String, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Bool, SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.FileIsDirectory => (SimpleType.String, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Bool, SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.FileIsRegularFile => (SimpleType.String, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Bool, SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.FileIsReadable => (SimpleType.String, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Bool, SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.FileIsSymbolicLink => (SimpleType.String, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Bool, SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.FileIsWritable => (SimpleType.String, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Bool, SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.FileIsExecutable => (SimpleType.String, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Bool, SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.FileAccessTime => (SimpleType.String, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int64, SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.FileCreationTime => (SimpleType.String, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int64, SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.FileModificationTime => (SimpleType.String, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int64, SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.FileSize => (SimpleType.String, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int64, SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.FileRead => (SimpleType.String, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.String, SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.FileReadLines => (SimpleType.mkTuple(List(SimpleType.Region, SimpleType.String)), SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Array(SimpleType.String), SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.FileReadBytes => (SimpleType.mkTuple(List(SimpleType.Region, SimpleType.String)), SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Array(SimpleType.Int8), SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.FileList => (SimpleType.mkTuple(List(SimpleType.Region, SimpleType.String)), SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Array(SimpleType.String), SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.FileWrite => (SimpleType.mkTuple(List(SimpleType.String, SimpleType.String)), SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Unit, SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.FileWriteBytes => (SimpleType.mkTuple(List(SimpleType.Array(SimpleType.Int8), SimpleType.String)), SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Unit, SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.FileAppend => (SimpleType.mkTuple(List(SimpleType.String, SimpleType.String)), SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Unit, SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.FileAppendBytes => (SimpleType.mkTuple(List(SimpleType.Array(SimpleType.Int8), SimpleType.String)), SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Unit, SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.FileTruncate => (SimpleType.String, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Unit, SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.FileMkDir => (SimpleType.String, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Unit, SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.FileMkDirs => (SimpleType.String, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Unit, SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.FileMkTempDir => (SimpleType.String, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.String, SimpleType.Int32, SimpleType.String)))
             case SemanticOp.IoOp.TcpSocketRead => (SimpleType.mkTuple(List(SimpleType.Int64, SimpleType.Array(SimpleType.Int8))), SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int32, SimpleType.String)))
             case SemanticOp.IoOp.TcpSocketWrite => (SimpleType.mkTuple(List(SimpleType.Int64, SimpleType.Array(SimpleType.Int8))), SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int32, SimpleType.String)))
             case SemanticOp.IoOp.TcpSocketConnect => (SimpleType.mkTuple(List(SimpleType.Array(SimpleType.Int8), SimpleType.Int32)), SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int64, SimpleType.Int32, SimpleType.String)))
             case SemanticOp.IoOp.TcpSocketClose => (SimpleType.Int64, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.String)))
             case SemanticOp.IoOp.TcpServerBind => (SimpleType.mkTuple(List(SimpleType.Array(SimpleType.Int8), SimpleType.Int32)), SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int64, SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.TcpServerLocalPort => (SimpleType.Int64, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int32, SimpleType.String)))
             case SemanticOp.IoOp.TcpServerAccept => (SimpleType.Int64, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int64, SimpleType.Int32, SimpleType.String)))
             case SemanticOp.IoOp.TcpServerClose => (SimpleType.Int64, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.String)))
             case SemanticOp.IoOp.ProcessStdinWrite => (SimpleType.mkTuple(List(SimpleType.Int64, SimpleType.Array(SimpleType.Int8))), SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int32, SimpleType.String)))
@@ -546,11 +570,22 @@ object TypeVerifier {
           tpe
 
         case AtomicOp.Box =>
-          check(expected = SimpleType.Object)(actual = tpe, loc)
+          // Boxing is used for casts from primitives into an erased "any" value type.
+          // Depending on the cast target, the result is either `Object` (JVM erased type)
+          // or `AnyType` (portable erased value type).
+          tpe match {
+            case SimpleType.AnyType => tpe
+            case SimpleType.Native(clazz) if clazz == classOf[java.lang.Object] => tpe
+            case _ => failUnexpectedType(tpe, SimpleType.Object, loc)
+          }
 
         case AtomicOp.Unbox =>
           val List(t1) = ts
-          check(expected = SimpleType.Object)(actual = t1, loc)
+          t1 match {
+            case SimpleType.AnyType => ()
+            case SimpleType.Native(clazz) if clazz == classOf[java.lang.Object] => ()
+            case _ => failUnexpectedType(t1, SimpleType.Object, loc)
+          }
           tpe
 
         // cast may result in any type
@@ -603,7 +638,14 @@ object TypeVerifier {
 
         case AtomicOp.Throw =>
           val List(t) = ts
-          checkJavaSubtype(t, classOf[Throwable], loc)
+          t match {
+            case SimpleType.Native(clazz) =>
+              if (!classOf[Throwable].isAssignableFrom(clazz)) {
+                failMismatchedTypes(t, classOf[Throwable], loc)
+              }
+            case SimpleType.Enum(sym, _) if sym.text == "Exn" && sym.namespace.isEmpty => ()
+            case _ => failMismatchedTypes(t, classOf[Throwable], loc)
+          }
           tpe
 
         case AtomicOp.InstanceOf(_) =>
@@ -702,8 +744,16 @@ object TypeVerifier {
       checkEq(tpe, visitExpr(exp)(root, env + (sym -> SimpleType.Region), lenv), loc)
 
     case Expr.TryCatch(exp, rules, tpe, _, loc) =>
-      for (CatchRule(sym, clazz, exp) <- rules) {
-        checkEq(tpe, visitExpr(exp)(root, env + (sym -> SimpleType.Native(clazz)), lenv), exp.loc)
+      lazy val exnTpe: SimpleType = root.enums.keys.find(sym => sym.text == "Exn" && sym.namespace.isEmpty) match {
+        case Some(sym) => SimpleType.mkEnum(sym, Nil)
+        case None => throw InternalCompilerException("Missing enum symbol: Exn.", loc)
+      }
+      for (CatchRule(sym, catchTpe, exp) <- rules) {
+        val binderTpe = catchTpe match {
+          case SimpleType.Native(clazz) => SimpleType.Native(clazz)
+          case _ => exnTpe
+        }
+        checkEq(tpe, visitExpr(exp)(root, env + (sym -> binderTpe), lenv), exp.loc)
       }
       val t = visitExpr(exp)
       checkEq(tpe, t, loc)

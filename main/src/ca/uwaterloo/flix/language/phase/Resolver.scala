@@ -1145,15 +1145,11 @@ object Resolver {
 
     case NamedAst.Expr.TryCatch(exp, rules, loc) =>
       val rs = rules.map {
-        case NamedAst.CatchRule(sym, className, body, ruleLoc) =>
+        case NamedAst.CatchRule(sym, tpe0, body, ruleLoc) =>
           val scp = scp0 ++ mkVarScp(sym)
+          val tpe = resolveType(tpe0, Some(Kind.Star), Wildness.ForbidWild, scp0, taenv, ns0, root)
           val b = resolveExp(body, scp)
-          lookupJvmClass2(className, ns0, scp0) match {
-            case Result.Ok(clazz) => ResolvedAst.CatchRule(sym, clazz, b, ruleLoc)
-            case Result.Err(error) =>
-              sctx.errors.add(error)
-              ResolvedAst.CatchRule(sym, classOf[Object], b, ruleLoc)
-          }
+          ResolvedAst.CatchRule(sym, tpe, b, ruleLoc)
       }
 
       val e = resolveExp(exp, scp0)
@@ -2253,6 +2249,7 @@ object Resolver {
       case NamedAst.Type.Ambiguous(qname, loc) if qname.isUnqualified => qname.ident.name match {
         // Basic Types
         case "Void" => UnkindedType.Cst(TypeConstructor.Void, loc)
+        case "AnyType" => UnkindedType.Cst(TypeConstructor.AnyType, loc)
         case "Unit" => UnkindedType.Cst(TypeConstructor.Unit, loc)
         case "Null" => UnkindedType.Cst(TypeConstructor.Null, loc)
         case "Bool" => UnkindedType.Cst(TypeConstructor.Bool, loc)

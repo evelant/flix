@@ -721,11 +721,11 @@ object Inliner {
   }
 
   private def visitCatchRule(rule: MonoAst.CatchRule, ctx0: LocalContext)(implicit sym0: Symbol.DefnSym, sctx: SharedContext, root: MonoAst.Root, flix: Flix): MonoAst.CatchRule = rule match {
-    case MonoAst.CatchRule(sym, clazz, exp1) =>
+    case MonoAst.CatchRule(sym, catchTpe, exp1) =>
       val freshVarSym = Symbol.freshVarSym(sym)
       val ctx = ctx0.addVarSubst(sym, freshVarSym).addInScopeVar(freshVarSym, BoundKind.ParameterOrPattern)
       val e1 = visitExp(exp1, ctx)
-      MonoAst.CatchRule(freshVarSym, clazz, e1)
+      MonoAst.CatchRule(freshVarSym, catchTpe, e1)
   }
 
   private def visitHandlerRule(rule: MonoAst.HandlerRule, ctx0: LocalContext)(implicit sym0: Symbol.DefnSym, sctx: SharedContext, root: MonoAst.Root, flix: Flix): MonoAst.HandlerRule = rule match {

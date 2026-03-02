@@ -119,7 +119,7 @@ object JvmAst {
 
   case class JvmMethod(ident: Name.Ident, fparams: List[FormalParam], exp: Expr, tpe: SimpleType, purity: Purity, loc: SourceLocation)
 
-  case class CatchRule(sym: Symbol.VarSym, offset: Int, clazz: java.lang.Class[_], exp: Expr)
+  case class CatchRule(sym: Symbol.VarSym, offset: Int, catchTpe: SimpleType, exp: Expr)
 
   case class HandlerRule(op: OpSymUse, fparams: List[FormalParam], exp: Expr)
 

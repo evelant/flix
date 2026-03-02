@@ -130,7 +130,7 @@ object LoweredAst {
 
   case class JvmMethod(ident: Name.Ident, fparams: List[FormalParam], exp: Expr, tpe: SimpleType, purity: Purity, loc: SourceLocation)
 
-  case class CatchRule(sym: Symbol.VarSym, clazz: java.lang.Class[?], exp: Expr)
+  case class CatchRule(sym: Symbol.VarSym, catchTpe: SimpleType, exp: Expr)
 
   case class HandlerRule(op: OpSymUse, fparams: List[FormalParam], exp: Expr)
 

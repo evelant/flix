@@ -39,6 +39,8 @@ class PortableStdlibLlvmCodegenSuite extends AnyFunSuite {
       outputJvm = false,
     )
 
+  private val preludeFile = Paths.get("main/test/flix/Prelude.flix")
+
   private val testDir = Paths.get("main/test/flix/portable")
 
   private def compile(file: java.nio.file.Path): Unit = {
@@ -46,6 +48,7 @@ class PortableStdlibLlvmCodegenSuite extends AnyFunSuite {
     val outDir = Files.createTempDirectory("flix-llvm-portable-")
     flix.setOptions(TestOptions.copy(outputPath = outDir))
     implicit val sctx: SecurityContext = SecurityContext.Unrestricted
+    flix.addFile(preludeFile)
     flix.addFile(file)
 
     val (optRoot, errors) = flix.check()
@@ -59,4 +62,3 @@ class PortableStdlibLlvmCodegenSuite extends AnyFunSuite {
     test(p.getFileName.toString)(compile(p))
   }
 }
-

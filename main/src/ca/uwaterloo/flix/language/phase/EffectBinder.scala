@@ -197,7 +197,7 @@ object EffectBinder {
     case LiftedAst.Expr.TryCatch(exp, rules, tpe, purity, loc) =>
       val e = visitExpr(exp)
       val rules1 = rules.map {
-        case cr => ReducedAst.CatchRule(cr.sym, cr.clazz, visitExpr(cr.exp))
+        case cr => ReducedAst.CatchRule(cr.sym, cr.catchTpe, visitExpr(cr.exp))
       }
       ReducedAst.Expr.TryCatch(e, rules1, tpe, purity, loc)
 
@@ -289,10 +289,10 @@ object EffectBinder {
     case LiftedAst.Expr.TryCatch(exp, rules0, tpe, purity, loc) =>
       val e = visitExpr(exp)
       val rules = rules0.map {
-        case LiftedAst.CatchRule(sym, clazz, body) =>
+        case LiftedAst.CatchRule(sym, catchTpe, body) =>
           // assumes that catch rule is control pure
           val b = visitExpr(body)
-          ReducedAst.CatchRule(sym, clazz, b)
+          ReducedAst.CatchRule(sym, catchTpe, b)
       }
       ReducedAst.Expr.TryCatch(e, rules, tpe, purity, loc)
 

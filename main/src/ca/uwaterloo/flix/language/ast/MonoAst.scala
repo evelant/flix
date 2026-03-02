@@ -176,7 +176,7 @@ object MonoAst {
 
   case class JvmMethod(ident: Name.Ident, fparams: List[FormalParam], exp: Expr, retTpe: Type, eff: Type, loc: SourceLocation)
 
-  case class CatchRule(sym: Symbol.VarSym, clazz: java.lang.Class[?], exp: Expr)
+  case class CatchRule(sym: Symbol.VarSym, tpe: Type, exp: Expr)
 
   case class HandlerRule(op: OpSymUse, fparams: List[FormalParam], exp: Expr)
 

@@ -23,5 +23,11 @@ mod Test.Portable.NetAddrs {
             case None => bug!("expected socket addr parse to succeed.")
         }
 
-}
+    pub def runAll(): Unit = {
+        let _ = ipv4FromString01();
+        let _ = ipv6FromString01();
+        let _ = socketAddrFromString01();
+        ()
+    }
 
+}

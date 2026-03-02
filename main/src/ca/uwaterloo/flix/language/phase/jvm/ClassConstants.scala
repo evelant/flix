@@ -18,7 +18,9 @@ package ca.uwaterloo.flix.language.phase.jvm
 
 import ca.uwaterloo.flix.api.Flix
 import ca.uwaterloo.flix.language.phase.jvm.ClassMaker.Visibility.IsPublic
-import ca.uwaterloo.flix.language.phase.jvm.ClassMaker.{ConstructorMethod, InstanceMethod, InterfaceMethod, StaticMethod}
+import ca.uwaterloo.flix.language.phase.jvm.ClassMaker.Final.{IsFinal, NotFinal}
+import ca.uwaterloo.flix.language.phase.jvm.ClassMaker.Volatility.NotVolatile
+import ca.uwaterloo.flix.language.phase.jvm.ClassMaker.{ConstructorMethod, InstanceField, InstanceMethod, InterfaceMethod, StaticMethod}
 import ca.uwaterloo.flix.language.phase.jvm.JvmName.MethodDescriptor
 import ca.uwaterloo.flix.language.phase.jvm.JvmName.MethodDescriptor.mkDescriptor
 import org.objectweb.asm.MethodVisitor
@@ -43,6 +45,42 @@ object ClassConstants {
       ALOAD(1)
       invokeConstructor(JvmName.Error, mkDescriptor(BackendType.String)(VoidableType.Void))
       RETURN()
+    }
+
+  }
+
+  object FlixException {
+
+    val ExnField: InstanceField = InstanceField(JvmName.FlixException, "exn", BackendType.Object)
+
+    val Constructor: ConstructorMethod = ConstructorMethod(JvmName.FlixException, List(BackendType.Object))
+
+    val GetExnMethod: InstanceMethod =
+      InstanceMethod(JvmName.FlixException, "getExn", mkDescriptor()(BackendType.Object))
+
+    def genByteCode()(implicit flix: Flix): Array[Byte] = {
+      val cm = ClassMaker.mkClass(JvmName.FlixException, IsFinal, superClass = JvmName.Exception)
+      cm.mkField(ExnField, IsPublic, IsFinal, NotVolatile)
+      cm.mkConstructor(Constructor, IsPublic, constructorIns(_))
+      cm.mkMethod(GetExnMethod, IsPublic, NotFinal, getExnIns(_))
+      cm.closeClassMaker()
+    }
+
+    private def constructorIns(implicit mv: MethodVisitor): Unit = {
+      import BytecodeInstructions.*
+      thisLoad()
+      invokeConstructor(JvmName.Exception, MethodDescriptor.NothingToVoid)
+      thisLoad()
+      ALOAD(1)
+      PUTFIELD(ExnField)
+      RETURN()
+    }
+
+    private def getExnIns(implicit mv: MethodVisitor): Unit = {
+      import BytecodeInstructions.*
+      thisLoad()
+      GETFIELD(ExnField)
+      ARETURN()
     }
 
   }

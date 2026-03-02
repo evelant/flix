@@ -96,7 +96,7 @@ object LiftedAst {
 
   case class JvmMethod(ident: Name.Ident, fparams: List[FormalParam], clo: Expr, retTpe: SimpleType, purity: Purity, loc: SourceLocation)
 
-  case class CatchRule(sym: Symbol.VarSym, clazz: java.lang.Class[?], exp: Expr)
+  case class CatchRule(sym: Symbol.VarSym, catchTpe: SimpleType, exp: Expr)
 
   case class HandlerRule(symUse: OpSymUse, fparams: List[FormalParam], exp: Expr)
 
@@ -105,4 +105,3 @@ object LiftedAst {
   case class TypeParam(name: Name.Ident, sym: Symbol.KindedTypeVarSym, loc: SourceLocation)
 
 }
-

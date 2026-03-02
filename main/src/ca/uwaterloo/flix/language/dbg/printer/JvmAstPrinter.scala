@@ -23,6 +23,11 @@ import ca.uwaterloo.flix.util.collection.MapOps
 
 object JvmAstPrinter {
 
+  private def catchClassOf(tpe: ca.uwaterloo.flix.language.ast.SimpleType): Class[?] = tpe match {
+    case ca.uwaterloo.flix.language.ast.SimpleType.Native(clazz) => clazz
+    case _ => classOf[Object]
+  }
+
   /** Returns the [[DocAst.Program]] representation of `root`. */
   def print(root: JvmAst.Root): DocAst.Program = {
     val defs = root.defs.values.map {
@@ -56,7 +61,7 @@ object JvmAstPrinter {
     case Expr.Stmt(exp1, exp2, _) => DocAst.Expr.Stm(print(exp1), print(exp2))
     case Expr.Region(sym, _, exp, _, _, _) => DocAst.Expr.Region(printVarSym(sym), print(exp))
     case Expr.TryCatch(exp, rules, _, _, _) => DocAst.Expr.TryCatch(print(exp), rules.map {
-      case JvmAst.CatchRule(sym, _, clazz, body) => (sym, clazz, print(body))
+      case JvmAst.CatchRule(sym, _, catchTpe, body) => (sym, catchClassOf(catchTpe), print(body))
     })
     case Expr.RunWith(exp, effUse, rules, _, _, _, _, _) => DocAst.Expr.RunWithHandler(print(exp), effUse.sym, rules.map {
       case JvmAst.HandlerRule(op, fparams, body) =>

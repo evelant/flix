@@ -49,6 +49,12 @@ object LlvmBackend {
     private val flixResultTypeName: String = "flix_result_t"
     private val flixResultType: Type = Type.Named(flixResultTypeName)
 
+    private val flixObjTypeName: String = "flix_obj_t"
+    private val flixObjType: Type = Type.Named(flixObjTypeName)
+
+    private val flixTypeInfoTypeName: String = "flix_typeinfo_t"
+    private val flixTypeInfoType: Type = Type.Named(flixTypeInfoTypeName)
+
     // flix_result_t tags (see docs/planning/native-backend/value-layout-v0.md).
     private val ResultTagValue: Long = 1L
     private val ResultTagThunk: Long = 2L
@@ -56,6 +62,13 @@ object LlvmBackend {
     private val ResultTagException: Long = 4L
 
     private val caseTagIds: Map[Symbol.CaseSym, Long] = computeCaseTagIds()
+    private val cancelledKindId: Long = computeCancelledKindId()
+    private val exnExnCaseSymOpt: Option[Symbol.CaseSym] = computeExnExnCaseSym()
+    private val exnExnTagId: Long = exnExnCaseSymOpt.flatMap(caseTagIds.get).getOrElse(0L)
+    private val exnExnTypeInfo: Value = exnExnCaseSymOpt match {
+      case None => Value.Null(Type.Ptr)
+      case Some(sym) => Value.Global(LlvmNames.tagTypeInfoName(sym), Type.Ptr)
+    }
     private val effectSymIds: Map[Symbol.EffSym, Long] = computeEffectSymIds()
     private val opIndices: Map[Symbol.OpSym, Int] = computeOpIndices()
 
@@ -81,9 +94,29 @@ object LlvmBackend {
       s"$prefix$labelId"
     }
 
+    private case class ExnHandler(label: String, slotPtr: Value)
+
+    private def hoistAllocaI64(fb: FunBuilder): Value.Local = {
+      val slotPtr = freshTmp(Type.Ptr)
+      fb.getBlock("entry") match {
+        case Some(entry) =>
+          entry.emitPrologueAssign(slotPtr, Op.Alloca(Type.I64))
+          slotPtr
+        case None =>
+          throw new IllegalStateException("Missing LLVM entry block.")
+      }
+    }
+
     def emitModule(): IrModule = {
+      val objBody = target match {
+        case CompilationTarget.LlvmWasm => Type.Struct(List(Type.Ptr, Type.I32)) // pad header to 8 bytes for i64 payload alignment
+        case _ => Type.Struct(List(Type.Ptr))
+      }
+
       val typeDefs = List(
-        LlvmIr.TypeDef(flixResultTypeName, Type.Struct(List(Type.I64, Type.I64)))
+        LlvmIr.TypeDef(flixResultTypeName, Type.Struct(List(Type.I64, Type.I64))),
+        LlvmIr.TypeDef(flixTypeInfoTypeName, Type.Struct(List(Type.I32, Type.I32, Type.I32, Type.Ptr, Type.Ptr, Type.Ptr, Type.Ptr, Type.Ptr))),
+        LlvmIr.TypeDef(flixObjTypeName, objBody),
       )
 
       val decls = List(
@@ -91,8 +124,30 @@ object LlvmBackend {
         Decl.DeclareFun(Type.Float, "llvm.pow.f32", List(Type.Float, Type.Float)),
         Decl.DeclareFun(Type.Double, "llvm.pow.f64", List(Type.Double, Type.Double)),
         Decl.DeclareFun(Type.Void, "flix_init", List(Type.I32, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_ctx_new", Nil),
+        Decl.DeclareFun(Type.Void, "flix_ctx_free", List(Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_float32_to_string", List(Type.Float)),
         Decl.DeclareFun(Type.Ptr, "flix_float64_to_string", List(Type.Double)),
+        Decl.DeclareFun(Type.I32, "flix_char_to_lower_case", List(Type.I32)),
+        Decl.DeclareFun(Type.I32, "flix_char_to_upper_case", List(Type.I32)),
+        Decl.DeclareFun(Type.I32, "flix_char_to_title_case", List(Type.I32)),
+        Decl.DeclareFun(Type.I1, "flix_char_is_letter", List(Type.I32)),
+        Decl.DeclareFun(Type.I1, "flix_char_is_digit", List(Type.I32)),
+        Decl.DeclareFun(Type.I1, "flix_char_is_letter_or_digit", List(Type.I32)),
+        Decl.DeclareFun(Type.I1, "flix_char_is_lower_case", List(Type.I32)),
+        Decl.DeclareFun(Type.I1, "flix_char_is_upper_case", List(Type.I32)),
+        Decl.DeclareFun(Type.I1, "flix_char_is_title_case", List(Type.I32)),
+        Decl.DeclareFun(Type.I1, "flix_char_is_whitespace", List(Type.I32)),
+        Decl.DeclareFun(Type.I1, "flix_char_is_defined", List(Type.I32)),
+        Decl.DeclareFun(Type.I1, "flix_char_is_iso_control", List(Type.I32)),
+        Decl.DeclareFun(Type.I1, "flix_char_is_mirrored", List(Type.I32)),
+        Decl.DeclareFun(Type.I1, "flix_char_is_surrogate", List(Type.I32)),
+        Decl.DeclareFun(Type.I1, "flix_char_is_surrogate_pair", List(Type.I32, Type.I32)),
+        Decl.DeclareFun(Type.I32, "flix_char_to_code_point", List(Type.I32, Type.I32)),
+        Decl.DeclareFun(Type.I32, "flix_char_get_numeric_value", List(Type.I32)),
+        Decl.DeclareFun(Type.I32, "flix_char_digit", List(Type.I32, Type.I32)),
+        Decl.DeclareFun(Type.Ptr, "flix_string_to_lower_case", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_string_to_upper_case", List(Type.Ptr, Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_regex_compile", List(Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_regex_compile_with_flags", List(Type.I32, Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_regex_try_compile", List(Type.Ptr)),
@@ -100,23 +155,46 @@ object LlvmBackend {
         Decl.DeclareFun(Type.Ptr, "flix_regex_quote", List(Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_regex_pattern", List(Type.Ptr)),
         Decl.DeclareFun(Type.I32, "flix_regex_flags", List(Type.Ptr)),
-        Decl.DeclareFun(Type.Ptr, "flix_regex_new_matcher", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_regex_new_matcher", List(Type.Ptr, Type.Ptr, Type.Ptr, Type.Ptr)),
         Decl.DeclareFun(Type.I1, "flix_regex_matcher_matches", List(Type.Ptr)),
         Decl.DeclareFun(Type.I1, "flix_regex_matcher_find", List(Type.Ptr)),
         Decl.DeclareFun(Type.I1, "flix_regex_matcher_find_from", List(Type.Ptr, Type.I32)),
         Decl.DeclareFun(Type.I1, "flix_regex_matcher_looking_at", List(Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_regex_matcher_replace_all", List(Type.Ptr, Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_regex_matcher_replace_first", List(Type.Ptr, Type.Ptr)),
-        Decl.DeclareFun(Type.I64, "flix_regex_matcher_set_bounds", List(Type.Ptr, Type.I32, Type.I32)),
+        Decl.DeclareFun(Type.I64, "flix_regex_matcher_set_bounds", List(Type.Ptr, Type.Ptr, Type.Ptr, Type.I32, Type.I32)),
         Decl.DeclareFun(Type.I32, "flix_regex_matcher_start", List(Type.Ptr)),
         Decl.DeclareFun(Type.I32, "flix_regex_matcher_end", List(Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_regex_matcher_group", List(Type.Ptr, Type.I32)),
         Decl.DeclareFun(Type.I32, "flix_regex_matcher_group_count", List(Type.Ptr)),
-        Decl.DeclareFun(Type.Ptr, "flix_regex_split", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_regex_split", List(Type.Ptr, Type.Ptr, Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.I64, "flix_box_bool", List(Type.I1)),
+        Decl.DeclareFun(Type.I64, "flix_box_char", List(Type.I32)),
+        Decl.DeclareFun(Type.I64, "flix_box_int8", List(Type.I8)),
+        Decl.DeclareFun(Type.I64, "flix_box_int16", List(Type.I16)),
+        Decl.DeclareFun(Type.I64, "flix_box_int32", List(Type.I32)),
+        Decl.DeclareFun(Type.I64, "flix_box_int64", List(Type.I64)),
+        Decl.DeclareFun(Type.I64, "flix_box_float32", List(Type.Float)),
+        Decl.DeclareFun(Type.I64, "flix_box_float64", List(Type.Double)),
+        Decl.DeclareFun(Type.I64, "flix_unbox_bool", List(Type.I64)),
+        Decl.DeclareFun(Type.I64, "flix_unbox_char", List(Type.I64)),
+        Decl.DeclareFun(Type.I64, "flix_unbox_int8", List(Type.I64)),
+        Decl.DeclareFun(Type.I64, "flix_unbox_int16", List(Type.I64)),
+        Decl.DeclareFun(Type.I64, "flix_unbox_int32", List(Type.I64)),
+        Decl.DeclareFun(Type.I64, "flix_unbox_int64", List(Type.I64)),
+        Decl.DeclareFun(Type.I64, "flix_unbox_float32", List(Type.I64)),
+        Decl.DeclareFun(Type.I64, "flix_unbox_float64", List(Type.I64)),
         Decl.DeclareFun(Type.Ptr, "flix_channel_new", List(Type.I32)),
         Decl.DeclareFun(Type.I64, "flix_channel_put", List(Type.Ptr, Type.I64)),
         Decl.DeclareFun(Type.I64, "flix_channel_get", List(Type.Ptr)),
-        Decl.DeclareFun(Type.I64, "flix_spawn", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.I64, "flix_spawn", List(Type.Ptr, Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_region_enter", List(Type.Ptr)),
+        Decl.DeclareFun(flixResultType, "flix_region_exit", List(Type.Ptr, Type.Ptr, flixResultType)),
+        Decl.DeclareFun(Type.Ptr, "flix_region_malloc", List(Type.Ptr, Type.Ptr, Type.I64)),
+        Decl.DeclareFun(Type.Ptr, "flix_region_alloc", List(Type.Ptr, Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Void, "flix_region_remember_slot", List(Type.Ptr, Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Void, "flix_region_remember_ptr_array", List(Type.Ptr, Type.Ptr, Type.Ptr, Type.I64)),
+        Decl.DeclareFun(Type.Void, "flix_store_ptr", List(Type.Ptr, Type.Ptr, Type.I64)),
         Decl.DeclareFun(Type.I64, "flix_print", List(Type.Ptr)),
         Decl.DeclareFun(Type.I64, "flix_eprint", List(Type.Ptr)),
         Decl.DeclareFun(Type.I64, "flix_println", List(Type.Ptr)),
@@ -125,11 +203,35 @@ object LlvmBackend {
         Decl.DeclareFun(Type.I64, "flix_sleep_millis", List(Type.I64)),
         Decl.DeclareFun(Type.Void, "flix_exit", List(Type.I32)),
         Decl.DeclareFun(Type.I64, "flix_new_id", List(Type.I64)),
+        Decl.DeclareFun(Type.Ptr, "flix_file_exists", List(Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_file_is_directory", List(Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_file_is_regular_file", List(Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_file_is_readable", List(Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_file_is_symbolic_link", List(Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_file_is_writable", List(Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_file_is_executable", List(Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_file_access_time", List(Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_file_creation_time", List(Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_file_modification_time", List(Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_file_size", List(Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_file_read", List(Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_file_read_lines", List(Type.Ptr, Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_file_read_bytes", List(Type.Ptr, Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_file_list", List(Type.Ptr, Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_file_write", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_file_write_bytes", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_file_append", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_file_append_bytes", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_file_truncate", List(Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_file_mkdir", List(Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_file_mkdirs", List(Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_file_mk_temp_dir", List(Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_tcp_socket_read", List(Type.I64, Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_tcp_socket_write", List(Type.I64, Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_tcp_socket_connect", List(Type.Ptr, Type.I32)),
         Decl.DeclareFun(Type.Ptr, "flix_tcp_socket_close", List(Type.I64)),
         Decl.DeclareFun(Type.Ptr, "flix_tcp_server_bind", List(Type.Ptr, Type.I32)),
+        Decl.DeclareFun(Type.Ptr, "flix_tcp_server_local_port", List(Type.I64)),
         Decl.DeclareFun(Type.Ptr, "flix_tcp_server_accept", List(Type.I64)),
         Decl.DeclareFun(Type.Ptr, "flix_tcp_server_close", List(Type.I64)),
         Decl.DeclareFun(Type.Ptr, "flix_process_stdin_write", List(Type.I64, Type.Ptr)),
@@ -143,25 +245,65 @@ object LlvmBackend {
         Decl.DeclareFun(Type.Ptr, "flix_process_stdout_read", List(Type.I64, Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_process_stderr_read", List(Type.I64, Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_process_release", List(Type.I64)),
-        Decl.DeclareFun(Type.Ptr, "flix_http_request", List(Type.Ptr, Type.Ptr, Type.Ptr, Type.I1, Type.Ptr)),
-        Decl.DeclareFun(Type.Ptr, "flix_env_get_args", List(Type.Ptr)),
-        Decl.DeclareFun(Type.Ptr, "flix_env_get_env_pairs", List(Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_http_request", List(Type.Ptr, Type.Ptr, Type.Ptr, Type.Ptr, Type.I1, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_env_get_args", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_env_get_env_pairs", List(Type.Ptr, Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_env_get_var", List(Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_env_get_prop", List(Type.Ptr)),
         Decl.DeclareFun(Type.I32, "flix_env_virtual_processors", List(Type.I64)),
         Decl.DeclareFun(Type.Ptr, "flix_frames_push", List(Type.Ptr, Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_frames_reverse_onto", List(Type.Ptr, Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_frame_copy", List(Type.Ptr)),
+        Decl.DeclareFun(Type.Void, "flix_trace_push", List(Type.Ptr)),
+        Decl.DeclareFun(Type.Void, "flix_trace_pop", Nil),
+        Decl.DeclareFun(Type.Ptr, "flix_exn_with_trace", List(Type.Ptr)),
+        Decl.DeclareFun(Type.I64, "flix_handle_new", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_handle_get", List(Type.Ptr, Type.I64)),
+        Decl.DeclareFun(Type.I64, "flix_handle_payload", List(Type.Ptr, Type.I64)),
+        Decl.DeclareFun(Type.Void, "flix_exn_report_ptr", List(Type.Ptr)),
+        Decl.DeclareFun(Type.Void, "flix_suspension_report_ptr", List(Type.Ptr)),
+        Decl.DeclareFun(Type.Void, "flix_gc_push_root_value_i64", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Void, "flix_gc_push_root_ptr", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Void, "flix_gc_pop_roots", List(Type.Ptr, Type.I64)),
+        Decl.DeclareFun(Type.Void, "flix_gc_pollcheck", List(Type.Ptr)),
+        Decl.DeclareFun(Type.Void, "flix_trace_ptr_array", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Void, "flix_trace_handler", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Void, "flix_trace_suspension", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.I1, "flix_cancel_requested", List(Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_cancel_exn", List(Type.Ptr, Type.I64, Type.Ptr, Type.I64)),
         Decl.DeclareFun(flixResultType, "flix_install_handler", List(Type.Ptr, Type.I64, Type.Ptr, Type.Ptr, Type.Ptr)),
         Decl.DeclareFun(flixResultType, "flix_resumption_rewind", List(Type.Ptr, Type.Ptr, Type.I64)),
+        Decl.DeclareFun(flixResultType, "flix_resume_suspension", List(Type.Ptr, Type.Ptr, Type.I64)),
+        Decl.DeclareFun(Type.Ptr, "flix_alloc", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_alloc_flex", List(Type.Ptr, Type.Ptr, Type.I64)),
+        Decl.DeclareFun(Type.Ptr, "flix_region_alloc_flex", List(Type.Ptr, Type.Ptr, Type.Ptr, Type.I64)),
+        Decl.DeclareFun(flixResultType, "flix_invoke_thunk", List(Type.Ptr, Type.Ptr, Type.I64)),
         Decl.DeclareFun(Type.Ptr, "malloc", List(Type.I64))
       )
 
+      // Pre-emit resumption invoke wrappers used to build continuation closures inside handler wrappers.
+      //
+      // This must happen before we snapshot `extraFunctions` into the final `functions` list.
+      val resumptionInvokeArgTypes: Set[SimpleType] =
+        root.effects.values.toList.flatMap(_.ops).map(_.tpe).toSet
+      resumptionInvokeArgTypes.toList.sortBy(_.toString).foreach(getOrEmitResumptionInvokeWrapper)
+
       val defFunctions = root.defs.values.toList.map(emitDef)
-      val extra = extraFunctions.toList.sortBy(_.name)
       val closureWrappers = collectClosureSyms().toList.sortBy(_.toString).map(sym => emitClosureInvokeWrapper(root.defs(sym)))
       val thunkInvokeWrappers = collectThunkInvokeSyms().toList.sortBy(_.toString).map(sym => emitThunkInvokeWrapper(root.defs(sym)))
-      val thunkApplyClosureWrappers = collectThunkApplyClosureArgTypes().toList.sortBy(_.render).map(emitThunkApplyClosureWrapper)
+      val thunkApplyClosureWrappers = collectThunkApplyClosureArgTypes().toList.sortBy(_.toString).map(emitThunkApplyClosureWrapper)
+
+      // Helpers for reporting unhandled suspensions (effect/op names).
+      addExtraFunction(emitEffectNameLookup())
+      addExtraFunction(emitOpNameLookup())
+
+      // Exported function wrappers (C ABI).
+      root.defs.values.toList.filter(_.ann.isExport).sortBy(_.sym.toString).foreach { defn =>
+        addExtraFunction(emitExportWrapper(defn))
+        addExtraFunction(emitExportResumeWrapper(defn))
+      }
+
+      val extra = extraFunctions.toList.sortBy(_.name)
       val functions = (target, root.mainEntryPoint) match {
         case (CompilationTarget.LlvmNative, Some(mainSym)) =>
           defFunctions ::: extra ::: closureWrappers ::: thunkInvokeWrappers ::: thunkApplyClosureWrappers ::: List(emitNativeMainWrapper(mainSym))
@@ -169,7 +311,345 @@ object LlvmBackend {
           defFunctions ::: extra ::: closureWrappers ::: thunkInvokeWrappers ::: thunkApplyClosureWrappers
       }
 
-      IrModule(sourceFilename = "flix", typeDefs = typeDefs, decls = decls, functions = functions)
+      val defTraceGlobals =
+        root.defs.values.toList.sortBy(_.sym.toString).map { defn =>
+          val bytes = defn.sym.toString.getBytes(java.nio.charset.StandardCharsets.UTF_8) ++ Array(0.toByte)
+          LlvmIr.GlobalDef.CString(LlvmNames.traceName(defn.sym), bytes)
+        }
+
+      val effectNameGlobals =
+        root.effects.keys.toList.sortBy(_.toString).map { effSym =>
+          val bytes = effSym.toString.getBytes(java.nio.charset.StandardCharsets.UTF_8) ++ Array(0.toByte)
+          LlvmIr.GlobalDef.CString(LlvmNames.effectName(effSym), bytes)
+        }
+
+      val opNameGlobals =
+        root.effects.values.toList.flatMap(_.ops).toList.sortBy(_.sym.toString).map { op =>
+          val bytes = op.sym.name.getBytes(java.nio.charset.StandardCharsets.UTF_8) ++ Array(0.toByte)
+          LlvmIr.GlobalDef.CString(LlvmNames.opName(op.sym), bytes)
+        }
+
+      // Typeinfo globals for heap object shapes we emit in the bring-up backend (thunks and frames).
+      //
+      // Pointer maps are deferred until we have a stable story for GC pointers vs non-GC pointers
+      // (e.g. region pointers share `ptr` at the LLVM level). For now we set ptr_count=0 and ptr_offs=null.
+      val headerBytes = 8L // by construction of `%flix_obj_t` above for both native and wasm
+
+      case class TypeInfoSpec(name: String,
+                              ptrOffsName: String,
+                              sizeBytes: Long,
+                              ptrOffs: List[Int],
+                              trace: Option[String] = None,
+                              invoke: Option[String],
+                              apply: Option[String],
+                              copy: Option[String])
+
+      val arraySpecs = List(
+        TypeInfoSpec(
+          name = LlvmNames.arrayPrimTypeInfoName,
+          ptrOffsName = LlvmNames.arrayPrimPtrOffsName,
+          sizeBytes = 0L,
+          ptrOffs = Nil,
+          trace = None,
+          invoke = None,
+          apply = None,
+          copy = None
+        ),
+        TypeInfoSpec(
+          name = LlvmNames.arrayPtrTypeInfoName,
+          ptrOffsName = LlvmNames.arrayPtrPtrOffsName,
+          sizeBytes = 0L,
+          ptrOffs = Nil,
+          trace = Some("flix_trace_ptr_array"),
+          invoke = None,
+          apply = None,
+          copy = None
+        )
+      )
+
+      val stringSpecs = List(
+        TypeInfoSpec(
+          name = LlvmNames.stringTypeInfoName,
+          ptrOffsName = s"${LlvmNames.stringTypeInfoName}_ptr_offs",
+          sizeBytes = 0L,
+          ptrOffs = Nil,
+          trace = None,
+          invoke = None,
+          apply = None,
+          copy = None
+        )
+      )
+
+      // Runtime-internal effect objects (Handler + Suspension) are flexible heap objects.
+      // We provide custom trace hooks and no fixed pointer maps.
+      val effectInternalSpecs = List(
+        TypeInfoSpec(
+          name = LlvmNames.handlerTypeInfoName,
+          ptrOffsName = s"${LlvmNames.handlerTypeInfoName}_ptr_offs",
+          sizeBytes = 0L,
+          ptrOffs = Nil,
+          trace = Some("flix_trace_handler"),
+          invoke = None,
+          apply = None,
+          copy = None
+        ),
+        TypeInfoSpec(
+          name = LlvmNames.suspensionTypeInfoName,
+          ptrOffsName = s"${LlvmNames.suspensionTypeInfoName}_ptr_offs",
+          sizeBytes = 0L,
+          ptrOffs = Nil,
+          trace = Some("flix_trace_suspension"),
+          invoke = None,
+          apply = None,
+          copy = None
+        )
+      )
+
+      val closureSpecs = collectClosureSyms().toList.map { sym =>
+        val defn = root.defs(sym)
+        val captured = defn.cparams.map(_.tpe)
+        val ptrOffs = captured.zipWithIndex.collect {
+          case (tpe, i) if isGcRootType(tpe) =>
+            (headerBytes + i.toLong * 8L).toInt
+        }
+        val sizeBytes = headerBytes + captured.length.toLong * 8L
+        TypeInfoSpec(
+          name = LlvmNames.closureTypeInfoName(sym),
+          ptrOffsName = LlvmNames.closurePtrOffsName(sym),
+          sizeBytes = sizeBytes,
+          ptrOffs = ptrOffs,
+          invoke = Some(LlvmNames.closureInvokeName(sym)),
+          apply = None,
+          copy = None
+        )
+      }
+
+      val thunkSpecs = collectThunkInvokeSyms().toList.map { sym =>
+        val defn = root.defs(sym)
+        val captured = (defn.cparams ::: defn.fparams).map(_.tpe)
+        val ptrOffs = captured.zipWithIndex.collect {
+          case (tpe, i) if isGcRootType(tpe) =>
+            (headerBytes + i.toLong * 8L).toInt
+        }
+        val sizeBytes = headerBytes + captured.length.toLong * 8L
+        TypeInfoSpec(
+          name = LlvmNames.thunkTypeInfoName(sym),
+          ptrOffsName = LlvmNames.thunkPtrOffsName(sym),
+          sizeBytes = sizeBytes,
+          ptrOffs = ptrOffs,
+          invoke = Some(LlvmNames.thunkInvokeName(sym)),
+          apply = None,
+          copy = None
+        )
+      }
+
+      // Continuation closures created by effect handler wrappers.
+      //
+      // Layout:
+      //   payload[0] = resumption pointer bits (always a GC heap pointer)
+      val kSpecs = resumptionInvokeArgTypes.toList.map { argTpe =>
+        val ptrOffs = List((headerBytes + 0L * 8L).toInt)
+        val sizeBytes = headerBytes + 1L * 8L
+        TypeInfoSpec(
+          name = LlvmNames.kTypeInfoName(argTpe),
+          ptrOffsName = LlvmNames.kPtrOffsName(argTpe),
+          sizeBytes = sizeBytes,
+          ptrOffs = ptrOffs,
+          invoke = Some(getOrEmitResumptionInvokeWrapper(argTpe)),
+          apply = None,
+          copy = None
+        )
+      }.groupBy(_.name).values.map(_.head).toList
+
+      val thunkApplyCloSpecs = collectThunkApplyClosureArgTypes().toList.map { argTpe =>
+        // payload[0] = closure pointer bits (always GC heap)
+        // payload[1] = argument payload bits (GC heap iff argTpe is a GC root type)
+        val ptrOffsBase = List((headerBytes + 0L * 8L).toInt)
+        val ptrOffsArg = if (isGcRootType(argTpe)) List((headerBytes + 1L * 8L).toInt) else Nil
+        val ptrOffs = ptrOffsBase ::: ptrOffsArg
+        val sizeBytes = headerBytes + 2L * 8L
+        TypeInfoSpec(
+          name = LlvmNames.thunkApplyClosureTypeInfoName(argTpe),
+          ptrOffsName = LlvmNames.thunkApplyClosurePtrOffsName(argTpe),
+          sizeBytes = sizeBytes,
+          ptrOffs = ptrOffs,
+          invoke = Some(LlvmNames.thunkApplyClosureName(argTpe)),
+          apply = None,
+          copy = None
+        )
+      }
+
+      val lazySpecs = collectLazyInnerTypes().toList.map { innerTpe =>
+        // payload[0] = exp thunk pointer bits (always GC heap)
+        // payload[1] = cached value payload bits (GC heap iff innerTpe is a GC root type)
+        val ptrOffsBase = List((headerBytes + 0L * 8L).toInt)
+        val ptrOffsVal = if (isGcRootType(innerTpe)) List((headerBytes + 1L * 8L).toInt) else Nil
+        val ptrOffs = ptrOffsBase ::: ptrOffsVal
+        val sizeBytes = headerBytes + 2L * 8L
+        TypeInfoSpec(
+          name = LlvmNames.lazyTypeInfoName(innerTpe),
+          ptrOffsName = LlvmNames.lazyPtrOffsName(innerTpe),
+          sizeBytes = sizeBytes,
+          ptrOffs = ptrOffs,
+          invoke = None,
+          apply = None,
+          copy = None
+        )
+      }
+
+	        val tupleSpecs = collectTupleTypes().toList.map { tupTpe =>
+	          val ptrOffs = tupTpe.tpes.zipWithIndex.collect {
+	            case (tpe, i) if isGcRootType(tpe) =>
+	              (headerBytes + i.toLong * 8L).toInt
+	        }
+	        val sizeBytes = headerBytes + tupTpe.tpes.length.toLong * 8L
+	        TypeInfoSpec(
+	          name = LlvmNames.tupleTypeInfoName(tupTpe),
+	          ptrOffsName = LlvmNames.tuplePtrOffsName(tupTpe),
+	          sizeBytes = sizeBytes,
+	          ptrOffs = ptrOffs,
+	          invoke = None,
+	          apply = None,
+	          copy = None
+	        )
+	      }
+
+        val tagSpecs = root.enums.values.toList.flatMap { enm =>
+          enm.cases.values.toList.map { caze =>
+            // Layout: payload[0] = tag word (tag_id + reserved); payload[1..] = fields.
+            val ptrOffs = caze.tpes.zipWithIndex.collect {
+              case (tpe, i) if isGcRootType(tpe) =>
+                (headerBytes + (1L + i.toLong) * 8L).toInt
+            }
+            val sizeBytes = headerBytes + (1L + caze.tpes.length.toLong) * 8L
+            TypeInfoSpec(
+              name = LlvmNames.tagTypeInfoName(caze.sym),
+              ptrOffsName = LlvmNames.tagPtrOffsName(caze.sym),
+              sizeBytes = sizeBytes,
+              ptrOffs = ptrOffs,
+              invoke = None,
+              apply = None,
+              copy = None
+            )
+          }
+        }
+
+      val structSpecs = root.structs.values.toList.map { st =>
+        val ptrOffs = st.fields.zipWithIndex.collect {
+          case (fld, i) if isGcRootType(fld.tpe) =>
+            (headerBytes + i.toLong * 8L).toInt
+        }
+        val sizeBytes = headerBytes + st.fields.length.toLong * 8L
+        TypeInfoSpec(
+          name = LlvmNames.structTypeInfoName(st.sym),
+          ptrOffsName = LlvmNames.structPtrOffsName(st.sym),
+          sizeBytes = sizeBytes,
+          ptrOffs = ptrOffs,
+          invoke = None,
+          apply = None,
+          copy = None
+        )
+      }
+
+      val recordSpecs = collectRecordTypes().toList.map { recTpe =>
+        val fields = recordFields(recTpe)
+        val ptrOffs = fields.zipWithIndex.collect {
+          case ((_, tpe), i) if isGcRootType(tpe) =>
+            (headerBytes + i.toLong * 8L).toInt
+        }
+        val sizeBytes = headerBytes + fields.length.toLong * 8L
+        TypeInfoSpec(
+          name = LlvmNames.recordTypeInfoName(recTpe),
+          ptrOffsName = LlvmNames.recordPtrOffsName(recTpe),
+          sizeBytes = sizeBytes,
+          ptrOffs = ptrOffs,
+          invoke = None,
+          apply = None,
+          copy = None
+        )
+      }
+
+      val frameSpecs = root.defs.values.toList
+        .filter(defn => ca.uwaterloo.flix.language.ast.Purity.isControlImpure(defn.exp.purity))
+        .map { defn =>
+          val vars = (defn.cparams ::: defn.fparams).map(_.tpe) ::: defn.lparams.map(_.tpe)
+          val ptrOffs = vars.zipWithIndex.collect {
+            case (tpe, i) if isGcRootType(tpe) =>
+              // payload[0] is pc; vars begin at payload[1]
+              (headerBytes + (1L + i.toLong) * 8L).toInt
+          }
+          val sizeBytes = headerBytes + (1L + vars.length.toLong) * 8L
+          TypeInfoSpec(
+            name = LlvmNames.frameTypeInfoName(defn.sym),
+            ptrOffsName = LlvmNames.framePtrOffsName(defn.sym),
+            sizeBytes = sizeBytes,
+            ptrOffs = ptrOffs,
+            invoke = Some(LlvmNames.frameApplyName(defn.sym)),
+            apply = None,
+            copy = None
+          )
+        }
+
+	      val typeInfoSpecs = (arraySpecs ::: stringSpecs ::: effectInternalSpecs ::: closureSpecs ::: thunkSpecs ::: kSpecs ::: thunkApplyCloSpecs ::: lazySpecs ::: tupleSpecs ::: tagSpecs ::: structSpecs ::: recordSpecs ::: frameSpecs).sortBy(_.name)
+
+      val ptrOffsGlobals = typeInfoSpecs.collect {
+        case spec if spec.ptrOffs.nonEmpty =>
+          val arrTpe = Type.Array(spec.ptrOffs.length, Type.I32)
+          val init = Value.ArrayConst(spec.ptrOffs.map(o => Value.IntConst(o.toLong, Type.I32)), arrTpe)
+          LlvmIr.GlobalDef.Constant(spec.ptrOffsName, arrTpe, init, align = 4)
+      }
+
+      val typeInfoGlobals = typeInfoSpecs.zipWithIndex.map {
+        case (spec, idx) =>
+          val typeId = idx + 1
+          val sizeI32 =
+            if (spec.sizeBytes < 0 || spec.sizeBytes > Int.MaxValue) throw new IllegalStateException(s"Invalid typeinfo size: ${spec.sizeBytes}")
+            else spec.sizeBytes.toInt
+
+          val ptrCount = spec.ptrOffs.length
+          val ptrOffsPtr = if (ptrCount == 0) Value.Null(Type.Ptr) else Value.Global(spec.ptrOffsName, Type.Ptr)
+
+          val traceV = spec.trace match {
+            case None => Value.Null(Type.Ptr)
+            case Some(n) => Value.Global(n, Type.Ptr)
+          }
+
+          val invokeV = spec.invoke match {
+            case None => Value.Null(Type.Ptr)
+            case Some(n) => Value.Global(n, Type.Ptr)
+          }
+          val applyV = spec.apply match {
+            case None => Value.Null(Type.Ptr)
+            case Some(n) => Value.Global(n, Type.Ptr)
+          }
+          val copyV = spec.copy match {
+            case None => Value.Null(Type.Ptr)
+            case Some(n) => Value.Global(n, Type.Ptr)
+          }
+
+          val init = Value.StructConst(List(
+            Value.IntConst(typeId.toLong, Type.I32),
+            Value.IntConst(sizeI32.toLong, Type.I32),
+            Value.IntConst(ptrCount.toLong, Type.I32),
+            ptrOffsPtr,
+            traceV,
+            invokeV,
+            applyV,
+            copyV,
+          ), flixTypeInfoType)
+
+          val linkage =
+            if (spec.name == LlvmNames.arrayPrimTypeInfoName || spec.name == LlvmNames.arrayPtrTypeInfoName || spec.name == LlvmNames.stringTypeInfoName)
+              LlvmIr.GlobalDef.Linkage.External
+            else
+              LlvmIr.GlobalDef.Linkage.Private
+
+          LlvmIr.GlobalDef.Constant(spec.name, flixTypeInfoType, init, align = 8, linkage = linkage)
+      }
+
+      val globals = defTraceGlobals ::: effectNameGlobals ::: opNameGlobals ::: ptrOffsGlobals ::: typeInfoGlobals
+
+      IrModule(sourceFilename = "flix", typeDefs = typeDefs, decls = decls, globals = globals, functions = functions)
     }
 
     private def computeCaseTagIds(): Map[Symbol.CaseSym, Long] = {
@@ -179,6 +659,22 @@ object LlvmBackend {
           case (sym, idx) => sym -> idx.toLong
         }
       }.toMap
+    }
+
+    private def computeCancelledKindId(): Long = {
+      // Cancellation is represented as `Exn` with payload type `Cancelled` (stdlib).
+      // We compute a stable kind id from the payload type.
+      val cancelledSymOpt = root.structs.keys.find(sym => sym.text == "CancelledPayload" && sym.namespace.isEmpty)
+      cancelledSymOpt match {
+        case None => 0L
+        case Some(sym) => ExnKindId.of(SimpleType.Struct(sym, List(SimpleType.Region))).toLong
+      }
+    }
+
+    private def computeExnExnCaseSym(): Option[Symbol.CaseSym] = {
+      root.enums.values
+        .find(enm => enm.sym.text == "Exn" && enm.sym.namespace.isEmpty)
+        .flatMap(enm => enm.cases.keys.find(_.name == "Exn"))
     }
 
     private def computeEffectSymIds(): Map[Symbol.EffSym, Long] = {
@@ -195,6 +691,391 @@ object LlvmBackend {
           case (op, idx) => op.sym -> idx
         }
       }.toMap
+    }
+
+    private def emitEffectNameLookup(): LlvmIr.Function = {
+      val params = List(LlvmIr.Param("effSymId", Type.I64))
+      val effSymId = Value.Local("effSymId", Type.I64)
+
+      val sortedEffects = effectSymIds.toList.sortBy(_._2)
+      val fb = new FunBuilder()
+      val entry = fb.newBlock("entry")
+      fb.setCurrent(entry)
+
+      if (sortedEffects.isEmpty) {
+        fb.current.setTerminator(Terminator.Ret(Type.Ptr, Value.Null(Type.Ptr)))
+        return LlvmIr.Function("flix_effect_name", Type.Ptr, params, fb.result())
+      }
+
+      var currentCheck = entry
+      var i = 0
+      while (i < sortedEffects.length) {
+        val (effSym, id) = sortedEffects(i)
+        val matchLabel = s"match_$id"
+        val nextLabel = if (i == sortedEffects.length - 1) "default" else s"check_${sortedEffects(i + 1)._2}"
+        val cmp = Value.Local(s"cmp_$id", Type.I1)
+
+        currentCheck.emitAssign(cmp, Op.ICmp("eq", effSymId, Value.IntConst(id, Type.I64)))
+        currentCheck.setTerminator(Terminator.CondBr(cmp, matchLabel, nextLabel))
+
+        val matchBlock = fb.newBlock(matchLabel)
+        fb.setCurrent(matchBlock)
+        matchBlock.setTerminator(Terminator.Ret(Type.Ptr, Value.Global(LlvmNames.effectName(effSym), Type.Ptr)))
+
+        if (i < sortedEffects.length - 1) {
+          val nextCheck = fb.newBlock(nextLabel)
+          currentCheck = nextCheck
+          fb.setCurrent(nextCheck)
+        }
+
+        i += 1
+      }
+
+      val defaultBlock = fb.newBlock("default")
+      fb.setCurrent(defaultBlock)
+      defaultBlock.setTerminator(Terminator.Ret(Type.Ptr, Value.Null(Type.Ptr)))
+
+      LlvmIr.Function("flix_effect_name", Type.Ptr, params, fb.result())
+    }
+
+    private def emitOpNameLookup(): LlvmIr.Function = {
+      val params = List(LlvmIr.Param("effSymId", Type.I64), LlvmIr.Param("opIndex", Type.I64))
+      val effSymId = Value.Local("effSymId", Type.I64)
+      val opIndex = Value.Local("opIndex", Type.I64)
+
+      val sortedEffects = effectSymIds.toList.sortBy(_._2)
+      val fb = new FunBuilder()
+      val entry = fb.newBlock("entry")
+      fb.setCurrent(entry)
+
+      if (sortedEffects.isEmpty) {
+        fb.current.setTerminator(Terminator.Ret(Type.Ptr, Value.Null(Type.Ptr)))
+        return LlvmIr.Function("flix_op_name", Type.Ptr, params, fb.result())
+      }
+
+      def emitOpDispatch(effSym: Symbol.EffSym, effId: Long, dispatchLabel: String): Unit = {
+        val eff = root.effects(effSym)
+        val ops = eff.ops
+
+        val dispatchEntry = fb.newBlock(dispatchLabel)
+        fb.setCurrent(dispatchEntry)
+
+        if (ops.isEmpty) {
+          dispatchEntry.setTerminator(Terminator.Ret(Type.Ptr, Value.Null(Type.Ptr)))
+          return
+        }
+
+        var currentCheck = dispatchEntry
+        var j = 0
+        while (j < ops.length) {
+          val op = ops(j)
+          val opIdx = j.toLong
+          val retLabel = s"eff_${effId}_ret_op_$opIdx"
+          val nextLabel = if (j == ops.length - 1) "default" else s"eff_${effId}_check_op_${opIdx + 1}"
+          val cmp = Value.Local(s"cmp_eff_${effId}_op_$opIdx", Type.I1)
+
+          currentCheck.emitAssign(cmp, Op.ICmp("eq", opIndex, Value.IntConst(opIdx, Type.I64)))
+          currentCheck.setTerminator(Terminator.CondBr(cmp, retLabel, nextLabel))
+
+          val retBlock = fb.newBlock(retLabel)
+          fb.setCurrent(retBlock)
+          retBlock.setTerminator(Terminator.Ret(Type.Ptr, Value.Global(LlvmNames.opName(op.sym), Type.Ptr)))
+
+          if (j < ops.length - 1) {
+            val nextCheck = fb.newBlock(nextLabel)
+            currentCheck = nextCheck
+            fb.setCurrent(nextCheck)
+          }
+
+          j += 1
+        }
+      }
+
+      var currentCheck = entry
+      var i = 0
+      while (i < sortedEffects.length) {
+        val (effSym, id) = sortedEffects(i)
+        val dispatchLabel = s"dispatch_$id"
+        val nextLabel = if (i == sortedEffects.length - 1) "default" else s"check_${sortedEffects(i + 1)._2}"
+        val cmp = Value.Local(s"cmp_eff_$id", Type.I1)
+
+        currentCheck.emitAssign(cmp, Op.ICmp("eq", effSymId, Value.IntConst(id, Type.I64)))
+        currentCheck.setTerminator(Terminator.CondBr(cmp, dispatchLabel, nextLabel))
+
+        emitOpDispatch(effSym, id, dispatchLabel)
+
+        if (i < sortedEffects.length - 1) {
+          val nextCheck = fb.newBlock(nextLabel)
+          currentCheck = nextCheck
+          fb.setCurrent(nextCheck)
+        }
+
+        i += 1
+      }
+
+      val defaultBlock = fb.newBlock("default")
+      fb.setCurrent(defaultBlock)
+      defaultBlock.setTerminator(Terminator.Ret(Type.Ptr, Value.Null(Type.Ptr)))
+
+      LlvmIr.Function("flix_op_name", Type.Ptr, params, fb.result())
+    }
+
+    private def emitExportWrapper(defn: LoweredAst.Def): LlvmIr.Function = {
+      val wrapperName = LlvmNames.exportName(defn.sym)
+      val defName = LlvmNames.defName(defn.sym)
+
+      val params = LlvmIr.Param("ctx", Type.Ptr) :: (defn.cparams ::: defn.fparams).zipWithIndex.map {
+        case (p, i) => LlvmIr.Param(LlvmNames.paramName(i), exportAbiTypeOf(p.tpe))
+      }
+
+      val fb = new FunBuilder()
+      val entry = fb.newBlock("entry")
+      fb.setCurrent(entry)
+
+      val ctxPtr = Value.Local("ctx", Type.Ptr)
+      val abiArgs = (defn.cparams ::: defn.fparams).zipWithIndex.map {
+        case (p, i) => Value.Local(LlvmNames.paramName(i), exportAbiTypeOf(p.tpe))
+      }
+
+      val args = (defn.cparams ::: defn.fparams).zip(abiArgs).map {
+        case (p, v) if isHandleAbiType(p.tpe) =>
+          val handle = castValue(v, Type.I64, fb)
+          val tmpPtr = freshTmp(Type.Ptr)
+          fb.current.emitAssign(tmpPtr, Op.Call(Type.Ptr, "flix_handle_get", List(ctxPtr, handle)))
+          llvmTypeOf(p.tpe) match {
+            case Type.Ptr =>
+              tmpPtr
+            case Type.I64 =>
+              val bits = freshTmp(Type.I64)
+              fb.current.emitAssign(bits, Op.Cast("ptrtoint", Type.I64, tmpPtr))
+              bits
+            case other =>
+              fb.current.emitTrap()
+              Value.Undef(other)
+          }
+        case (_, v) =>
+          v
+      }
+
+      val callTmp = freshTmp(flixResultType)
+      fb.current.emitAssign(callTmp, Op.Call(flixResultType, defName, ctxPtr :: args))
+
+      val r0 = unwindThunkToResult(callTmp, ctxPtr, fb)
+      val returnsHandle = isHandleAbiType(defn.unboxedType.tpe)
+
+      // Convert pointer-like payloads to stable handles at the public ABI boundary.
+      val tag = freshTmp(Type.I64)
+      fb.current.emitAssign(tag, Op.ExtractValue(Type.I64, flixResultType, r0, index = 0))
+      val payload = freshTmp(Type.I64)
+      fb.current.emitAssign(payload, Op.ExtractValue(Type.I64, flixResultType, r0, index = 1))
+
+      val isValue = freshTmp(Type.I1)
+      fb.current.emitAssign(isValue, Op.ICmp("eq", tag, Value.IntConst(ResultTagValue, Type.I64)))
+
+      val valueLabel = freshLabel("export_value")
+      val notValueLabel = freshLabel("export_not_value")
+      val endLabel = freshLabel("export_end")
+      fb.current.setTerminator(Terminator.CondBr(isValue, valueLabel, notValueLabel))
+
+      val incomings = mutable.ArrayBuffer.empty[(Value, String)]
+
+      val valueBlock = fb.newBlock(valueLabel)
+      fb.setCurrent(valueBlock)
+      if (returnsHandle) {
+        val ptr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(ptr, Op.Cast("inttoptr", Type.Ptr, payload))
+        val h = freshTmp(Type.I64)
+        fb.current.emitAssign(h, Op.Call(Type.I64, "flix_handle_new", List(ctxPtr, ptr)))
+        val r1 = packResultTagged(ResultTagValue, h, fb)
+        val predLabel = fb.current.label
+        fb.current.setTerminator(Terminator.Br(endLabel))
+        incomings.addOne((r1, predLabel))
+      } else if (isImmediateType(defn.unboxedType.tpe)) {
+        val unboxedPayload = exportUnboxValuePayload(payload, defn.unboxedType.tpe, fb)
+        val r1 = packResultTagged(ResultTagValue, unboxedPayload, fb)
+        val predLabel = fb.current.label
+        fb.current.setTerminator(Terminator.Br(endLabel))
+        incomings.addOne((r1, predLabel))
+      } else {
+        val predLabel = fb.current.label
+        fb.current.setTerminator(Terminator.Br(endLabel))
+        incomings.addOne((r0, predLabel))
+      }
+
+      val notValueBlock = fb.newBlock(notValueLabel)
+      fb.setCurrent(notValueBlock)
+      val isExn = freshTmp(Type.I1)
+      fb.current.emitAssign(isExn, Op.ICmp("eq", tag, Value.IntConst(ResultTagException, Type.I64)))
+
+      val exnLabel = freshLabel("export_exn")
+      val suspCheckLabel = freshLabel("export_susp_check")
+      fb.current.setTerminator(Terminator.CondBr(isExn, exnLabel, suspCheckLabel))
+
+      val exnBlock = fb.newBlock(exnLabel)
+      fb.setCurrent(exnBlock)
+      val exnPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(exnPtr, Op.Cast("inttoptr", Type.Ptr, payload))
+      val exnHandle = freshTmp(Type.I64)
+      fb.current.emitAssign(exnHandle, Op.Call(Type.I64, "flix_handle_new", List(ctxPtr, exnPtr)))
+      val exnResult = packResultTagged(ResultTagException, exnHandle, fb)
+      val exnPred = fb.current.label
+      fb.current.setTerminator(Terminator.Br(endLabel))
+      incomings.addOne((exnResult, exnPred))
+
+      val suspCheckBlock = fb.newBlock(suspCheckLabel)
+      fb.setCurrent(suspCheckBlock)
+      val isSusp = freshTmp(Type.I1)
+      fb.current.emitAssign(isSusp, Op.ICmp("eq", tag, Value.IntConst(ResultTagSuspension, Type.I64)))
+      val suspLabel = freshLabel("export_susp")
+      val otherLabel = freshLabel("export_other")
+      fb.current.setTerminator(Terminator.CondBr(isSusp, suspLabel, otherLabel))
+
+      val suspBlock = fb.newBlock(suspLabel)
+      fb.setCurrent(suspBlock)
+      val suspPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(suspPtr, Op.Cast("inttoptr", Type.Ptr, payload))
+      val suspHandle = freshTmp(Type.I64)
+      fb.current.emitAssign(suspHandle, Op.Call(Type.I64, "flix_handle_new", List(ctxPtr, suspPtr)))
+      val suspResult = packResultTagged(ResultTagSuspension, suspHandle, fb)
+      val suspPred = fb.current.label
+      fb.current.setTerminator(Terminator.Br(endLabel))
+      incomings.addOne((suspResult, suspPred))
+
+      val otherBlock = fb.newBlock(otherLabel)
+      fb.setCurrent(otherBlock)
+      val otherPred = fb.current.label
+      fb.current.setTerminator(Terminator.Br(endLabel))
+      incomings.addOne((r0, otherPred))
+
+      val endBlock = fb.newBlock(endLabel)
+      fb.setCurrent(endBlock)
+      val r = freshTmp(flixResultType)
+      endBlock.emitPhi(r, incomings.toList)
+      fb.current.setTerminator(Terminator.Ret(flixResultType, r))
+
+      LlvmIr.Function(wrapperName, flixResultType, params, fb.result())
+    }
+
+    private def emitExportResumeWrapper(defn: LoweredAst.Def): LlvmIr.Function = {
+      val wrapperName = LlvmNames.exportResumeName(defn.sym)
+
+      val params = List(
+        LlvmIr.Param("ctx", Type.Ptr),
+        LlvmIr.Param("susp", Type.I64),
+        LlvmIr.Param("resume", Type.I64)
+      )
+
+      val fb = new FunBuilder()
+      val entry = fb.newBlock("entry")
+      fb.setCurrent(entry)
+
+      val ctxPtr = Value.Local("ctx", Type.Ptr)
+      val suspHandle = Value.Local("susp", Type.I64)
+      val resumeHandle = Value.Local("resume", Type.I64)
+
+      val suspPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(suspPtr, Op.Call(Type.Ptr, "flix_handle_get", List(ctxPtr, suspHandle)))
+
+      val resumePayload = freshTmp(Type.I64)
+      fb.current.emitAssign(resumePayload, Op.Call(Type.I64, "flix_handle_payload", List(ctxPtr, resumeHandle)))
+
+      val callTmp = freshTmp(flixResultType)
+      fb.current.emitAssign(callTmp, Op.Call(flixResultType, "flix_resume_suspension", List(ctxPtr, suspPtr, resumePayload)))
+
+      val r0 = unwindThunkToResult(callTmp, ctxPtr, fb)
+      val returnsHandle = isHandleAbiType(defn.unboxedType.tpe)
+
+      // Convert pointer-like payloads to stable handles at the public ABI boundary.
+      val tag = freshTmp(Type.I64)
+      fb.current.emitAssign(tag, Op.ExtractValue(Type.I64, flixResultType, r0, index = 0))
+      val payload = freshTmp(Type.I64)
+      fb.current.emitAssign(payload, Op.ExtractValue(Type.I64, flixResultType, r0, index = 1))
+
+      val isValue = freshTmp(Type.I1)
+      fb.current.emitAssign(isValue, Op.ICmp("eq", tag, Value.IntConst(ResultTagValue, Type.I64)))
+
+      val valueLabel = freshLabel("resume_value")
+      val notValueLabel = freshLabel("resume_not_value")
+      val endLabel = freshLabel("resume_end")
+      fb.current.setTerminator(Terminator.CondBr(isValue, valueLabel, notValueLabel))
+
+      val incomings = mutable.ArrayBuffer.empty[(Value, String)]
+
+      val valueBlock = fb.newBlock(valueLabel)
+      fb.setCurrent(valueBlock)
+      if (returnsHandle) {
+        val ptr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(ptr, Op.Cast("inttoptr", Type.Ptr, payload))
+        val h = freshTmp(Type.I64)
+        fb.current.emitAssign(h, Op.Call(Type.I64, "flix_handle_new", List(ctxPtr, ptr)))
+        val r1 = packResultTagged(ResultTagValue, h, fb)
+        val predLabel = fb.current.label
+        fb.current.setTerminator(Terminator.Br(endLabel))
+        incomings.addOne((r1, predLabel))
+      } else if (isImmediateType(defn.unboxedType.tpe)) {
+        val unboxedPayload = exportUnboxValuePayload(payload, defn.unboxedType.tpe, fb)
+        val r1 = packResultTagged(ResultTagValue, unboxedPayload, fb)
+        val predLabel = fb.current.label
+        fb.current.setTerminator(Terminator.Br(endLabel))
+        incomings.addOne((r1, predLabel))
+      } else {
+        val predLabel = fb.current.label
+        fb.current.setTerminator(Terminator.Br(endLabel))
+        incomings.addOne((r0, predLabel))
+      }
+
+      val notValueBlock = fb.newBlock(notValueLabel)
+      fb.setCurrent(notValueBlock)
+      val isExn = freshTmp(Type.I1)
+      fb.current.emitAssign(isExn, Op.ICmp("eq", tag, Value.IntConst(ResultTagException, Type.I64)))
+
+      val exnLabel = freshLabel("resume_exn")
+      val suspCheckLabel = freshLabel("resume_susp_check")
+      fb.current.setTerminator(Terminator.CondBr(isExn, exnLabel, suspCheckLabel))
+
+      val exnBlock = fb.newBlock(exnLabel)
+      fb.setCurrent(exnBlock)
+      val exnPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(exnPtr, Op.Cast("inttoptr", Type.Ptr, payload))
+      val exnHandle = freshTmp(Type.I64)
+      fb.current.emitAssign(exnHandle, Op.Call(Type.I64, "flix_handle_new", List(ctxPtr, exnPtr)))
+      val exnResult = packResultTagged(ResultTagException, exnHandle, fb)
+      val exnPred = fb.current.label
+      fb.current.setTerminator(Terminator.Br(endLabel))
+      incomings.addOne((exnResult, exnPred))
+
+      val suspCheckBlock = fb.newBlock(suspCheckLabel)
+      fb.setCurrent(suspCheckBlock)
+      val isSusp = freshTmp(Type.I1)
+      fb.current.emitAssign(isSusp, Op.ICmp("eq", tag, Value.IntConst(ResultTagSuspension, Type.I64)))
+      val suspLabel = freshLabel("resume_susp")
+      val otherLabel = freshLabel("resume_other")
+      fb.current.setTerminator(Terminator.CondBr(isSusp, suspLabel, otherLabel))
+
+      val suspBlock = fb.newBlock(suspLabel)
+      fb.setCurrent(suspBlock)
+      val suspPtr2 = freshTmp(Type.Ptr)
+      fb.current.emitAssign(suspPtr2, Op.Cast("inttoptr", Type.Ptr, payload))
+      val suspHandle2 = freshTmp(Type.I64)
+      fb.current.emitAssign(suspHandle2, Op.Call(Type.I64, "flix_handle_new", List(ctxPtr, suspPtr2)))
+      val suspResult = packResultTagged(ResultTagSuspension, suspHandle2, fb)
+      val suspPred = fb.current.label
+      fb.current.setTerminator(Terminator.Br(endLabel))
+      incomings.addOne((suspResult, suspPred))
+
+      val otherBlock = fb.newBlock(otherLabel)
+      fb.setCurrent(otherBlock)
+      val otherPred = fb.current.label
+      fb.current.setTerminator(Terminator.Br(endLabel))
+      incomings.addOne((r0, otherPred))
+
+      val endBlock = fb.newBlock(endLabel)
+      fb.setCurrent(endBlock)
+      val r = freshTmp(flixResultType)
+      endBlock.emitPhi(r, incomings.toList)
+      fb.current.setTerminator(Terminator.Ret(flixResultType, r))
+
+      LlvmIr.Function(wrapperName, flixResultType, params, fb.result())
     }
 
     private def recordFields(tpe: SimpleType): List[(String, SimpleType)] = {
@@ -232,47 +1113,112 @@ object LlvmBackend {
       else emitDefControlPure(defn)
     }
 
-    private def emitDefControlPure(defn: LoweredAst.Def): LlvmIr.Function = {
-      val fnName = LlvmNames.defName(defn.sym)
+	    private def emitDefControlPure(defn: LoweredAst.Def): LlvmIr.Function = {
+	      val fnName = LlvmNames.defName(defn.sym)
 
-      val params = LlvmIr.Param("ctx", Type.Ptr) :: (defn.cparams ::: defn.fparams).zipWithIndex.map {
-        case (p, i) => LlvmIr.Param(LlvmNames.paramName(i), llvmTypeOf(p.tpe))
-      }
+	      val params = LlvmIr.Param("ctx", Type.Ptr) :: (defn.cparams ::: defn.fparams).zipWithIndex.map {
+	        case (p, i) => LlvmIr.Param(LlvmNames.paramName(i), llvmTypeOf(p.tpe))
+	      }
 
-      val fb = new FunBuilder()
-      val entry = fb.newBlock("entry")
-      fb.setCurrent(entry)
+	      val fb = new FunBuilder()
+	      var rootsToPop: Long = 0L
+	      fb.traceEnabled = true
+	      val entry = fb.newBlock("entry")
+	      fb.setCurrent(entry)
+	      fb.current.emitCallVoid("flix_trace_push", List(Value.Global(LlvmNames.traceName(defn.sym), Type.Ptr)))
 
-      // Bind closure parameters (cparams) directly.
-      var env: Map[Symbol.VarSym, Value] = Map.empty
-      defn.cparams.zipWithIndex.foreach {
-        case (p, i) =>
-          env = env.updated(p.sym, Value.Local(LlvmNames.paramName(i), llvmTypeOf(p.tpe)))
-      }
+	      // Bind closure parameters (cparams). Root GC heap values via stack slots.
+	      var env: Map[Symbol.VarSym, Value] = Map.empty
+	      var slotTypes: Map[Symbol.VarSym, Type] = Map.empty
+	      defn.cparams.zipWithIndex.foreach {
+	        case (p, i) =>
+	          val paramTpe = llvmTypeOf(p.tpe)
+	          val paramVal = Value.Local(LlvmNames.paramName(i), paramTpe)
 
-      // Bind function parameters (fparams) via stack slots so ApplySelfTail can update them.
-      var slotTypes: Map[Symbol.VarSym, Type] = Map.empty
-      defn.fparams.zipWithIndex.foreach {
-        case (p, j) =>
-          val idx = defn.cparams.length + j
-          val paramTpe = llvmTypeOf(p.tpe)
-          val paramVal = Value.Local(LlvmNames.paramName(idx), paramTpe)
+	          if (isGcRootType(p.tpe)) {
+	            val slotPtr = freshTmp(Type.Ptr)
+	            fb.current.emitAssign(slotPtr, Op.Alloca(paramTpe))
+	            fb.current.emitStore(paramVal, slotPtr)
+	            fb.current.emitCallVoid(rootPushNameOf(paramTpe), List(Value.Local("ctx", Type.Ptr), slotPtr))
+	            rootsToPop += 1
+	            env = env.updated(p.sym, slotPtr)
+	            slotTypes = slotTypes.updated(p.sym, paramTpe)
+	          } else {
+	            env = env.updated(p.sym, paramVal)
+	          }
+	      }
 
-          val slotPtr = freshTmp(Type.Ptr)
-          fb.current.emitAssign(slotPtr, Op.Alloca(paramTpe))
-          fb.current.emitStore(paramVal, slotPtr)
+	      // Bind function parameters (fparams) via stack slots so ApplySelfTail can update them.
+	      defn.fparams.zipWithIndex.foreach {
+	        case (p, j) =>
+	          val idx = defn.cparams.length + j
+	          val paramTpe = llvmTypeOf(p.tpe)
+	          val paramVal = Value.Local(LlvmNames.paramName(idx), paramTpe)
 
-          env = env.updated(p.sym, slotPtr)
-          slotTypes = slotTypes.updated(p.sym, paramTpe)
-      }
+	          val slotPtr = freshTmp(Type.Ptr)
+	          fb.current.emitAssign(slotPtr, Op.Alloca(paramTpe))
+	          fb.current.emitStore(paramVal, slotPtr)
+	          if (isGcRootType(p.tpe)) {
+	            fb.current.emitCallVoid(rootPushNameOf(paramTpe), List(Value.Local("ctx", Type.Ptr), slotPtr))
+	            rootsToPop += 1
+	          }
 
-      val ctxPtr = Value.Local("ctx", Type.Ptr)
+	          env = env.updated(p.sym, slotPtr)
+	          slotTypes = slotTypes.updated(p.sym, paramTpe)
+	      }
 
-      val loopLabel = freshLabel("loop")
-      fb.current.setTerminator(Terminator.Br(loopLabel))
+      // Bind locals (lparams) via stack slots.
+      //
+      // This is important for GC readiness: it ensures that locals have stable addresses and can
+      // later be registered with an explicit root stack (shadow stack) without needing LLVM
+      // statepoints/stackmaps for this bring-up backend.
+	      defn.lparams.foreach {
+	        case LoweredAst.LocalParam(sym, tpe) =>
+	          val localTpe = llvmTypeOf(tpe)
+
+	          val slotPtr = freshTmp(Type.Ptr)
+	          fb.current.emitAssign(slotPtr, Op.Alloca(localTpe))
+	          fb.current.emitStore(zeroValueOf(localTpe), slotPtr)
+	          if (isGcRootType(tpe)) {
+	            fb.current.emitCallVoid(rootPushNameOf(localTpe), List(Value.Local("ctx", Type.Ptr), slotPtr))
+	            rootsToPop += 1
+	          }
+
+	          env = env.updated(sym, slotPtr)
+	          slotTypes = slotTypes.updated(sym, localTpe)
+	      }
+
+	      val ctxPtr = Value.Local("ctx", Type.Ptr)
+	      fb.rootsToPop = rootsToPop
+
+	      val loopLabel = freshLabel("loop")
+	      fb.current.setTerminator(Terminator.Br(loopLabel))
 
       val loopBlock = fb.newBlock(loopLabel)
       fb.setCurrent(loopBlock)
+
+      // Pollcheck on the self-tail loop backedge (GC/cancellation handshake foundation).
+      fb.current.emitCallVoid("flix_gc_pollcheck", List(ctxPtr))
+      val isCancelled = freshTmp(Type.I1)
+      fb.current.emitAssign(isCancelled, Op.Call(Type.I1, "flix_cancel_requested", List(ctxPtr)))
+
+      val pollOkLabel = freshLabel("poll_ok")
+      val pollCancelLabel = freshLabel("poll_cancel")
+      fb.current.setTerminator(Terminator.CondBr(isCancelled, pollCancelLabel, pollOkLabel))
+
+      val pollCancelBlock = fb.newBlock(pollCancelLabel)
+      fb.setCurrent(pollCancelBlock)
+      val cancelExnPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(cancelExnPtr, Op.Call(Type.Ptr, "flix_cancel_exn", List(ctxPtr, Value.IntConst(cancelledKindId, Type.I64), exnExnTypeInfo, Value.IntConst(exnExnTagId, Type.I64))))
+      val tracedCancelExnPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(tracedCancelExnPtr, Op.Call(Type.Ptr, "flix_exn_with_trace", List(cancelExnPtr)))
+      val cancelBits = freshTmp(Type.I64)
+      fb.current.emitAssign(cancelBits, Op.Cast("ptrtoint", Type.I64, tracedCancelExnPtr))
+      val cancelResult = packResultTagged(ResultTagException, cancelBits, fb)
+      fb.current.setTerminator(Terminator.Ret(flixResultType, cancelResult))
+
+      val pollOkBlock = fb.newBlock(pollOkLabel)
+      fb.setCurrent(pollOkBlock)
 
       val value = emitExpr(defn.exp, env, ctxPtr, fb, lenv = Map.empty, slotTypes = slotTypes, selfTailLabel = Some(loopLabel))
       if (!fb.current.isTerminated) {
@@ -297,38 +1243,28 @@ object LlvmBackend {
 
       val ctxPtr = Value.Local("ctx", Type.Ptr)
 
-      val frameSlots = 3L + defn.cparams.length.toLong + defn.fparams.length.toLong + defn.lparams.length.toLong
-      val sizeBytes = Value.IntConst(frameSlots * 8L, Type.I64)
       val framePtr = freshTmp(Type.Ptr)
-      fb.current.emitAssign(framePtr, Op.Call(Type.Ptr, "malloc", List(sizeBytes)))
+      val frameTi = Value.Global(LlvmNames.frameTypeInfoName(defn.sym), Type.Ptr)
+      fb.current.emitAssign(framePtr, Op.Call(Type.Ptr, "flix_alloc", List(ctxPtr, frameTi)))
 
-      // Slot 0: frame apply function pointer bits.
-      val codePtr = Value.Global(LlvmNames.frameApplyName(defn.sym), Type.Ptr)
-      val codeBits = freshTmp(Type.I64)
-      fb.current.emitAssign(codeBits, Op.Cast("ptrtoint", Type.I64, codePtr))
-      storeI64Slot(framePtr, Value.IntConst(0L, Type.I64), codeBits, fb)
+      // payload[0] = pc = 0.
+      storeObjI64Slot(framePtr, Value.IntConst(0L, Type.I64), Value.IntConst(0L, Type.I64), fb)
 
-      // Slot 1: frame size in i64 slots.
-      storeI64Slot(framePtr, Value.IntConst(1L, Type.I64), Value.IntConst(frameSlots, Type.I64), fb)
-
-      // Slot 2: pc = 0.
-      storeI64Slot(framePtr, Value.IntConst(2L, Type.I64), Value.IntConst(0L, Type.I64), fb)
-
-      // Slots 3..: cparams, fparams, lparams.
-      val varsBase = 3L
+      // payload[1..] = cparams, fparams, lparams.
+      val varsBase = 1L
       (defn.cparams ::: defn.fparams).zipWithIndex.foreach {
         case (p, i) =>
           val idx = Value.IntConst(varsBase + i.toLong, Type.I64)
           val paramVal = Value.Local(LlvmNames.paramName(i), llvmTypeOf(p.tpe))
           val payload = boxToI64(paramVal, p.tpe, fb)
-          storeI64Slot(framePtr, idx, payload, fb)
+          storeObjI64Slot(framePtr, idx, payload, fb)
       }
 
       val localsBase = varsBase + (defn.cparams.length + defn.fparams.length).toLong
       defn.lparams.zipWithIndex.foreach {
         case (_, i) =>
           val idx = Value.IntConst(localsBase + i.toLong, Type.I64)
-          storeI64Slot(framePtr, idx, Value.IntConst(0L, Type.I64), fb)
+          storeObjI64Slot(framePtr, idx, Value.IntConst(0L, Type.I64), fb)
       }
 
       val callTmp = freshTmp(flixResultType)
@@ -338,8 +1274,8 @@ object LlvmBackend {
       LlvmIr.Function(fnName, flixResultType, params, fb.result())
     }
 
-    private def emitFrameApplyFunction(defn: LoweredAst.Def): LlvmIr.Function = {
-      val fnName = LlvmNames.frameApplyName(defn.sym)
+	    private def emitFrameApplyFunction(defn: LoweredAst.Def): LlvmIr.Function = {
+	      val fnName = LlvmNames.frameApplyName(defn.sym)
       val params = List(
         LlvmIr.Param("ctx", Type.Ptr),
         LlvmIr.Param("self", Type.Ptr),
@@ -347,14 +1283,25 @@ object LlvmBackend {
       )
 
       val fb = new FunBuilder()
+      fb.traceEnabled = true
       val entry = fb.newBlock("entry")
       fb.setCurrent(entry)
+      fb.current.emitCallVoid("flix_trace_push", List(Value.Global(LlvmNames.traceName(defn.sym), Type.Ptr)))
 
       val ctxPtr = Value.Local("ctx", Type.Ptr)
       val framePtr = Value.Local("self", Type.Ptr)
       val resumePayload = Value.Local("arg0", Type.I64)
 
-      val pcPayload = loadI64Slot(framePtr, Value.IntConst(2L, Type.I64), fb)
+      // Root the current frame pointer for the duration of the apply.
+      // The effectful evaluator stores its live state in the frame object, so keeping the frame
+      // alive is the key to GC-readiness at safepoints.
+      val frameSlotPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(frameSlotPtr, Op.Alloca(Type.Ptr))
+      fb.current.emitStore(framePtr, frameSlotPtr)
+      fb.current.emitCallVoid(rootPushNameOf(Type.Ptr), List(ctxPtr, frameSlotPtr))
+      fb.rootsToPop = 1L
+
+      val pcPayload = loadObjI64Slot(framePtr, Value.IntConst(0L, Type.I64), fb)
 
       val pcLabel = (i: Int) => s"pc_${i}"
       val badLabel = freshLabel("pc_bad")
@@ -383,8 +1330,8 @@ object LlvmBackend {
         id -> fb.newBlock(pcLabel(id))
       }.toMap
 
-      // Variable slots mapping: slot0=code, slot1=size, slot2=pc, slots3.. are vars.
-      val base = 3L
+      // Variable slots mapping: payload[0]=pc, payload[1..] are vars.
+      val base = 1L
       val slotIndexOf: Map[Symbol.VarSym, Long] = {
         val m = mutable.Map.empty[Symbol.VarSym, Long]
         defn.cparams.zipWithIndex.foreach { case (p, j) => m.put(p.sym, base + j.toLong) }
@@ -397,6 +1344,28 @@ object LlvmBackend {
 
       // Compile from pc_0.
       fb.setCurrent(pcBlocks(0))
+      // Pollcheck and cancellation at entry to the effectful evaluator.
+      fb.current.emitCallVoid("flix_gc_pollcheck", List(ctxPtr))
+      val entryCancelled = freshTmp(Type.I1)
+      fb.current.emitAssign(entryCancelled, Op.Call(Type.I1, "flix_cancel_requested", List(ctxPtr)))
+
+      val entryOkLabel = freshLabel("pc0_ok")
+      val entryCancelLabel = freshLabel("pc0_cancel")
+      fb.current.setTerminator(Terminator.CondBr(entryCancelled, entryCancelLabel, entryOkLabel))
+
+      val entryCancelBlock = fb.newBlock(entryCancelLabel)
+      fb.setCurrent(entryCancelBlock)
+      val cancelExnPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(cancelExnPtr, Op.Call(Type.Ptr, "flix_cancel_exn", List(ctxPtr, Value.IntConst(cancelledKindId, Type.I64), exnExnTypeInfo, Value.IntConst(exnExnTagId, Type.I64))))
+      val tracedCancelExnPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(tracedCancelExnPtr, Op.Call(Type.Ptr, "flix_exn_with_trace", List(cancelExnPtr)))
+      val cancelBits = freshTmp(Type.I64)
+      fb.current.emitAssign(cancelBits, Op.Cast("ptrtoint", Type.I64, tracedCancelExnPtr))
+      val cancelResult = packResultTagged(ResultTagException, cancelBits, fb)
+      fb.current.setTerminator(Terminator.Ret(flixResultType, cancelResult))
+
+      val entryOkBlock = fb.newBlock(entryOkLabel)
+      fb.setCurrent(entryOkBlock)
       val value = emitExprControlImpure(defn.exp, ctxPtr, fb, framePtr, slotIndexOf, lenv = Map.empty, resumePayload = resumePayload, pcBlocks = pcBlocks)
       if (!fb.current.isTerminated) {
         val packed = packResult(value, defn.tpe, fb)
@@ -543,8 +1512,8 @@ object LlvmBackend {
       syms.toSet
     }
 
-    private def collectThunkApplyClosureArgTypes(): Set[Type] = {
-      val tpes = mutable.Set.empty[Type]
+    private def collectThunkApplyClosureArgTypes(): Set[SimpleType] = {
+      val tpes = mutable.Set.empty[SimpleType]
 
       def visitExp(e: Expr): Unit = e match {
         case Expr.Cst(_, _) => ()
@@ -573,7 +1542,7 @@ object LlvmBackend {
           exps.foreach(visitExp)
 
         case Expr.ApplyClo(e1, e2, ct, _, _, _, _) =>
-          if (ct == ExpPosition.Tail) tpes += llvmTypeOf(e2.tpe)
+          if (ct == ExpPosition.Tail) tpes += e2.tpe
           visitExp(e1)
           visitExp(e2)
 
@@ -605,15 +1574,247 @@ object LlvmBackend {
       tpes.toSet
     }
 
+    private def collectLazyInnerTypes(): Set[SimpleType] = {
+      val tpes = mutable.Set.empty[SimpleType]
+
+      def visitExp(e: Expr): Unit = e match {
+        case Expr.Cst(_, _) => ()
+        case Expr.Var(_, _, _) => ()
+
+        case Expr.Let(_, e1, e2, _) =>
+          visitExp(e1)
+          visitExp(e2)
+
+        case Expr.Stmt(e1, e2, _) =>
+          visitExp(e1)
+          visitExp(e2)
+
+        case Expr.IfThenElse(e1, e2, e3, _, _, _) =>
+          visitExp(e1)
+          visitExp(e2)
+          visitExp(e3)
+
+        case Expr.Branch(e0, branches, _, _, _) =>
+          visitExp(e0)
+          branches.values.foreach(visitExp)
+
+        case Expr.JumpTo(_, _, _, _) => ()
+
+        case Expr.ApplyAtomic(op, exps, tpe, _, _) =>
+          op match {
+            case AtomicOp.Lazy =>
+              tpe match {
+                case SimpleType.Lazy(inner) => tpes += inner
+                case _ => ()
+              }
+            case _ => ()
+          }
+          exps.foreach(visitExp)
+
+        case Expr.ApplyClo(e1, e2, _, _, _, _, _) =>
+          visitExp(e1)
+          visitExp(e2)
+
+        case Expr.ApplyDef(_, exps, _, _, _, _, _) =>
+          exps.foreach(visitExp)
+
+        case Expr.ApplyOp(_, exps, _, _, _, _) =>
+          exps.foreach(visitExp)
+
+        case Expr.ApplySelfTail(_, actuals, _, _, _) =>
+          actuals.foreach(visitExp)
+
+        case Expr.Region(_, e0, _, _, _) =>
+          visitExp(e0)
+
+        case Expr.TryCatch(e0, rules, _, _, _) =>
+          visitExp(e0)
+          rules.foreach(r => visitExp(r.exp))
+
+        case Expr.RunWith(e0, _, rules, _, _, _, _, _) =>
+          visitExp(e0)
+          rules.foreach(r => visitExp(r.exp))
+
+        case Expr.NewObject(_, _, _, _, methods, _) =>
+          methods.foreach(m => visitExp(m.exp))
+      }
+
+      root.defs.values.foreach(defn => visitExp(defn.exp))
+      tpes.toSet
+    }
+
+    private def collectTupleTypes(): Set[SimpleType.Tuple] = {
+      val tpes = mutable.Set.empty[SimpleType.Tuple]
+
+      def record(tpe: SimpleType): Unit = tpe match {
+        case tup: SimpleType.Tuple => tpes += tup
+        case _ => ()
+      }
+
+      def visitExp(e: Expr): Unit = e match {
+        case Expr.Cst(_, _) => record(e.tpe)
+        case Expr.Var(_, _, _) => record(e.tpe)
+
+        case Expr.Let(_, e1, e2, _) =>
+          record(e.tpe)
+          visitExp(e1)
+          visitExp(e2)
+
+        case Expr.Stmt(e1, e2, _) =>
+          record(e.tpe)
+          visitExp(e1)
+          visitExp(e2)
+
+        case Expr.IfThenElse(e1, e2, e3, _, _, _) =>
+          record(e.tpe)
+          visitExp(e1)
+          visitExp(e2)
+          visitExp(e3)
+
+        case Expr.Branch(e0, branches, _, _, _) =>
+          record(e.tpe)
+          visitExp(e0)
+          branches.values.foreach(visitExp)
+
+        case Expr.JumpTo(_, _, _, _) =>
+          record(e.tpe)
+
+        case Expr.ApplyAtomic(_, exps, _, _, _) =>
+          record(e.tpe)
+          exps.foreach(visitExp)
+
+        case Expr.ApplyClo(e1, e2, _, _, _, _, _) =>
+          record(e.tpe)
+          visitExp(e1)
+          visitExp(e2)
+
+        case Expr.ApplyDef(_, exps, _, _, _, _, _) =>
+          record(e.tpe)
+          exps.foreach(visitExp)
+
+        case Expr.ApplyOp(_, exps, _, _, _, _) =>
+          record(e.tpe)
+          exps.foreach(visitExp)
+
+        case Expr.ApplySelfTail(_, actuals, _, _, _) =>
+          record(e.tpe)
+          actuals.foreach(visitExp)
+
+        case Expr.Region(_, e0, _, _, _) =>
+          record(e.tpe)
+          visitExp(e0)
+
+        case Expr.TryCatch(e0, rules, _, _, _) =>
+          record(e.tpe)
+          visitExp(e0)
+          rules.foreach(r => visitExp(r.exp))
+
+        case Expr.RunWith(e0, _, rules, _, _, _, _, _) =>
+          record(e.tpe)
+          visitExp(e0)
+          rules.foreach(r => visitExp(r.exp))
+
+        case Expr.NewObject(_, _, _, _, methods, _) =>
+          record(e.tpe)
+          methods.foreach(m => visitExp(m.exp))
+      }
+
+      root.defs.values.foreach(defn => visitExp(defn.exp))
+      tpes.toSet
+    }
+
+    private def collectRecordTypes(): Set[SimpleType] = {
+      val tpes = mutable.Set.empty[SimpleType]
+
+      def record(tpe: SimpleType): Unit = tpe match {
+        case SimpleType.RecordEmpty =>
+          () // represented as null pointer; no typeinfo required
+        case _: SimpleType.RecordExtend =>
+          tpes += tpe
+        case _ =>
+          ()
+      }
+
+      def visitExp(e: Expr): Unit = e match {
+        case Expr.Cst(_, _) => record(e.tpe)
+        case Expr.Var(_, _, _) => record(e.tpe)
+
+        case Expr.Let(_, e1, e2, _) =>
+          record(e.tpe)
+          visitExp(e1)
+          visitExp(e2)
+
+        case Expr.Stmt(e1, e2, _) =>
+          record(e.tpe)
+          visitExp(e1)
+          visitExp(e2)
+
+        case Expr.IfThenElse(e1, e2, e3, _, _, _) =>
+          record(e.tpe)
+          visitExp(e1)
+          visitExp(e2)
+          visitExp(e3)
+
+        case Expr.Branch(e0, branches, _, _, _) =>
+          record(e.tpe)
+          visitExp(e0)
+          branches.values.foreach(visitExp)
+
+        case Expr.JumpTo(_, _, _, _) =>
+          record(e.tpe)
+
+        case Expr.ApplyAtomic(_, exps, _, _, _) =>
+          record(e.tpe)
+          exps.foreach(visitExp)
+
+        case Expr.ApplyClo(e1, e2, _, _, _, _, _) =>
+          record(e.tpe)
+          visitExp(e1)
+          visitExp(e2)
+
+        case Expr.ApplyDef(_, exps, _, _, _, _, _) =>
+          record(e.tpe)
+          exps.foreach(visitExp)
+
+        case Expr.ApplyOp(_, exps, _, _, _, _) =>
+          record(e.tpe)
+          exps.foreach(visitExp)
+
+        case Expr.ApplySelfTail(_, actuals, _, _, _) =>
+          record(e.tpe)
+          actuals.foreach(visitExp)
+
+        case Expr.Region(_, e0, _, _, _) =>
+          record(e.tpe)
+          visitExp(e0)
+
+        case Expr.TryCatch(e0, rules, _, _, _) =>
+          record(e.tpe)
+          visitExp(e0)
+          rules.foreach(r => visitExp(r.exp))
+
+        case Expr.RunWith(e0, _, rules, _, _, _, _, _) =>
+          record(e.tpe)
+          visitExp(e0)
+          rules.foreach(r => visitExp(r.exp))
+
+        case Expr.NewObject(_, _, _, _, methods, _) =>
+          record(e.tpe)
+          methods.foreach(m => visitExp(m.exp))
+      }
+
+      root.defs.values.foreach(defn => visitExp(defn.exp))
+      tpes.toSet
+    }
+
     private def emitClosureInvokeWrapper(defn: LoweredAst.Def): LlvmIr.Function = {
       val wrapperName = LlvmNames.closureInvokeName(defn.sym)
       val defName = LlvmNames.defName(defn.sym)
 
-      val argTpe = defn.fparams.headOption.map(p => llvmTypeOf(p.tpe)).getOrElse(Type.I64)
       val params = List(
         LlvmIr.Param("ctx", Type.Ptr),
         LlvmIr.Param("self", Type.Ptr),
-        LlvmIr.Param("arg0", argTpe)
+        LlvmIr.Param("arg0", Type.I64)
       )
 
       val fb = new FunBuilder()
@@ -628,15 +1829,12 @@ object LlvmBackend {
 
       val ctxPtr = Value.Local("ctx", Type.Ptr)
       val selfPtr = Value.Local("self", Type.Ptr)
-      val arg0 = Value.Local("arg0", argTpe)
+      val arg0Payload = Value.Local("arg0", Type.I64)
+      val arg0 = unboxFromI64(arg0Payload, defn.fparams.head.tpe, fb)
 
       val capturedArgs = defn.cparams.zipWithIndex.map {
         case (cp, i) =>
-          val slotPtr = freshTmp(Type.Ptr)
-          fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, selfPtr, Value.IntConst((i + 1).toLong, Type.I64)))
-
-          val payload = freshTmp(Type.I64)
-          fb.current.emitAssign(payload, Op.Load(Type.I64, slotPtr))
+          val payload = loadObjI64Slot(selfPtr, Value.IntConst(i.toLong, Type.I64), fb)
           unboxFromI64(payload, cp.tpe, fb)
       }
 
@@ -667,11 +1865,7 @@ object LlvmBackend {
       val allParams = defn.cparams ::: defn.fparams
       val args = allParams.zipWithIndex.map {
         case (p, i) =>
-          val slotPtr = freshTmp(Type.Ptr)
-          fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, selfPtr, Value.IntConst((i + 1).toLong, Type.I64)))
-
-          val payload = freshTmp(Type.I64)
-          fb.current.emitAssign(payload, Op.Load(Type.I64, slotPtr))
+          val payload = loadObjI64Slot(selfPtr, Value.IntConst(i.toLong, Type.I64), fb)
           unboxFromI64(payload, p.tpe, fb)
       }
 
@@ -682,7 +1876,7 @@ object LlvmBackend {
       LlvmIr.Function(wrapperName, flixResultType, params, fb.result())
     }
 
-    private def emitThunkApplyClosureWrapper(argTpe: Type): LlvmIr.Function = {
+    private def emitThunkApplyClosureWrapper(argTpe: SimpleType): LlvmIr.Function = {
       val wrapperName = LlvmNames.thunkApplyClosureName(argTpe)
 
       val params = List(
@@ -699,36 +1893,17 @@ object LlvmBackend {
       val selfPtr = Value.Local("self", Type.Ptr)
 
       // Captured layout:
-      //   slot 0: wrapper code pointer bits (i64)
-      //   slot 1: closure pointer bits (i64)
-      //   slot 2: argument payload bits (i64)
-      val cloSlotPtr = freshTmp(Type.Ptr)
-      fb.current.emitAssign(cloSlotPtr, Op.Gep(Type.I64, selfPtr, Value.IntConst(1L, Type.I64)))
-      val cloBits = freshTmp(Type.I64)
-      fb.current.emitAssign(cloBits, Op.Load(Type.I64, cloSlotPtr))
+      //   payload[0] = closure pointer bits (i64)
+      //   payload[1] = argument payload bits (i64)
+      val cloBits = loadObjI64Slot(selfPtr, Value.IntConst(0L, Type.I64), fb)
 
       val cloPtr = freshTmp(Type.Ptr)
       fb.current.emitAssign(cloPtr, Op.Cast("inttoptr", Type.Ptr, cloBits))
 
-      val argSlotPtr = freshTmp(Type.Ptr)
-      fb.current.emitAssign(argSlotPtr, Op.Gep(Type.I64, selfPtr, Value.IntConst(2L, Type.I64)))
-      val argBits = freshTmp(Type.I64)
-      fb.current.emitAssign(argBits, Op.Load(Type.I64, argSlotPtr))
-
-      val argVal = unboxPayloadToType(argBits, argTpe, fb)
-
-      // Load the invoke function pointer from the closure slot 0.
-      val cloInvokeSlotPtr = freshTmp(Type.Ptr)
-      fb.current.emitAssign(cloInvokeSlotPtr, Op.Gep(Type.I64, cloPtr, Value.IntConst(0L, Type.I64)))
-
-      val codeBits = freshTmp(Type.I64)
-      fb.current.emitAssign(codeBits, Op.Load(Type.I64, cloInvokeSlotPtr))
-
-      val codePtr = freshTmp(Type.Ptr)
-      fb.current.emitAssign(codePtr, Op.Cast("inttoptr", Type.Ptr, codeBits))
+      val argBits = loadObjI64Slot(selfPtr, Value.IntConst(1L, Type.I64), fb)
 
       val callTmp = freshTmp(flixResultType)
-      fb.current.emitAssign(callTmp, Op.CallIndirect(flixResultType, codePtr, List(ctxPtr, cloPtr, argVal)))
+      fb.current.emitAssign(callTmp, Op.Call(flixResultType, "flix_invoke_thunk", List(ctxPtr, cloPtr, argBits)))
       fb.current.setTerminator(Terminator.Ret(flixResultType, callTmp))
 
       LlvmIr.Function(wrapperName, flixResultType, params, fb.result())
@@ -787,17 +1962,70 @@ object LlvmBackend {
 
       fb.current.emitCallVoid("flix_init", List(Value.Local("argc", Type.I32), Value.Local("argv", Type.Ptr)))
 
-      // Call the Flix main entry point with a null context pointer for bring-up.
-      val ctxPtr = Value.Null(Type.Ptr)
+      // Construct a runtime context for the duration of the program.
+      // Note: We intentionally do not free it here (process teardown reclaims it),
+      // and detached native threads may still be running after `main` returns.
+      val ctxPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(ctxPtr, Op.Call(Type.Ptr, "flix_ctx_new", Nil))
       val mainArgs = (mainDef.cparams ::: mainDef.fparams).map(p => defaultValueFor(p.tpe))
       val callTmp = freshTmp(flixResultType)
       fb.current.emitAssign(callTmp, Op.Call(flixResultType, flixMainName, ctxPtr :: mainArgs))
 
       // Ensure we run to completion even if main returns a THUNK.
-      unwindThunkToValuePayload(callTmp, ctxPtr, fb)
+      val r = unwindThunkToResult(callTmp, ctxPtr, fb)
 
-      // Always exit successfully for now.
+      val tag = freshTmp(Type.I64)
+      fb.current.emitAssign(tag, Op.ExtractValue(Type.I64, flixResultType, r, index = 0))
+
+      val isValue = freshTmp(Type.I1)
+      fb.current.emitAssign(isValue, Op.ICmp("eq", tag, Value.IntConst(ResultTagValue, Type.I64)))
+
+      val valueLabel = freshLabel("main_value")
+      val notValueLabel = freshLabel("main_not_value")
+      fb.current.setTerminator(Terminator.CondBr(isValue, valueLabel, notValueLabel))
+
+      val valueBlock = fb.newBlock(valueLabel)
+      fb.setCurrent(valueBlock)
       fb.current.setTerminator(Terminator.Ret(Type.I32, Value.IntConst(0L, Type.I32)))
+
+      val notValueBlock = fb.newBlock(notValueLabel)
+      fb.setCurrent(notValueBlock)
+      val isExn = freshTmp(Type.I1)
+      fb.current.emitAssign(isExn, Op.ICmp("eq", tag, Value.IntConst(ResultTagException, Type.I64)))
+
+      val exnLabel = freshLabel("main_exn")
+      val suspCheckLabel = freshLabel("main_susp_check")
+      val badLabel = freshLabel("main_bad")
+      fb.current.setTerminator(Terminator.CondBr(isExn, exnLabel, suspCheckLabel))
+
+      val exnBlock = fb.newBlock(exnLabel)
+      fb.setCurrent(exnBlock)
+      val payload = freshTmp(Type.I64)
+      fb.current.emitAssign(payload, Op.ExtractValue(Type.I64, flixResultType, r, index = 1))
+      val exnPtr = castValue(payload, Type.Ptr, fb)
+      fb.current.emitCallVoid("flix_exn_report_ptr", List(exnPtr))
+      fb.current.setTerminator(Terminator.Ret(Type.I32, Value.IntConst(1L, Type.I32)))
+
+      val suspCheckBlock = fb.newBlock(suspCheckLabel)
+      fb.setCurrent(suspCheckBlock)
+      val isSusp = freshTmp(Type.I1)
+      fb.current.emitAssign(isSusp, Op.ICmp("eq", tag, Value.IntConst(ResultTagSuspension, Type.I64)))
+
+      val suspLabel = freshLabel("main_susp")
+      fb.current.setTerminator(Terminator.CondBr(isSusp, suspLabel, badLabel))
+
+      val suspBlock = fb.newBlock(suspLabel)
+      fb.setCurrent(suspBlock)
+      val suspBits = freshTmp(Type.I64)
+      fb.current.emitAssign(suspBits, Op.ExtractValue(Type.I64, flixResultType, r, index = 1))
+      val suspPtr = castValue(suspBits, Type.Ptr, fb)
+      fb.current.emitCallVoid("flix_suspension_report_ptr", List(suspPtr))
+      fb.current.setTerminator(Terminator.Ret(Type.I32, Value.IntConst(1L, Type.I32)))
+
+      val badBlock = fb.newBlock(badLabel)
+      fb.setCurrent(badBlock)
+      fb.current.emitTrap()
+      fb.current.setTerminator(Terminator.Unreachable)
 
       LlvmIr.Function("main", Type.I32, params, fb.result())
     }
@@ -814,6 +2042,18 @@ object LlvmBackend {
       case other => Value.Undef(other)
     }
 
+    private def isHandleAbiType(tpe: SimpleType): Boolean = tpe match {
+      case SimpleType.String => true
+      case SimpleType.Array(SimpleType.Int8) => true
+      // The current LLVM pipeline boxes most non-primitive values as `Object` (i64 payload bits).
+      // For `@Export` we use handles for such values at the public ABI boundary.
+      case SimpleType.Object => true
+      case _ => false
+    }
+
+    private def exportAbiTypeOf(tpe: SimpleType): Type =
+      if (isHandleAbiType(tpe)) Type.I64 else llvmTypeOf(tpe)
+
     private def llvmTypeOf(tpe: SimpleType): Type = tpe match {
       case SimpleType.Bool => Type.I1
       case SimpleType.Char => Type.I32
@@ -823,10 +2063,27 @@ object LlvmBackend {
       case SimpleType.Int64 => Type.I64
       case SimpleType.Float32 => Type.Float
       case SimpleType.Float64 => Type.Double
+      case SimpleType.AnyType => Type.I64
       case SimpleType.Unit => Type.I64
       case SimpleType.Null => Type.Ptr
       case SimpleType.Object => Type.I64
       case _ => Type.Ptr
+    }
+
+    private def zeroValueOf(tpe: Type): Value = tpe match {
+      case Type.I1 | Type.I8 | Type.I16 | Type.I32 | Type.I64 =>
+        Value.IntConst(0L, tpe)
+      case Type.Float =>
+        // +0.0f bit pattern
+        Value.Float32Const(0)
+      case Type.Double =>
+        // +0.0 bit pattern
+        Value.Float64Const(0L)
+      case Type.Ptr =>
+        Value.Null(Type.Ptr)
+      case other =>
+        // Should not be needed for the bring-up backend (locals are only primitive/I64/Ptr).
+        Value.Undef(other)
     }
 
     private def packResult(v: Value, tpe: SimpleType, fb: FunBuilder): Value = {
@@ -859,6 +2116,7 @@ object LlvmBackend {
       val entryLabel = fb.current.label
 
       val loopLabel = freshLabel("unwind_loop")
+      val thunkLabel = freshLabel("unwind_thunk")
       val bodyLabel = freshLabel("unwind_body")
       val endLabel = freshLabel("unwind_end")
 
@@ -875,38 +2133,60 @@ object LlvmBackend {
       loopBlock.emitPhi(curResult, List((result0, entryLabel), (nextResult, bodyLabel)))
 
       val tag = freshTmp(Type.I64)
-      loopBlock.emitAssign(tag, Op.ExtractValue(Type.I64, flixResultType, curResult, index = 0))
+      fb.current.emitAssign(tag, Op.ExtractValue(Type.I64, flixResultType, curResult, index = 0))
 
       val isThunk = freshTmp(Type.I1)
-      loopBlock.emitAssign(isThunk, Op.ICmp("eq", tag, Value.IntConst(ResultTagThunk, Type.I64)))
-      loopBlock.setTerminator(Terminator.CondBr(isThunk, bodyLabel, endLabel))
+      fb.current.emitAssign(isThunk, Op.ICmp("eq", tag, Value.IntConst(ResultTagThunk, Type.I64)))
+      fb.current.setTerminator(Terminator.CondBr(isThunk, thunkLabel, endLabel))
+
+      // Thunk path: root the thunk pointer across pollcheck before invoking it.
+      val thunkBlock = fb.newBlock(thunkLabel)
+      fb.setCurrent(thunkBlock)
+
+      val payload = freshTmp(Type.I64)
+      thunkBlock.emitAssign(payload, Op.ExtractValue(Type.I64, flixResultType, curResult, index = 1))
+
+      val thunkPtr = freshTmp(Type.Ptr)
+      thunkBlock.emitAssign(thunkPtr, Op.Cast("inttoptr", Type.Ptr, payload))
+
+      val thunkSlotPtr = freshTmp(Type.Ptr)
+      thunkBlock.emitAssign(thunkSlotPtr, Op.Alloca(Type.Ptr))
+      thunkBlock.emitStore(thunkPtr, thunkSlotPtr)
+      thunkBlock.emitCallVoid(rootPushNameOf(Type.Ptr), List(ctxPtr, thunkSlotPtr))
+
+      thunkBlock.emitCallVoid("flix_gc_pollcheck", List(ctxPtr))
+      thunkBlock.emitCallVoid("flix_gc_pop_roots", List(ctxPtr, Value.IntConst(1L, Type.I64)))
+
+      val isCancelled = freshTmp(Type.I1)
+      thunkBlock.emitAssign(isCancelled, Op.Call(Type.I1, "flix_cancel_requested", List(ctxPtr)))
+
+      val cancelLabel = freshLabel("unwind_cancel")
+      thunkBlock.setTerminator(Terminator.CondBr(isCancelled, cancelLabel, bodyLabel))
+
+      val cancelBlock = fb.newBlock(cancelLabel)
+      fb.setCurrent(cancelBlock)
+      val cancelExnPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(cancelExnPtr, Op.Call(Type.Ptr, "flix_cancel_exn", List(ctxPtr, Value.IntConst(cancelledKindId, Type.I64), exnExnTypeInfo, Value.IntConst(exnExnTagId, Type.I64))))
+      val tracedCancelExnPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(tracedCancelExnPtr, Op.Call(Type.Ptr, "flix_exn_with_trace", List(cancelExnPtr)))
+      val cancelBits = freshTmp(Type.I64)
+      fb.current.emitAssign(cancelBits, Op.Cast("ptrtoint", Type.I64, tracedCancelExnPtr))
+      val cancelResult = packResultTagged(ResultTagException, cancelBits, fb)
+      fb.current.setTerminator(Terminator.Br(endLabel))
 
       // Loop body: invoke the thunk and iterate.
       val bodyBlock = fb.newBlock(bodyLabel)
       fb.setCurrent(bodyBlock)
 
-      val payload = freshTmp(Type.I64)
-      bodyBlock.emitAssign(payload, Op.ExtractValue(Type.I64, flixResultType, curResult, index = 1))
-
-      val thunkPtr = freshTmp(Type.Ptr)
-      bodyBlock.emitAssign(thunkPtr, Op.Cast("inttoptr", Type.Ptr, payload))
-
-      // Invoke the thunk (same convention as [[emitInvokeThunk]]), but write directly into `nextResult` for the phi.
-      val slot0Ptr = freshTmp(Type.Ptr)
-      bodyBlock.emitAssign(slot0Ptr, Op.Gep(Type.I64, thunkPtr, Value.IntConst(0L, Type.I64)))
-
-      val codeI64 = freshTmp(Type.I64)
-      bodyBlock.emitAssign(codeI64, Op.Load(Type.I64, slot0Ptr))
-
-      val codePtr = freshTmp(Type.Ptr)
-      bodyBlock.emitAssign(codePtr, Op.Cast("inttoptr", Type.Ptr, codeI64))
-
-      bodyBlock.emitAssign(nextResult, Op.CallIndirect(flixResultType, codePtr, List(ctxPtr, thunkPtr, Value.IntConst(0L, Type.I64))))
+      // Invoke the thunk, but write directly into `nextResult` for the phi.
+      bodyBlock.emitAssign(nextResult, Op.Call(flixResultType, "flix_invoke_thunk", List(ctxPtr, thunkPtr, Value.IntConst(0L, Type.I64))))
       bodyBlock.setTerminator(Terminator.Br(loopLabel))
 
       val endBlock = fb.newBlock(endLabel)
       fb.setCurrent(endBlock)
-      curResult
+      val outResult = freshTmp(flixResultType)
+      endBlock.emitPhi(outResult, List((curResult, loopLabel), (cancelResult, cancelLabel)))
+      outResult
     }
 
     /**
@@ -941,24 +2221,66 @@ object LlvmBackend {
     }
 
     /**
-      * Invokes a thunk object (closure-like) using the thunk calling convention:
-      *   flix_result_t (*)(ptr ctx, ptr self, i64 dummy_arg)
+      * Unwinds thunks until we reach a VALUE result and returns its payload bits.
+      *
+      * Bring-up behavior:
+      *   - Propagates EXCEPTION according to `exnHandlerOpt` (branch or return).
+      *   - Traps on SUSPENSION.
+      */
+    private def unwindThunkToValuePayloadOrPropagateExn(result0: Value,
+                                                        ctxPtr: Value,
+                                                        fb: FunBuilder,
+                                                        exnHandlerOpt: Option[ExnHandler]): Value = {
+      val r = unwindThunkToResult(result0, ctxPtr, fb)
+
+      val tag = freshTmp(Type.I64)
+      fb.current.emitAssign(tag, Op.ExtractValue(Type.I64, flixResultType, r, index = 0))
+      val isValue = freshTmp(Type.I1)
+      fb.current.emitAssign(isValue, Op.ICmp("eq", tag, Value.IntConst(ResultTagValue, Type.I64)))
+
+      val valueLabel = freshLabel("unwind_value")
+      val notValueLabel = freshLabel("unwind_not_value")
+      fb.current.setTerminator(Terminator.CondBr(isValue, valueLabel, notValueLabel))
+
+      val notValueBlock = fb.newBlock(notValueLabel)
+      fb.setCurrent(notValueBlock)
+      val isExn = freshTmp(Type.I1)
+      fb.current.emitAssign(isExn, Op.ICmp("eq", tag, Value.IntConst(ResultTagException, Type.I64)))
+      val exnLabel = freshLabel("unwind_exn")
+      val badLabel = freshLabel("unwind_bad")
+      fb.current.setTerminator(Terminator.CondBr(isExn, exnLabel, badLabel))
+
+      val exnBlock = fb.newBlock(exnLabel)
+      fb.setCurrent(exnBlock)
+      exnHandlerOpt match {
+        case Some(ExnHandler(label, slotPtr)) =>
+          val payload = freshTmp(Type.I64)
+          fb.current.emitAssign(payload, Op.ExtractValue(Type.I64, flixResultType, r, index = 1))
+          fb.current.emitStore(payload, slotPtr)
+          fb.current.setTerminator(Terminator.Br(label))
+        case None =>
+          fb.current.setTerminator(Terminator.Ret(flixResultType, r))
+      }
+
+      val badBlock = fb.newBlock(badLabel)
+      fb.setCurrent(badBlock)
+      fb.current.emitTrap()
+      fb.current.setTerminator(Terminator.Unreachable)
+
+      val valueBlock = fb.newBlock(valueLabel)
+      fb.setCurrent(valueBlock)
+      val valuePayload = freshTmp(Type.I64)
+      valueBlock.emitAssign(valuePayload, Op.ExtractValue(Type.I64, flixResultType, r, index = 1))
+      valuePayload
+    }
+
+    /**
+      * Invokes a thunk object using the runtime thunk dispatcher (typeinfo.invoke).
       */
     private def emitInvokeThunk(thunkPtr0: Value, ctxPtr: Value, fb: FunBuilder): Value = {
       val thunkPtr = castValue(thunkPtr0, Type.Ptr, fb)
-
-      // Load the invoke function pointer from slot 0.
-      val slot0Ptr = freshTmp(Type.Ptr)
-      fb.current.emitAssign(slot0Ptr, Op.Gep(Type.I64, thunkPtr, Value.IntConst(0L, Type.I64)))
-
-      val codeI64 = freshTmp(Type.I64)
-      fb.current.emitAssign(codeI64, Op.Load(Type.I64, slot0Ptr))
-
-      val codePtr = freshTmp(Type.Ptr)
-      fb.current.emitAssign(codePtr, Op.Cast("inttoptr", Type.Ptr, codeI64))
-
       val callTmp = freshTmp(flixResultType)
-      fb.current.emitAssign(callTmp, Op.CallIndirect(flixResultType, codePtr, List(ctxPtr, thunkPtr, Value.IntConst(0L, Type.I64))))
+      fb.current.emitAssign(callTmp, Op.Call(flixResultType, "flix_invoke_thunk", List(ctxPtr, thunkPtr, Value.IntConst(0L, Type.I64))))
       callTmp
     }
 
@@ -1009,6 +2331,12 @@ object LlvmBackend {
 
       case SimpleType.Null =>
         Value.IntConst(0L, Type.I64)
+
+      case SimpleType.AnyType =>
+        v.tpe match {
+          case Type.I64 => v
+          case _ => castValue(v, Type.I64, fb)
+        }
 
       case SimpleType.Object =>
         v.tpe match {
@@ -1070,6 +2398,9 @@ object LlvmBackend {
       case SimpleType.Null =>
         Value.Null(Type.Ptr)
 
+      case SimpleType.AnyType =>
+        payload
+
       case SimpleType.Object =>
         payload
 
@@ -1079,15 +2410,119 @@ object LlvmBackend {
         tmp
     }
 
+    /**
+      * Converts a boxed (erased) value payload to the export ABI payload for an immediate return type.
+      *
+      * Internal invariant (post-Eraser): defs return boxed values (typically `Object`) and primitives are boxed as
+      * heap objects. For `@Export` we want to expose immediate values as raw `i64` payload bits.
+      */
+    private def exportUnboxValuePayload(payload: Value, unboxedTpe: SimpleType, fb: FunBuilder): Value = unboxedTpe match {
+      case SimpleType.Unit =>
+        // Unit is represented as 0 and does not allocate a box object.
+        Value.IntConst(0L, Type.I64)
+
+      case SimpleType.Bool =>
+        val tmp = freshTmp(Type.I64)
+        fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_unbox_bool", List(payload)))
+        tmp
+
+      case SimpleType.Char =>
+        val tmp = freshTmp(Type.I64)
+        fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_unbox_char", List(payload)))
+        tmp
+
+      case SimpleType.Int8 =>
+        val tmp = freshTmp(Type.I64)
+        fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_unbox_int8", List(payload)))
+        tmp
+
+      case SimpleType.Int16 =>
+        val tmp = freshTmp(Type.I64)
+        fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_unbox_int16", List(payload)))
+        tmp
+
+      case SimpleType.Int32 =>
+        val tmp = freshTmp(Type.I64)
+        fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_unbox_int32", List(payload)))
+        tmp
+
+      case SimpleType.Int64 =>
+        val tmp = freshTmp(Type.I64)
+        fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_unbox_int64", List(payload)))
+        tmp
+
+      case SimpleType.Float32 =>
+        val tmp = freshTmp(Type.I64)
+        fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_unbox_float32", List(payload)))
+        tmp
+
+      case SimpleType.Float64 =>
+        val tmp = freshTmp(Type.I64)
+        fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_unbox_float64", List(payload)))
+        tmp
+
+      case _ =>
+        // Should never be called for non-immediates.
+        payload
+    }
+
+	    private def isImmediateType(tpe: SimpleType): Boolean = tpe match {
+	      case SimpleType.Unit | SimpleType.Bool | SimpleType.Char |
+	           SimpleType.Int8 | SimpleType.Int16 | SimpleType.Int32 | SimpleType.Int64 |
+	           SimpleType.Float32 | SimpleType.Float64 =>
+	        true
+	      case _ =>
+	        false
+	    }
+
+	    private def isPointerLikeType(tpe: SimpleType): Boolean =
+	      !isImmediateType(tpe)
+
+		    /**
+		      * Returns true iff a value of the given type is a GC-heap object pointer that must be
+		      * reported via the explicit root stack (shadow stack).
+		      *
+		      * Note: `SimpleType` does not encode region information. This means we cannot reliably
+		      * distinguish “GC heap pointers” from region-arena pointers at this phase.
+		      *
+		      * For correctness, we conservatively treat every non-immediate value as a GC root *candidate*.
+		      * The bring-up GC uses membership checks (tracked allocation set) to ignore non-GC pointers.
+		      *
+		      * Region→heap edges are still tracked via remembered sets; rooting a region pointer itself
+		      * is harmless but does not replace remembered-set scanning.
+		      */
+		    private def isGcRootType(tpe: SimpleType): Boolean = tpe match {
+		      case SimpleType.Void => false
+		      case t if isImmediateType(t) => false
+		      case _ => true
+		    }
+
+	    private def rootPushNameOf(valueTpe: Type): String = valueTpe match {
+	      case Type.I64 => "flix_gc_push_root_value_i64"
+	      case Type.Ptr => "flix_gc_push_root_ptr"
+	      case other => throw new IllegalStateException(s"Unexpected root slot type: '$other'.")
+	    }
+
+    private def emitStorePtrLike(ctxPtr: Value, slotPtr: Value, payload: Value, fb: FunBuilder): Unit = {
+      fb.current.emitCallVoid("flix_store_ptr", List(ctxPtr, slotPtr, payload))
+    }
+
+    private def emitRememberPtrArray(ctxPtr: Value, rcPtr: Value, arrPtr: Value, lenI64: Value, fb: FunBuilder): Unit = {
+      val basePtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(basePtr, Op.Gep(Type.I8, arrPtr, Value.IntConst(16L, Type.I64)))
+      fb.current.emitCallVoid("flix_region_remember_ptr_array", List(ctxPtr, rcPtr, basePtr, lenI64))
+    }
+
     private def emitExpr(exp0: Expr,
                          env: Map[Symbol.VarSym, Value],
                          ctxPtr: Value,
                          fb: FunBuilder,
                          lenv: Map[Symbol.LabelSym, String],
                          slotTypes: Map[Symbol.VarSym, Type],
-                         selfTailLabel: Option[String]): Value = exp0 match {
+                         selfTailLabel: Option[String],
+                         exnHandlerOpt: Option[ExnHandler] = None): Value = exp0 match {
       case Expr.Cst(cst, _) =>
-        emitConstant(cst, fb)
+        emitConstant(cst, ctxPtr, fb)
 
       case Expr.Var(sym, tpe, _) =>
         slotTypes.get(sym) match {
@@ -1101,27 +2536,96 @@ object LlvmBackend {
         }
 
       case Expr.Let(sym, exp1, exp2, _) =>
-        val v1 = emitExpr(exp1, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel)
+        val v1 = emitExpr(exp1, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel, exnHandlerOpt)
         if (fb.current.isTerminated) {
           Value.Undef(llvmTypeOf(exp0.tpe))
         } else {
-          val env1 = env.updated(sym, v1)
-          emitExpr(exp2, env1, ctxPtr, fb, lenv, slotTypes, selfTailLabel)
+          slotTypes.get(sym) match {
+            case Some(valueTpe) =>
+              val slotPtr = env.getOrElse(sym, Value.Undef(Type.Ptr))
+              val v1Coerced = coerceValue(v1, valueTpe, fb)
+              fb.current.emitStore(v1Coerced, slotPtr)
+              emitExpr(exp2, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel, exnHandlerOpt)
+            case None =>
+              val env1 = env.updated(sym, v1)
+              emitExpr(exp2, env1, ctxPtr, fb, lenv, slotTypes, selfTailLabel, exnHandlerOpt)
+          }
         }
 
       case Expr.Stmt(exp1, exp2, _) =>
-        emitExpr(exp1, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel)
+        emitExpr(exp1, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel, exnHandlerOpt)
         if (fb.current.isTerminated) Value.Undef(llvmTypeOf(exp0.tpe))
-        else emitExpr(exp2, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel)
+        else emitExpr(exp2, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel, exnHandlerOpt)
 
-      case Expr.Region(sym, exp, _, _, _) =>
-        // Bring-up: the JVM backend ignores regions at runtime.
-        // For now we represent regions as a null pointer and rely on the type system for safety.
-        val env1 = env.updated(sym, Value.Null(Type.Ptr))
-        emitExpr(exp, env1, ctxPtr, fb, lenv, slotTypes, selfTailLabel)
+      case Expr.Region(sym, exp, tpe, _, _) =>
+        val joinTpe = llvmTypeOf(tpe)
+        val endLabel = freshLabel("region_end")
+        val handlerLabel = freshLabel("region_exn")
+
+        // Enter the region and bind it for allocations/spawn in the body.
+        val regionPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(regionPtr, Op.Call(Type.Ptr, "flix_region_enter", List(ctxPtr)))
+        slotTypes.get(sym) match {
+          case Some(_) =>
+            val slotPtr = env.getOrElse(sym, Value.Undef(Type.Ptr))
+            fb.current.emitStore(regionPtr, slotPtr)
+          case None => ()
+        }
+
+        val exnSlotPtr = hoistAllocaI64(fb)
+        val innerHandler = ExnHandler(handlerLabel, exnSlotPtr)
+
+        val incomings = mutable.ArrayBuffer.empty[(Value, String)]
+
+        // Region body (may branch to handlerLabel via innerHandler).
+        val bodyValue = emitExpr(exp, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel, Some(innerHandler))
+        if (!fb.current.isTerminated) {
+          val bodyOutcome = packResult(bodyValue, tpe, fb)
+          val exitTmp = freshTmp(flixResultType)
+          fb.current.emitAssign(exitTmp, Op.Call(flixResultType, "flix_region_exit", List(ctxPtr, regionPtr, bodyOutcome)))
+
+          val payloadBits = unwindThunkToValuePayloadOrPropagateExn(exitTmp, ctxPtr, fb, exnHandlerOpt)
+          val v = unboxFromI64(payloadBits, tpe, fb)
+          val vCoerced = coerceValue(v, joinTpe, fb)
+          val predLabel = fb.current.label
+          fb.current.setTerminator(Terminator.Br(endLabel))
+          incomings.addOne((vCoerced, predLabel))
+        }
+
+        // Exception handler: exit the region and propagate the chosen exception.
+        val handlerBlock = fb.newBlock(handlerLabel)
+        fb.setCurrent(handlerBlock)
+
+        val exnBits = freshTmp(Type.I64)
+        fb.current.emitAssign(exnBits, Op.Load(Type.I64, exnSlotPtr))
+        val exnOutcome = packResultTagged(ResultTagException, exnBits, fb)
+
+        val exitTmp2 = freshTmp(flixResultType)
+        fb.current.emitAssign(exitTmp2, Op.Call(flixResultType, "flix_region_exit", List(ctxPtr, regionPtr, exnOutcome)))
+
+        val payloadBits2 = unwindThunkToValuePayloadOrPropagateExn(exitTmp2, ctxPtr, fb, exnHandlerOpt)
+        if (!fb.current.isTerminated) {
+          val v = unboxFromI64(payloadBits2, tpe, fb)
+          val vCoerced = coerceValue(v, joinTpe, fb)
+          val predLabel = fb.current.label
+          fb.current.setTerminator(Terminator.Br(endLabel))
+          incomings.addOne((vCoerced, predLabel))
+        }
+
+        // Join.
+        val endBlock = fb.newBlock(endLabel)
+        fb.setCurrent(endBlock)
+        if (incomings.isEmpty) {
+          endBlock.setTerminator(Terminator.Unreachable)
+          Value.Undef(joinTpe)
+        } else {
+          val phiDest = freshTmp(joinTpe)
+          endBlock.emitPhi(phiDest, incomings.toList)
+          phiDest
+        }
 
       case Expr.IfThenElse(exp1, exp2, exp3, tpe, _, _) =>
-        val c0 = emitExpr(exp1, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel)
+        val c0 = emitExpr(exp1, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel, exnHandlerOpt)
         if (fb.current.isTerminated) {
           return Value.Undef(llvmTypeOf(exp0.tpe))
         }
@@ -1139,7 +2643,7 @@ object LlvmBackend {
         // Then.
         val thenBlock = fb.newBlock(thenLabel)
         fb.setCurrent(thenBlock)
-        val vThen = emitExpr(exp2, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel)
+        val vThen = emitExpr(exp2, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel, exnHandlerOpt)
         if (!fb.current.isTerminated) {
           val vThenCoerced = coerceValue(vThen, joinTpe, fb)
           val predLabel = fb.current.label
@@ -1150,7 +2654,7 @@ object LlvmBackend {
         // Else.
         val elseBlock = fb.newBlock(elseLabel)
         fb.setCurrent(elseBlock)
-        val vElse = emitExpr(exp3, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel)
+        val vElse = emitExpr(exp3, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel, exnHandlerOpt)
         if (!fb.current.isTerminated) {
           val vElseCoerced = coerceValue(vElse, joinTpe, fb)
           val predLabel = fb.current.label
@@ -1174,14 +2678,14 @@ object LlvmBackend {
 
       case Expr.ApplyAtomic(op, exps, tpe, _, _) =>
         val argTpes = exps.map(_.tpe)
-        emitExprs(exps, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel) match {
+        emitExprs(exps, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel, exnHandlerOpt) match {
           case None => Value.Undef(llvmTypeOf(tpe))
-          case Some(args) => emitApplyAtomic(op, argTpes, args, tpe, ctxPtr, fb)
+          case Some(args) => emitApplyAtomic(op, argTpes, args, tpe, ctxPtr, fb, exnHandlerOpt)
         }
 
       case Expr.ApplyDef(sym, exps, ct, _, tpe, _, _) =>
         val fnName = LlvmNames.defName(sym)
-        emitExprs(exps, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel) match {
+        emitExprs(exps, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel, exnHandlerOpt) match {
           case None => Value.Undef(llvmTypeOf(tpe))
           case Some(args) =>
             ct match {
@@ -1190,25 +2694,13 @@ object LlvmBackend {
                   case (v, e) => boxToI64(v, e.tpe, fb)
                 }
 
-                val slots = 1L + thunkArgs.length.toLong
-                val sizeBytes = Value.IntConst(slots * 8L, Type.I64)
-
                 val thunkPtr = freshTmp(Type.Ptr)
-                fb.current.emitAssign(thunkPtr, Op.Call(Type.Ptr, "malloc", List(sizeBytes)))
-
-                val codePtr = Value.Global(LlvmNames.thunkInvokeName(sym), Type.Ptr)
-                val codeI64 = freshTmp(Type.I64)
-                fb.current.emitAssign(codeI64, Op.Cast("ptrtoint", Type.I64, codePtr))
-
-                val slot0Ptr = freshTmp(Type.Ptr)
-                fb.current.emitAssign(slot0Ptr, Op.Gep(Type.I64, thunkPtr, Value.IntConst(0L, Type.I64)))
-                fb.current.emitStore(codeI64, slot0Ptr)
+                val thunkTi = Value.Global(LlvmNames.thunkTypeInfoName(sym), Type.Ptr)
+                fb.current.emitAssign(thunkPtr, Op.Call(Type.Ptr, "flix_alloc", List(ctxPtr, thunkTi)))
 
                 thunkArgs.zipWithIndex.foreach {
                   case (payload, i) =>
-                    val slotPtr = freshTmp(Type.Ptr)
-                    fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, thunkPtr, Value.IntConst((i + 1).toLong, Type.I64)))
-                    fb.current.emitStore(payload, slotPtr)
+                    storeObjI64Slot(thunkPtr, Value.IntConst(i.toLong, Type.I64), payload, fb)
                 }
 
                 val result = packThunkResult(thunkPtr, fb)
@@ -1219,17 +2711,17 @@ object LlvmBackend {
                 val callTmp = freshTmp(flixResultType)
                 fb.current.emitAssign(callTmp, Op.Call(flixResultType, fnName, ctxPtr :: args))
 
-                val payload = unwindThunkToValuePayload(callTmp, ctxPtr, fb)
+                val payload = unwindThunkToValuePayloadOrPropagateExn(callTmp, ctxPtr, fb, exnHandlerOpt)
                 unboxFromI64(payload, tpe, fb)
             }
         }
 
       case Expr.ApplyClo(exp1, exp2, ct, _, tpe, _, _) =>
-        val clo = emitExpr(exp1, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel)
+        val clo = emitExpr(exp1, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel, exnHandlerOpt)
         if (fb.current.isTerminated) {
           Value.Undef(llvmTypeOf(tpe))
         } else {
-          val arg = emitExpr(exp2, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel)
+          val arg = emitExpr(exp2, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel, exnHandlerOpt)
           if (fb.current.isTerminated) {
             Value.Undef(llvmTypeOf(tpe))
           } else {
@@ -1240,25 +2732,13 @@ object LlvmBackend {
                   boxToI64(arg, exp2.tpe, fb)
                 )
 
-                val slots = 1L + thunkArgs.length.toLong
-                val sizeBytes = Value.IntConst(slots * 8L, Type.I64)
-
                 val thunkPtr = freshTmp(Type.Ptr)
-                fb.current.emitAssign(thunkPtr, Op.Call(Type.Ptr, "malloc", List(sizeBytes)))
-
-                val codePtr = Value.Global(LlvmNames.thunkApplyClosureName(llvmTypeOf(exp2.tpe)), Type.Ptr)
-                val codeI64 = freshTmp(Type.I64)
-                fb.current.emitAssign(codeI64, Op.Cast("ptrtoint", Type.I64, codePtr))
-
-                val slot0Ptr = freshTmp(Type.Ptr)
-                fb.current.emitAssign(slot0Ptr, Op.Gep(Type.I64, thunkPtr, Value.IntConst(0L, Type.I64)))
-                fb.current.emitStore(codeI64, slot0Ptr)
+                val thunkTi = Value.Global(LlvmNames.thunkApplyClosureTypeInfoName(exp2.tpe), Type.Ptr)
+                fb.current.emitAssign(thunkPtr, Op.Call(Type.Ptr, "flix_alloc", List(ctxPtr, thunkTi)))
 
                 thunkArgs.zipWithIndex.foreach {
                   case (payload, i) =>
-                    val slotPtr = freshTmp(Type.Ptr)
-                    fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, thunkPtr, Value.IntConst((i + 1).toLong, Type.I64)))
-                    fb.current.emitStore(payload, slotPtr)
+                    storeObjI64Slot(thunkPtr, Value.IntConst(i.toLong, Type.I64), payload, fb)
                 }
 
                 val result = packThunkResult(thunkPtr, fb)
@@ -1266,27 +2746,18 @@ object LlvmBackend {
                 Value.Undef(llvmTypeOf(tpe))
 
               case ExpPosition.NonTail =>
-                // Load the invoke function pointer from slot 0.
-                val slot0Ptr = freshTmp(Type.Ptr)
-                fb.current.emitAssign(slot0Ptr, Op.Gep(Type.I64, clo, Value.IntConst(0L, Type.I64)))
-
-                val codeI64 = freshTmp(Type.I64)
-                fb.current.emitAssign(codeI64, Op.Load(Type.I64, slot0Ptr))
-
-                val codePtr = freshTmp(Type.Ptr)
-                fb.current.emitAssign(codePtr, Op.Cast("inttoptr", Type.Ptr, codeI64))
-
+                val argBits = boxToI64(arg, exp2.tpe, fb)
                 val callTmp = freshTmp(flixResultType)
-                fb.current.emitAssign(callTmp, Op.CallIndirect(flixResultType, codePtr, List(ctxPtr, clo, arg)))
+                fb.current.emitAssign(callTmp, Op.Call(flixResultType, "flix_invoke_thunk", List(ctxPtr, castValue(clo, Type.Ptr, fb), argBits)))
 
-                val payload = unwindThunkToValuePayload(callTmp, ctxPtr, fb)
+                val payload = unwindThunkToValuePayloadOrPropagateExn(callTmp, ctxPtr, fb, exnHandlerOpt)
                 unboxFromI64(payload, tpe, fb)
             }
           }
         }
 
       case Expr.ApplySelfTail(sym, actuals, _, _, _) =>
-        emitExprs(actuals, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel) match {
+        emitExprs(actuals, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel, exnHandlerOpt) match {
           case None =>
             Value.Undef(llvmTypeOf(exp0.tpe))
           case Some(args) =>
@@ -1318,7 +2789,7 @@ object LlvmBackend {
         }.toMap
         val lenv1 = lenv ++ branchLabels
 
-        val entryValue = emitExpr(exp, env, ctxPtr, fb, lenv1, slotTypes, selfTailLabel)
+        val entryValue = emitExpr(exp, env, ctxPtr, fb, lenv1, slotTypes, selfTailLabel, exnHandlerOpt)
 
         val incomings = mutable.ArrayBuffer.empty[(Value, String)]
         if (!fb.current.isTerminated) {
@@ -1335,7 +2806,7 @@ object LlvmBackend {
             val label = branchLabels(sym)
             val b = fb.newBlock(label)
             fb.setCurrent(b)
-            val v = emitExpr(brExp, env, ctxPtr, fb, lenv1, slotTypes, selfTailLabel)
+            val v = emitExpr(brExp, env, ctxPtr, fb, lenv1, slotTypes, selfTailLabel, exnHandlerOpt)
             if (!fb.current.isTerminated) {
               val vCoerced = coerceValue(v, joinTpe, fb)
               val predLabel = fb.current.label
@@ -1359,15 +2830,147 @@ object LlvmBackend {
 
       case Expr.JumpTo(sym, _, _, _) =>
         lenv.get(sym) match {
-          case Some(lbl) => fb.current.setTerminator(Terminator.Br(lbl))
+          case Some(lbl) =>
+            // Pollcheck on (potential) loop backedges.
+            fb.current.emitCallVoid("flix_gc_pollcheck", List(ctxPtr))
+            val isCancelled = freshTmp(Type.I1)
+            fb.current.emitAssign(isCancelled, Op.Call(Type.I1, "flix_cancel_requested", List(ctxPtr)))
+
+            val okLabel = freshLabel("jump_ok")
+            val cancelLabel = freshLabel("jump_cancel")
+            fb.current.setTerminator(Terminator.CondBr(isCancelled, cancelLabel, okLabel))
+
+            val cancelBlock = fb.newBlock(cancelLabel)
+            fb.setCurrent(cancelBlock)
+
+            val cancelExnPtr = freshTmp(Type.Ptr)
+            fb.current.emitAssign(cancelExnPtr, Op.Call(Type.Ptr, "flix_cancel_exn", List(ctxPtr, Value.IntConst(cancelledKindId, Type.I64), exnExnTypeInfo, Value.IntConst(exnExnTagId, Type.I64))))
+            val tracedCancelExnPtr = freshTmp(Type.Ptr)
+            fb.current.emitAssign(tracedCancelExnPtr, Op.Call(Type.Ptr, "flix_exn_with_trace", List(cancelExnPtr)))
+            val cancelBits = freshTmp(Type.I64)
+            fb.current.emitAssign(cancelBits, Op.Cast("ptrtoint", Type.I64, tracedCancelExnPtr))
+
+            exnHandlerOpt match {
+              case Some(ExnHandler(handlerLabel, slotPtr)) =>
+                fb.current.emitStore(cancelBits, slotPtr)
+                fb.current.setTerminator(Terminator.Br(handlerLabel))
+              case None =>
+                val r = packResultTagged(ResultTagException, cancelBits, fb)
+                fb.current.setTerminator(Terminator.Ret(flixResultType, r))
+            }
+
+            val okBlock = fb.newBlock(okLabel)
+            fb.setCurrent(okBlock)
+            fb.current.setTerminator(Terminator.Br(lbl))
           case None =>
             fb.current.emitTrap()
             fb.current.setTerminator(Terminator.Unreachable)
         }
         Value.Undef(llvmTypeOf(exp0.tpe))
 
+      case Expr.TryCatch(exp, rules, tpe, _, _) =>
+        val joinTpe = llvmTypeOf(tpe)
+        val endLabel = freshLabel("try_end")
+        val handlerLabel = freshLabel("try_exn")
+
+        val exnSlotPtr = hoistAllocaI64(fb)
+        val innerHandler = ExnHandler(handlerLabel, exnSlotPtr)
+
+        val incomings = mutable.ArrayBuffer.empty[(Value, String)]
+
+        // Try block (may branch to handlerLabel via innerHandler).
+        val tryValue = emitExpr(exp, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel, Some(innerHandler))
+        if (!fb.current.isTerminated) {
+          val vTry = coerceValue(tryValue, joinTpe, fb)
+          val predLabel = fb.current.label
+          fb.current.setTerminator(Terminator.Br(endLabel))
+          incomings.addOne((vTry, predLabel))
+        }
+
+        // Handler entry: load exception payload bits and compute kind id.
+        val handlerBlock = fb.newBlock(handlerLabel)
+        fb.setCurrent(handlerBlock)
+
+        val exnBits = freshTmp(Type.I64)
+        fb.current.emitAssign(exnBits, Op.Load(Type.I64, exnSlotPtr))
+
+        val exnPtr = castValue(exnBits, Type.Ptr, fb)
+        val kindBits = loadObjI64Slot(exnPtr, Value.IntConst(1L, Type.I64), fb)
+
+        def isCatchAll(catchTpe: SimpleType): Boolean = catchTpe match {
+          case SimpleType.Enum(sym, Nil) => sym.text == "Exn" && sym.namespace.isEmpty
+          case _ => false
+        }
+
+        // Ordered dispatch chain.
+        val it = rules.iterator
+        var done = false
+        while (it.hasNext && !done) {
+          val rule = it.next()
+          val bodyLabel = freshLabel("catch_body")
+          val nextLabel = freshLabel("catch_next")
+
+          rule.catchTpe match {
+            case catchTpe if isCatchAll(catchTpe) =>
+              fb.current.setTerminator(Terminator.Br(bodyLabel))
+              done = true
+            case catchTpe =>
+              val cmp = freshTmp(Type.I1)
+              fb.current.emitAssign(cmp, Op.ICmp("eq", kindBits, Value.IntConst(ExnKindId.of(catchTpe).toLong, Type.I64)))
+              fb.current.setTerminator(Terminator.CondBr(cmp, bodyLabel, nextLabel))
+          }
+
+          // Body block.
+          val bodyBlock = fb.newBlock(bodyLabel)
+          fb.setCurrent(bodyBlock)
+
+          slotTypes.get(rule.sym) match {
+            case Some(_) =>
+              val slotPtr = env.getOrElse(rule.sym, Value.Undef(Type.Ptr))
+              fb.current.emitStore(exnBits, slotPtr)
+            case None => ()
+          }
+          val vBody = emitExpr(rule.exp, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel, exnHandlerOpt)
+          if (!fb.current.isTerminated) {
+            val vCoerced = coerceValue(vBody, joinTpe, fb)
+            val predLabel = fb.current.label
+            fb.current.setTerminator(Terminator.Br(endLabel))
+            incomings.addOne((vCoerced, predLabel))
+          }
+
+          // Next test block (if any).
+          if (!done) {
+            val nextBlock = fb.newBlock(nextLabel)
+            fb.setCurrent(nextBlock)
+          }
+        }
+
+        if (!done) {
+          // No rule matched: propagate exception to the outer handler (if present) or return it.
+          exnHandlerOpt match {
+            case Some(ExnHandler(label, slotPtr)) =>
+              fb.current.emitStore(exnBits, slotPtr)
+              fb.current.setTerminator(Terminator.Br(label))
+            case None =>
+              val r = packResultTagged(ResultTagException, exnBits, fb)
+              fb.current.setTerminator(Terminator.Ret(flixResultType, r))
+          }
+        }
+
+        // Join.
+        val endBlock = fb.newBlock(endLabel)
+        fb.setCurrent(endBlock)
+        if (incomings.isEmpty) {
+          endBlock.setTerminator(Terminator.Unreachable)
+          Value.Undef(joinTpe)
+        } else {
+          val phiDest = freshTmp(joinTpe)
+          endBlock.emitPhi(phiDest, incomings.toList)
+          phiDest
+        }
+
       case Expr.RunWith(exp, effUse, rules, ct, pcPointId, tpe, _, _) =>
-        emitRunWithExpression(exp, effUse.sym, rules, ct, pcPointId, tpe, env, slotTypes, selfTailLabel, ctxPtr, fb, None, Map.empty, lenv, Value.Undef(Type.I64), Map.empty)
+        emitRunWithExpression(exp, effUse.sym, rules, ct, pcPointId, tpe, env, slotTypes, selfTailLabel, ctxPtr, fb, None, Map.empty, lenv, Value.Undef(Type.I64), Map.empty, exnHandlerOpt)
 
       case _ =>
         // Unsupported for bring-up: emit a fail-fast trap.
@@ -1382,9 +2985,10 @@ object LlvmBackend {
                                      slotIndexOf: Map[Symbol.VarSym, Long],
                                      lenv: Map[Symbol.LabelSym, String],
                                      resumePayload: Value,
-                                     pcBlocks: Map[Int, BlockBuilder]): Value = exp0 match {
+                                     pcBlocks: Map[Int, BlockBuilder],
+                                     exnHandlerOpt: Option[ExnHandler] = None): Value = exp0 match {
       case Expr.Cst(cst, _) =>
-        emitConstant(cst, fb)
+        emitConstant(cst, ctxPtr, fb)
 
       case Expr.Var(sym, tpe, _) =>
         val idx = slotIndexOf.getOrElse(sym, -1L)
@@ -1392,12 +2996,12 @@ object LlvmBackend {
           fb.current.emitTrap()
           Value.Undef(llvmTypeOf(tpe))
         } else {
-          val payload = loadI64Slot(framePtr, Value.IntConst(idx, Type.I64), fb)
+          val payload = loadObjI64Slot(framePtr, Value.IntConst(idx, Type.I64), fb)
           unboxFromI64(payload, tpe, fb)
         }
 
       case Expr.Let(sym, exp1, exp2, _) =>
-        val v1 = emitExprControlImpure(exp1, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks)
+        val v1 = emitExprControlImpure(exp1, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt)
         if (fb.current.isTerminated) {
           Value.Undef(llvmTypeOf(exp0.tpe))
         } else {
@@ -1407,25 +3011,87 @@ object LlvmBackend {
             Value.Undef(llvmTypeOf(exp0.tpe))
           } else {
             val payload = boxToI64(v1, exp1.tpe, fb)
-            storeI64Slot(framePtr, Value.IntConst(idx, Type.I64), payload, fb)
-            emitExprControlImpure(exp2, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks)
+            storeObjI64Slot(framePtr, Value.IntConst(idx, Type.I64), payload, fb)
+            emitExprControlImpure(exp2, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt)
           }
         }
 
       case Expr.Stmt(exp1, exp2, _) =>
-        emitExprControlImpure(exp1, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks)
+        emitExprControlImpure(exp1, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt)
         if (fb.current.isTerminated) Value.Undef(llvmTypeOf(exp0.tpe))
-        else emitExprControlImpure(exp2, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks)
+        else emitExprControlImpure(exp2, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt)
 
-      case Expr.Region(sym, exp, _, _, _) =>
+      case Expr.Region(sym, exp, tpe, _, _) =>
+        val joinTpe = llvmTypeOf(tpe)
+        val endLabel = freshLabel("region_end")
+        val handlerLabel = freshLabel("region_exn")
+
         val idx = slotIndexOf.getOrElse(sym, -1L)
-        if (idx >= 0) {
-          storeI64Slot(framePtr, Value.IntConst(idx, Type.I64), Value.IntConst(0L, Type.I64), fb)
+        if (idx < 0) {
+          fb.current.emitTrap()
+          return Value.Undef(joinTpe)
         }
-        emitExprControlImpure(exp, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks)
+
+        // Enter region and bind it in the frame slot for the body.
+        val regionPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(regionPtr, Op.Call(Type.Ptr, "flix_region_enter", List(ctxPtr)))
+        val regionBits = boxToI64(regionPtr, SimpleType.Region, fb)
+        storeObjI64Slot(framePtr, Value.IntConst(idx, Type.I64), regionBits, fb)
+
+        val exnSlotPtr = hoistAllocaI64(fb)
+        val innerHandler = ExnHandler(handlerLabel, exnSlotPtr)
+
+        val incomings = mutable.ArrayBuffer.empty[(Value, String)]
+
+        // Region body (may branch to handlerLabel via innerHandler).
+        val bodyValue = emitExprControlImpure(exp, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, Some(innerHandler))
+        if (!fb.current.isTerminated) {
+          val bodyOutcome = packResult(bodyValue, tpe, fb)
+          val exitTmp = freshTmp(flixResultType)
+          fb.current.emitAssign(exitTmp, Op.Call(flixResultType, "flix_region_exit", List(ctxPtr, regionPtr, bodyOutcome)))
+
+          val payloadBits = unwindThunkToValuePayloadOrPropagateExn(exitTmp, ctxPtr, fb, exnHandlerOpt)
+          val v = unboxFromI64(payloadBits, tpe, fb)
+          val vCoerced = coerceValue(v, joinTpe, fb)
+          val predLabel = fb.current.label
+          fb.current.setTerminator(Terminator.Br(endLabel))
+          incomings.addOne((vCoerced, predLabel))
+        }
+
+        // Exception handler: exit the region and propagate the chosen exception.
+        val handlerBlock = fb.newBlock(handlerLabel)
+        fb.setCurrent(handlerBlock)
+
+        val exnBits = freshTmp(Type.I64)
+        fb.current.emitAssign(exnBits, Op.Load(Type.I64, exnSlotPtr))
+        val exnOutcome = packResultTagged(ResultTagException, exnBits, fb)
+
+        val exitTmp2 = freshTmp(flixResultType)
+        fb.current.emitAssign(exitTmp2, Op.Call(flixResultType, "flix_region_exit", List(ctxPtr, regionPtr, exnOutcome)))
+
+        val payloadBits2 = unwindThunkToValuePayloadOrPropagateExn(exitTmp2, ctxPtr, fb, exnHandlerOpt)
+        if (!fb.current.isTerminated) {
+          val v = unboxFromI64(payloadBits2, tpe, fb)
+          val vCoerced = coerceValue(v, joinTpe, fb)
+          val predLabel = fb.current.label
+          fb.current.setTerminator(Terminator.Br(endLabel))
+          incomings.addOne((vCoerced, predLabel))
+        }
+
+        // Join.
+        val endBlock = fb.newBlock(endLabel)
+        fb.setCurrent(endBlock)
+        if (incomings.isEmpty) {
+          endBlock.setTerminator(Terminator.Unreachable)
+          Value.Undef(joinTpe)
+        } else {
+          val phiDest = freshTmp(joinTpe)
+          endBlock.emitPhi(phiDest, incomings.toList)
+          phiDest
+        }
 
       case Expr.IfThenElse(exp1, exp2, exp3, tpe, _, _) =>
-        val c0 = emitExprControlImpure(exp1, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks)
+        val c0 = emitExprControlImpure(exp1, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt)
         if (fb.current.isTerminated) return Value.Undef(llvmTypeOf(exp0.tpe))
         val cond = coerceToI1(c0, fb)
 
@@ -1440,7 +3106,7 @@ object LlvmBackend {
 
         val thenBlock = fb.newBlock(thenLabel)
         fb.setCurrent(thenBlock)
-        val vThen = emitExprControlImpure(exp2, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks)
+        val vThen = emitExprControlImpure(exp2, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt)
         if (!fb.current.isTerminated) {
           val vThenCoerced = coerceValue(vThen, joinTpe, fb)
           val predLabel = fb.current.label
@@ -1450,7 +3116,7 @@ object LlvmBackend {
 
         val elseBlock = fb.newBlock(elseLabel)
         fb.setCurrent(elseBlock)
-        val vElse = emitExprControlImpure(exp3, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks)
+        val vElse = emitExprControlImpure(exp3, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt)
         if (!fb.current.isTerminated) {
           val vElseCoerced = coerceValue(vElse, joinTpe, fb)
           val predLabel = fb.current.label
@@ -1471,14 +3137,14 @@ object LlvmBackend {
 
       case Expr.ApplyAtomic(op, exps, tpe, _, _) =>
         val argTpes = exps.map(_.tpe)
-        emitExprsControlImpure(exps, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks) match {
+        emitExprsControlImpure(exps, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt) match {
           case None => Value.Undef(llvmTypeOf(tpe))
-          case Some(args) => emitApplyAtomic(op, argTpes, args, tpe, ctxPtr, fb)
+          case Some(args) => emitApplyAtomic(op, argTpes, args, tpe, ctxPtr, fb, exnHandlerOpt)
         }
 
       case Expr.ApplyDef(sym, exps, ct, pcPointId, tpe, _, _) =>
         val fnName = LlvmNames.defName(sym)
-        emitExprsControlImpure(exps, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks) match {
+        emitExprsControlImpure(exps, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt) match {
           case None => Value.Undef(llvmTypeOf(tpe))
           case Some(args) =>
             ct match {
@@ -1487,25 +3153,13 @@ object LlvmBackend {
                   case (v, e) => boxToI64(v, e.tpe, fb)
                 }
 
-                val slots = 1L + thunkArgs.length.toLong
-                val sizeBytes = Value.IntConst(slots * 8L, Type.I64)
-
                 val thunkPtr = freshTmp(Type.Ptr)
-                fb.current.emitAssign(thunkPtr, Op.Call(Type.Ptr, "malloc", List(sizeBytes)))
-
-                val codePtr = Value.Global(LlvmNames.thunkInvokeName(sym), Type.Ptr)
-                val codeI64 = freshTmp(Type.I64)
-                fb.current.emitAssign(codeI64, Op.Cast("ptrtoint", Type.I64, codePtr))
-
-                val slot0Ptr = freshTmp(Type.Ptr)
-                fb.current.emitAssign(slot0Ptr, Op.Gep(Type.I64, thunkPtr, Value.IntConst(0L, Type.I64)))
-                fb.current.emitStore(codeI64, slot0Ptr)
+                val thunkTi = Value.Global(LlvmNames.thunkTypeInfoName(sym), Type.Ptr)
+                fb.current.emitAssign(thunkPtr, Op.Call(Type.Ptr, "flix_alloc", List(ctxPtr, thunkTi)))
 
                 thunkArgs.zipWithIndex.foreach {
                   case (payload, i) =>
-                    val slotPtr = freshTmp(Type.Ptr)
-                    fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, thunkPtr, Value.IntConst((i + 1).toLong, Type.I64)))
-                    fb.current.emitStore(payload, slotPtr)
+                    storeObjI64Slot(thunkPtr, Value.IntConst(i.toLong, Type.I64), payload, fb)
                 }
 
                 val result = packThunkResult(thunkPtr, fb)
@@ -1517,20 +3171,20 @@ object LlvmBackend {
                 fb.current.emitAssign(callTmp, Op.Call(flixResultType, fnName, ctxPtr :: args))
 
                 if (pcPointId > 0) {
-                  emitCallAndHandleSuspension(callTmp, pcPointId, tpe, ctxPtr, fb, framePtr, resumePayload, pcBlocks)
+                  emitCallAndHandleSuspension(callTmp, pcPointId, tpe, ctxPtr, fb, framePtr, resumePayload, pcBlocks, exnHandlerOpt)
                 } else {
-                  val payload = unwindThunkToValuePayload(callTmp, ctxPtr, fb)
+                  val payload = unwindThunkToValuePayloadOrPropagateExn(callTmp, ctxPtr, fb, exnHandlerOpt)
                   unboxFromI64(payload, tpe, fb)
                 }
             }
         }
 
       case Expr.ApplyClo(exp1, exp2, ct, pcPointId, tpe, purity, _) =>
-        val clo = emitExprControlImpure(exp1, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks)
+        val clo = emitExprControlImpure(exp1, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt)
         if (fb.current.isTerminated) {
           Value.Undef(llvmTypeOf(tpe))
         } else {
-          val arg = emitExprControlImpure(exp2, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks)
+          val arg = emitExprControlImpure(exp2, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt)
           if (fb.current.isTerminated) {
             Value.Undef(llvmTypeOf(tpe))
           } else {
@@ -1541,25 +3195,13 @@ object LlvmBackend {
                   boxToI64(arg, exp2.tpe, fb)
                 )
 
-                val slots = 1L + thunkArgs.length.toLong
-                val sizeBytes = Value.IntConst(slots * 8L, Type.I64)
-
                 val thunkPtr = freshTmp(Type.Ptr)
-                fb.current.emitAssign(thunkPtr, Op.Call(Type.Ptr, "malloc", List(sizeBytes)))
-
-                val codePtr = Value.Global(LlvmNames.thunkApplyClosureName(llvmTypeOf(exp2.tpe)), Type.Ptr)
-                val codeI64 = freshTmp(Type.I64)
-                fb.current.emitAssign(codeI64, Op.Cast("ptrtoint", Type.I64, codePtr))
-
-                val slot0Ptr = freshTmp(Type.Ptr)
-                fb.current.emitAssign(slot0Ptr, Op.Gep(Type.I64, thunkPtr, Value.IntConst(0L, Type.I64)))
-                fb.current.emitStore(codeI64, slot0Ptr)
+                val thunkTi = Value.Global(LlvmNames.thunkApplyClosureTypeInfoName(exp2.tpe), Type.Ptr)
+                fb.current.emitAssign(thunkPtr, Op.Call(Type.Ptr, "flix_alloc", List(ctxPtr, thunkTi)))
 
                 thunkArgs.zipWithIndex.foreach {
                   case (payload, i) =>
-                    val slotPtr = freshTmp(Type.Ptr)
-                    fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, thunkPtr, Value.IntConst((i + 1).toLong, Type.I64)))
-                    fb.current.emitStore(payload, slotPtr)
+                    storeObjI64Slot(thunkPtr, Value.IntConst(i.toLong, Type.I64), payload, fb)
                 }
 
                 val result = packThunkResult(thunkPtr, fb)
@@ -1567,22 +3209,14 @@ object LlvmBackend {
                 Value.Undef(llvmTypeOf(tpe))
 
               case ExpPosition.NonTail =>
-                val slot0Ptr = freshTmp(Type.Ptr)
-                fb.current.emitAssign(slot0Ptr, Op.Gep(Type.I64, clo, Value.IntConst(0L, Type.I64)))
-
-                val codeI64 = freshTmp(Type.I64)
-                fb.current.emitAssign(codeI64, Op.Load(Type.I64, slot0Ptr))
-
-                val codePtr = freshTmp(Type.Ptr)
-                fb.current.emitAssign(codePtr, Op.Cast("inttoptr", Type.Ptr, codeI64))
-
+                val argBits = boxToI64(arg, exp2.tpe, fb)
                 val callTmp = freshTmp(flixResultType)
-                fb.current.emitAssign(callTmp, Op.CallIndirect(flixResultType, codePtr, List(ctxPtr, clo, arg)))
+                fb.current.emitAssign(callTmp, Op.Call(flixResultType, "flix_invoke_thunk", List(ctxPtr, castValue(clo, Type.Ptr, fb), argBits)))
 
                 if (pcPointId > 0 && ca.uwaterloo.flix.language.ast.Purity.isControlImpure(purity)) {
-                  emitCallAndHandleSuspension(callTmp, pcPointId, tpe, ctxPtr, fb, framePtr, resumePayload, pcBlocks)
+                  emitCallAndHandleSuspension(callTmp, pcPointId, tpe, ctxPtr, fb, framePtr, resumePayload, pcBlocks, exnHandlerOpt)
                 } else {
-                  val payload = unwindThunkToValuePayload(callTmp, ctxPtr, fb)
+                  val payload = unwindThunkToValuePayloadOrPropagateExn(callTmp, ctxPtr, fb, exnHandlerOpt)
                   unboxFromI64(payload, tpe, fb)
                 }
             }
@@ -1590,10 +3224,10 @@ object LlvmBackend {
         }
 
       case Expr.ApplyOp(sym, exps, pcPointId, tpe, _, _) =>
-        emitApplyOpSuspension(sym, exps, pcPointId, tpe, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks)
+        emitApplyOpSuspension(sym, exps, pcPointId, tpe, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt)
 
       case Expr.ApplySelfTail(sym, actuals, _, _, _) =>
-        emitExprsControlImpure(actuals, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks) match {
+        emitExprsControlImpure(actuals, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt) match {
           case None => Value.Undef(llvmTypeOf(exp0.tpe))
           case Some(args) =>
             val defn = root.defs(sym)
@@ -1602,10 +3236,10 @@ object LlvmBackend {
                 val idx = slotIndexOf.getOrElse(fp.sym, -1L)
                 if (idx >= 0) {
                   val payload = boxToI64(arg0, fp.tpe, fb)
-                  storeI64Slot(framePtr, Value.IntConst(idx, Type.I64), payload, fb)
+                  storeObjI64Slot(framePtr, Value.IntConst(idx, Type.I64), payload, fb)
                 }
             }
-            storeI64Slot(framePtr, Value.IntConst(2L, Type.I64), Value.IntConst(0L, Type.I64), fb)
+            storeObjI64Slot(framePtr, Value.IntConst(0L, Type.I64), Value.IntConst(0L, Type.I64), fb)
             fb.current.setTerminator(Terminator.Br("pc_0"))
             Value.Undef(llvmTypeOf(exp0.tpe))
         }
@@ -1619,7 +3253,7 @@ object LlvmBackend {
         }.toMap
         val lenv1 = lenv ++ branchLabels
 
-        val entryValue = emitExprControlImpure(exp, ctxPtr, fb, framePtr, slotIndexOf, lenv1, resumePayload, pcBlocks)
+        val entryValue = emitExprControlImpure(exp, ctxPtr, fb, framePtr, slotIndexOf, lenv1, resumePayload, pcBlocks, exnHandlerOpt)
 
         val incomings = mutable.ArrayBuffer.empty[(Value, String)]
         if (!fb.current.isTerminated) {
@@ -1635,7 +3269,7 @@ object LlvmBackend {
             val label = branchLabels(sym)
             val b = fb.newBlock(label)
             fb.setCurrent(b)
-            val v = emitExprControlImpure(brExp, ctxPtr, fb, framePtr, slotIndexOf, lenv1, resumePayload, pcBlocks)
+            val v = emitExprControlImpure(brExp, ctxPtr, fb, framePtr, slotIndexOf, lenv1, resumePayload, pcBlocks, exnHandlerOpt)
             if (!fb.current.isTerminated) {
               val vCoerced = coerceValue(v, joinTpe, fb)
               val predLabel = fb.current.label
@@ -1657,15 +3291,149 @@ object LlvmBackend {
 
       case Expr.JumpTo(sym, _, _, _) =>
         lenv.get(sym) match {
-          case Some(lbl) => fb.current.setTerminator(Terminator.Br(lbl))
+          case Some(lbl) =>
+            // Pollcheck on (potential) loop backedges.
+            fb.current.emitCallVoid("flix_gc_pollcheck", List(ctxPtr))
+            val isCancelled = freshTmp(Type.I1)
+            fb.current.emitAssign(isCancelled, Op.Call(Type.I1, "flix_cancel_requested", List(ctxPtr)))
+
+            val okLabel = freshLabel("jump_ok")
+            val cancelLabel = freshLabel("jump_cancel")
+            fb.current.setTerminator(Terminator.CondBr(isCancelled, cancelLabel, okLabel))
+
+            val cancelBlock = fb.newBlock(cancelLabel)
+            fb.setCurrent(cancelBlock)
+
+            val cancelExnPtr = freshTmp(Type.Ptr)
+            fb.current.emitAssign(cancelExnPtr, Op.Call(Type.Ptr, "flix_cancel_exn", List(ctxPtr, Value.IntConst(cancelledKindId, Type.I64), exnExnTypeInfo, Value.IntConst(exnExnTagId, Type.I64))))
+            val tracedCancelExnPtr = freshTmp(Type.Ptr)
+            fb.current.emitAssign(tracedCancelExnPtr, Op.Call(Type.Ptr, "flix_exn_with_trace", List(cancelExnPtr)))
+            val cancelBits = freshTmp(Type.I64)
+            fb.current.emitAssign(cancelBits, Op.Cast("ptrtoint", Type.I64, tracedCancelExnPtr))
+
+            exnHandlerOpt match {
+              case Some(ExnHandler(handlerLabel, slotPtr)) =>
+                fb.current.emitStore(cancelBits, slotPtr)
+                fb.current.setTerminator(Terminator.Br(handlerLabel))
+              case None =>
+                val r = packResultTagged(ResultTagException, cancelBits, fb)
+                fb.current.setTerminator(Terminator.Ret(flixResultType, r))
+            }
+
+            val okBlock = fb.newBlock(okLabel)
+            fb.setCurrent(okBlock)
+            fb.current.setTerminator(Terminator.Br(lbl))
           case None =>
             fb.current.emitTrap()
             fb.current.setTerminator(Terminator.Unreachable)
         }
         Value.Undef(llvmTypeOf(exp0.tpe))
 
+      case Expr.TryCatch(exp, rules, tpe, _, _) =>
+        val joinTpe = llvmTypeOf(tpe)
+        val endLabel = freshLabel("try_end")
+        val handlerLabel = freshLabel("try_exn")
+
+        val exnSlotPtr = hoistAllocaI64(fb)
+        val innerHandler = ExnHandler(handlerLabel, exnSlotPtr)
+
+        val incomings = mutable.ArrayBuffer.empty[(Value, String)]
+
+        // Try block (may branch to handlerLabel via innerHandler).
+        val tryValue = emitExprControlImpure(exp, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, Some(innerHandler))
+        if (!fb.current.isTerminated) {
+          val vTry = coerceValue(tryValue, joinTpe, fb)
+          val predLabel = fb.current.label
+          fb.current.setTerminator(Terminator.Br(endLabel))
+          incomings.addOne((vTry, predLabel))
+        }
+
+        // Handler entry: load exception payload bits and compute kind id.
+        val handlerBlock = fb.newBlock(handlerLabel)
+        fb.setCurrent(handlerBlock)
+
+        val exnBits = freshTmp(Type.I64)
+        fb.current.emitAssign(exnBits, Op.Load(Type.I64, exnSlotPtr))
+
+        val exnPtr = castValue(exnBits, Type.Ptr, fb)
+        val kindBits = loadObjI64Slot(exnPtr, Value.IntConst(1L, Type.I64), fb)
+
+        def isCatchAll(catchTpe: SimpleType): Boolean = catchTpe match {
+          case SimpleType.Enum(sym, Nil) => sym.text == "Exn" && sym.namespace.isEmpty
+          case _ => false
+        }
+
+        // Ordered dispatch chain.
+        val it = rules.iterator
+        var done = false
+        while (it.hasNext && !done) {
+          val rule = it.next()
+          val bodyLabel = freshLabel("catch_body")
+          val nextLabel = freshLabel("catch_next")
+
+          rule.catchTpe match {
+            case catchTpe if isCatchAll(catchTpe) =>
+              fb.current.setTerminator(Terminator.Br(bodyLabel))
+              done = true
+            case catchTpe =>
+              val cmp = freshTmp(Type.I1)
+              fb.current.emitAssign(cmp, Op.ICmp("eq", kindBits, Value.IntConst(ExnKindId.of(catchTpe).toLong, Type.I64)))
+              fb.current.setTerminator(Terminator.CondBr(cmp, bodyLabel, nextLabel))
+          }
+
+          // Body block.
+          val bodyBlock = fb.newBlock(bodyLabel)
+          fb.setCurrent(bodyBlock)
+
+          // Bind the exception value (Exn) to the catch binder.
+          val idx = slotIndexOf.getOrElse(rule.sym, -1L)
+          if (idx < 0) {
+            fb.current.emitTrap()
+            fb.current.setTerminator(Terminator.Unreachable)
+          } else {
+            storeObjI64Slot(framePtr, Value.IntConst(idx, Type.I64), exnBits, fb)
+            val vBody = emitExprControlImpure(rule.exp, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt)
+            if (!fb.current.isTerminated) {
+              val vCoerced = coerceValue(vBody, joinTpe, fb)
+              val predLabel = fb.current.label
+              fb.current.setTerminator(Terminator.Br(endLabel))
+              incomings.addOne((vCoerced, predLabel))
+            }
+          }
+
+          // Next test block (if any).
+          if (!done) {
+            val nextBlock = fb.newBlock(nextLabel)
+            fb.setCurrent(nextBlock)
+          }
+        }
+
+        if (!done) {
+          // No rule matched: propagate exception to the outer handler (if present) or return it.
+          exnHandlerOpt match {
+            case Some(ExnHandler(label, slotPtr)) =>
+              fb.current.emitStore(exnBits, slotPtr)
+              fb.current.setTerminator(Terminator.Br(label))
+            case None =>
+              val r = packResultTagged(ResultTagException, exnBits, fb)
+              fb.current.setTerminator(Terminator.Ret(flixResultType, r))
+          }
+        }
+
+        // Join.
+        val endBlock = fb.newBlock(endLabel)
+        fb.setCurrent(endBlock)
+        if (incomings.isEmpty) {
+          endBlock.setTerminator(Terminator.Unreachable)
+          Value.Undef(joinTpe)
+        } else {
+          val phiDest = freshTmp(joinTpe)
+          endBlock.emitPhi(phiDest, incomings.toList)
+          phiDest
+        }
+
       case Expr.RunWith(exp, effUse, rules, ct, pcPointId, tpe, _, _) =>
-        emitRunWithExpression(exp, effUse.sym, rules, ct, pcPointId, tpe, Map.empty, Map.empty, None, ctxPtr, fb, Some(framePtr), slotIndexOf, lenv, resumePayload, pcBlocks)
+        emitRunWithExpression(exp, effUse.sym, rules, ct, pcPointId, tpe, Map.empty, Map.empty, None, ctxPtr, fb, Some(framePtr), slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt)
 
       case _ =>
         fb.current.emitTrap()
@@ -1679,11 +3447,12 @@ object LlvmBackend {
                                       slotIndexOf: Map[Symbol.VarSym, Long],
                                       lenv: Map[Symbol.LabelSym, String],
                                       resumePayload: Value,
-                                      pcBlocks: Map[Int, BlockBuilder]): Option[List[Value]] = {
+                                      pcBlocks: Map[Int, BlockBuilder],
+                                      exnHandlerOpt: Option[ExnHandler] = None): Option[List[Value]] = {
       val buf = mutable.ListBuffer.empty[Value]
       val it = exps.iterator
       while (it.hasNext && !fb.current.isTerminated) {
-        buf.addOne(emitExprControlImpure(it.next(), ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks))
+        buf.addOne(emitExprControlImpure(it.next(), ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt))
       }
       if (fb.current.isTerminated) None else Some(buf.toList)
     }
@@ -1695,7 +3464,8 @@ object LlvmBackend {
                                            fb: FunBuilder,
                                            framePtr: Value,
                                            resumePayload: Value,
-                                           pcBlocks: Map[Int, BlockBuilder]): Value = {
+                                           pcBlocks: Map[Int, BlockBuilder],
+                                           exnHandlerOpt: Option[ExnHandler] = None): Value = {
       val r = unwindThunkToResult(result0, ctxPtr, fb)
 
       val tag = freshTmp(Type.I64)
@@ -1718,8 +3488,38 @@ object LlvmBackend {
       val resumeValue = {
         val saved = fb.current
         fb.setCurrent(resumeBlock)
+        // Pollcheck and cancellation at resume entry.
+        // If the resumption payload is a GC heap value, root it across the pollcheck.
+        if (isGcRootType(expectedTpe)) {
+          val resumeSlotPtr = freshTmp(Type.Ptr)
+          fb.current.emitAssign(resumeSlotPtr, Op.Alloca(Type.I64))
+          fb.current.emitStore(resumePayload, resumeSlotPtr)
+          fb.current.emitCallVoid(rootPushNameOf(Type.I64), List(ctxPtr, resumeSlotPtr))
+        }
+
+        fb.current.emitCallVoid("flix_gc_pollcheck", List(ctxPtr))
+        if (isGcRootType(expectedTpe)) {
+          fb.current.emitCallVoid("flix_gc_pop_roots", List(ctxPtr, Value.IntConst(1L, Type.I64)))
+        }
+
         val v = unboxFromI64(resumePayload, expectedTpe, fb)
-        fb.current.setTerminator(Terminator.Br(afterLabel))
+
+        val isCancelled = freshTmp(Type.I1)
+        fb.current.emitAssign(isCancelled, Op.Call(Type.I1, "flix_cancel_requested", List(ctxPtr)))
+        val cancelLabel = freshLabel("resume_cancel")
+        fb.current.setTerminator(Terminator.CondBr(isCancelled, cancelLabel, afterLabel))
+
+        val cancelBlock = fb.newBlock(cancelLabel)
+        fb.setCurrent(cancelBlock)
+        val cancelExnPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(cancelExnPtr, Op.Call(Type.Ptr, "flix_cancel_exn", List(ctxPtr, Value.IntConst(cancelledKindId, Type.I64), exnExnTypeInfo, Value.IntConst(exnExnTagId, Type.I64))))
+        val tracedCancelExnPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tracedCancelExnPtr, Op.Call(Type.Ptr, "flix_exn_with_trace", List(cancelExnPtr)))
+        val cancelBits = freshTmp(Type.I64)
+        fb.current.emitAssign(cancelBits, Op.Cast("ptrtoint", Type.I64, tracedCancelExnPtr))
+        val cancelResult = packResultTagged(ResultTagException, cancelBits, fb)
+        fb.current.setTerminator(Terminator.Ret(flixResultType, cancelResult))
+
         fb.setCurrent(saved)
         v
       }
@@ -1749,16 +3549,16 @@ object LlvmBackend {
       val suspPtr = freshTmp(Type.Ptr)
       fb.current.emitAssign(suspPtr, Op.Cast("inttoptr", Type.Ptr, suspPayload))
 
-      val oldPrefixBits = loadI64Slot(suspPtr, Value.IntConst(2L, Type.I64), fb)
+      val oldPrefixBits = loadObjI64Slot(suspPtr, Value.IntConst(2L, Type.I64), fb)
       val oldPrefixPtr = castValue(oldPrefixBits, Type.Ptr, fb)
 
-      storeI64Slot(framePtr, Value.IntConst(2L, Type.I64), Value.IntConst(pcPointId.toLong, Type.I64), fb)
+      storeObjI64Slot(framePtr, Value.IntConst(0L, Type.I64), Value.IntConst(pcPointId.toLong, Type.I64), fb)
 
       val newPrefixPtr = freshTmp(Type.Ptr)
       fb.current.emitAssign(newPrefixPtr, Op.Call(Type.Ptr, "flix_frames_push", List(framePtr, oldPrefixPtr)))
       val newPrefixBits = freshTmp(Type.I64)
       fb.current.emitAssign(newPrefixBits, Op.Cast("ptrtoint", Type.I64, newPrefixPtr))
-      storeI64Slot(suspPtr, Value.IntConst(2L, Type.I64), newPrefixBits, fb)
+      storeObjI64Slot(suspPtr, Value.IntConst(2L, Type.I64), newPrefixBits, fb)
 
       fb.current.setTerminator(Terminator.Ret(flixResultType, r))
 
@@ -1772,7 +3572,15 @@ object LlvmBackend {
 
       val exnOkBlock = fb.newBlock(exnOkLabel)
       fb.setCurrent(exnOkBlock)
-      fb.current.setTerminator(Terminator.Ret(flixResultType, r))
+      exnHandlerOpt match {
+        case Some(ExnHandler(label, slotPtr)) =>
+          val payload = freshTmp(Type.I64)
+          fb.current.emitAssign(payload, Op.ExtractValue(Type.I64, flixResultType, r, index = 1))
+          fb.current.emitStore(payload, slotPtr)
+          fb.current.setTerminator(Terminator.Br(label))
+        case None =>
+          fb.current.setTerminator(Terminator.Ret(flixResultType, r))
+      }
 
       val exnBadBlock = fb.newBlock(exnBadLabel)
       fb.setCurrent(exnBadBlock)
@@ -1798,7 +3606,8 @@ object LlvmBackend {
                                      slotIndexOf: Map[Symbol.VarSym, Long],
                                      lenv: Map[Symbol.LabelSym, String],
                                      resumePayload: Value,
-                                     pcBlocks: Map[Int, BlockBuilder]): Value = {
+                                     pcBlocks: Map[Int, BlockBuilder],
+                                     exnHandlerOpt: Option[ExnHandler] = None): Value = {
       val effId = effectSymIds.getOrElse(sym.eff, 0L)
       val opIndex = opIndices.getOrElse(sym, -1)
       if (effId == 0L || opIndex < 0) {
@@ -1806,7 +3615,7 @@ object LlvmBackend {
         return Value.Undef(llvmTypeOf(tpe))
       }
 
-      emitExprsControlImpure(exps, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks) match {
+      emitExprsControlImpure(exps, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt) match {
         case None => Value.Undef(llvmTypeOf(tpe))
         case Some(args) =>
           val argPayloads = args.zip(exps).map {
@@ -1814,7 +3623,7 @@ object LlvmBackend {
           }
 
           // Set pc on the current frame.
-          storeI64Slot(framePtr, Value.IntConst(2L, Type.I64), Value.IntConst(pcPointId.toLong, Type.I64), fb)
+          storeObjI64Slot(framePtr, Value.IntConst(0L, Type.I64), Value.IntConst(pcPointId.toLong, Type.I64), fb)
 
           // Create prefix frames list with this frame.
           val prefixPtr = freshTmp(Type.Ptr)
@@ -1824,18 +3633,21 @@ object LlvmBackend {
 
           // Allocate suspension object.
           val slots = 5L + argPayloads.length.toLong
-          val sizeBytes = Value.IntConst(slots * 8L, Type.I64)
+          val payloadBytes = Value.IntConst(slots * 8L, Type.I64)
+          val sizeBytes = freshTmp(Type.I64)
+          fb.current.emitAssign(sizeBytes, Op.Bin("add", Type.I64, payloadBytes, Value.IntConst(flixObjHeaderBytes, Type.I64)))
           val suspPtr = freshTmp(Type.Ptr)
-          fb.current.emitAssign(suspPtr, Op.Call(Type.Ptr, "malloc", List(sizeBytes)))
+          val suspTi = Value.Global(LlvmNames.suspensionTypeInfoName, Type.Ptr)
+          fb.current.emitAssign(suspPtr, Op.Call(Type.Ptr, "flix_alloc_flex", List(ctxPtr, suspTi, sizeBytes)))
 
-          storeI64Slot(suspPtr, Value.IntConst(0L, Type.I64), Value.IntConst(effId, Type.I64), fb)
-          storeI64Slot(suspPtr, Value.IntConst(1L, Type.I64), Value.IntConst(opIndex.toLong, Type.I64), fb)
-          storeI64Slot(suspPtr, Value.IntConst(2L, Type.I64), prefixBits, fb)
-          storeI64Slot(suspPtr, Value.IntConst(3L, Type.I64), Value.IntConst(0L, Type.I64), fb)
-          storeI64Slot(suspPtr, Value.IntConst(4L, Type.I64), Value.IntConst(argPayloads.length.toLong, Type.I64), fb)
+          storeObjI64Slot(suspPtr, Value.IntConst(0L, Type.I64), Value.IntConst(effId, Type.I64), fb)
+          storeObjI64Slot(suspPtr, Value.IntConst(1L, Type.I64), Value.IntConst(opIndex.toLong, Type.I64), fb)
+          storeObjI64Slot(suspPtr, Value.IntConst(2L, Type.I64), prefixBits, fb)
+          storeObjI64Slot(suspPtr, Value.IntConst(3L, Type.I64), Value.IntConst(0L, Type.I64), fb)
+          storeObjI64Slot(suspPtr, Value.IntConst(4L, Type.I64), Value.IntConst(argPayloads.length.toLong, Type.I64), fb)
           argPayloads.zipWithIndex.foreach {
             case (p, i) =>
-              storeI64Slot(suspPtr, Value.IntConst(5L + i.toLong, Type.I64), p, fb)
+              storeObjI64Slot(suspPtr, Value.IntConst(5L + i.toLong, Type.I64), p, fb)
           }
 
           val suspBits = freshTmp(Type.I64)
@@ -1852,8 +3664,37 @@ object LlvmBackend {
           val resumedValue = {
             val saved = fb.current
             fb.setCurrent(resumeBlock)
+            // Pollcheck and cancellation at resume entry.
+            if (isGcRootType(tpe)) {
+              val resumeSlotPtr = freshTmp(Type.Ptr)
+              fb.current.emitAssign(resumeSlotPtr, Op.Alloca(Type.I64))
+              fb.current.emitStore(resumePayload, resumeSlotPtr)
+              fb.current.emitCallVoid(rootPushNameOf(Type.I64), List(ctxPtr, resumeSlotPtr))
+            }
+
+            fb.current.emitCallVoid("flix_gc_pollcheck", List(ctxPtr))
+            if (isGcRootType(tpe)) {
+              fb.current.emitCallVoid("flix_gc_pop_roots", List(ctxPtr, Value.IntConst(1L, Type.I64)))
+            }
+
             val v = unboxFromI64(resumePayload, tpe, fb)
-            fb.current.setTerminator(Terminator.Br(afterLabel))
+
+            val isCancelled = freshTmp(Type.I1)
+            fb.current.emitAssign(isCancelled, Op.Call(Type.I1, "flix_cancel_requested", List(ctxPtr)))
+            val cancelLabel = freshLabel("resume_cancel")
+            fb.current.setTerminator(Terminator.CondBr(isCancelled, cancelLabel, afterLabel))
+
+            val cancelBlock = fb.newBlock(cancelLabel)
+            fb.setCurrent(cancelBlock)
+            val cancelExnPtr = freshTmp(Type.Ptr)
+            fb.current.emitAssign(cancelExnPtr, Op.Call(Type.Ptr, "flix_cancel_exn", List(ctxPtr, Value.IntConst(cancelledKindId, Type.I64), exnExnTypeInfo, Value.IntConst(exnExnTagId, Type.I64))))
+            val tracedCancelExnPtr = freshTmp(Type.Ptr)
+            fb.current.emitAssign(tracedCancelExnPtr, Op.Call(Type.Ptr, "flix_exn_with_trace", List(cancelExnPtr)))
+            val cancelBits = freshTmp(Type.I64)
+            fb.current.emitAssign(cancelBits, Op.Cast("ptrtoint", Type.I64, tracedCancelExnPtr))
+            val cancelResult = packResultTagged(ResultTagException, cancelBits, fb)
+            fb.current.setTerminator(Terminator.Ret(flixResultType, cancelResult))
+
             fb.setCurrent(saved)
             v
           }
@@ -1882,26 +3723,30 @@ object LlvmBackend {
                                      slotIndexOf: Map[Symbol.VarSym, Long],
                                      lenv: Map[Symbol.LabelSym, String],
                                      resumePayload: Value,
-                                     pcBlocks: Map[Int, BlockBuilder]): Value = {
+                                     pcBlocks: Map[Int, BlockBuilder],
+                                     exnHandlerOpt: Option[ExnHandler] = None): Value = {
       val effId = effectSymIds.getOrElse(effSym, 0L)
       val eff = root.effects.getOrElse(effSym, throw new IllegalStateException(s"missing effect: $effSym"))
 
       val thunkPtr = framePtrOpt match {
         case None =>
-          emitExpr(exp, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel)
+          emitExpr(exp, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel, exnHandlerOpt)
         case Some(framePtr) =>
-          emitExprControlImpure(exp, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks)
+          emitExprControlImpure(exp, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt)
       }
       if (fb.current.isTerminated) return Value.Undef(llvmTypeOf(tpe))
 
       val opCount = eff.ops.length
       val handlerSlots = 2L + 2L * opCount.toLong
-      val handlerSize = Value.IntConst(handlerSlots * 8L, Type.I64)
+      val handlerPayloadBytes = Value.IntConst(handlerSlots * 8L, Type.I64)
+      val handlerSizeBytes = freshTmp(Type.I64)
+      fb.current.emitAssign(handlerSizeBytes, Op.Bin("add", Type.I64, handlerPayloadBytes, Value.IntConst(flixObjHeaderBytes, Type.I64)))
       val handlerPtr = freshTmp(Type.Ptr)
-      fb.current.emitAssign(handlerPtr, Op.Call(Type.Ptr, "malloc", List(handlerSize)))
+      val handlerTi = Value.Global(LlvmNames.handlerTypeInfoName, Type.Ptr)
+      fb.current.emitAssign(handlerPtr, Op.Call(Type.Ptr, "flix_alloc_flex", List(ctxPtr, handlerTi, handlerSizeBytes)))
 
-      storeI64Slot(handlerPtr, Value.IntConst(0L, Type.I64), Value.IntConst(effId, Type.I64), fb)
-      storeI64Slot(handlerPtr, Value.IntConst(1L, Type.I64), Value.IntConst(opCount.toLong, Type.I64), fb)
+      storeObjI64Slot(handlerPtr, Value.IntConst(0L, Type.I64), Value.IntConst(effId, Type.I64), fb)
+      storeObjI64Slot(handlerPtr, Value.IntConst(1L, Type.I64), Value.IntConst(opCount.toLong, Type.I64), fb)
 
       val ruleMap = rules.map(r => r.op.sym -> r).toMap
       eff.ops.zipWithIndex.foreach {
@@ -1910,19 +3755,19 @@ object LlvmBackend {
 
           val cloPtr = framePtrOpt match {
             case None =>
-              emitExpr(rule.exp, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel)
+              emitExpr(rule.exp, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel, exnHandlerOpt)
             case Some(framePtr) =>
-              emitExprControlImpure(rule.exp, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks)
+              emitExprControlImpure(rule.exp, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt)
           }
 
           val cloBits = castValue(cloPtr, Type.I64, fb)
-          storeI64Slot(handlerPtr, Value.IntConst((2L + idx.toLong * 2L + 1L), Type.I64), cloBits, fb)
+          storeObjI64Slot(handlerPtr, Value.IntConst((2L + idx.toLong * 2L + 1L), Type.I64), cloBits, fb)
 
           val closureSym = findClosureSym(rule.exp).getOrElse(throw new IllegalStateException("expected handler rule closure"))
           val wrapperName = getOrEmitEffectOpWrapper(op.sym, closureSym)
           val wrapperBits = freshTmp(Type.I64)
           fb.current.emitAssign(wrapperBits, Op.Cast("ptrtoint", Type.I64, Value.Global(wrapperName, Type.Ptr)))
-          storeI64Slot(handlerPtr, Value.IntConst((2L + idx.toLong * 2L), Type.I64), wrapperBits, fb)
+          storeObjI64Slot(handlerPtr, Value.IntConst((2L + idx.toLong * 2L), Type.I64), wrapperBits, fb)
       }
 
       val callTmp = freshTmp(flixResultType)
@@ -1935,9 +3780,9 @@ object LlvmBackend {
         case ExpPosition.NonTail =>
           framePtrOpt match {
             case Some(framePtr) if pcPointId > 0 =>
-              emitCallAndHandleSuspension(callTmp, pcPointId, tpe, ctxPtr, fb, framePtr, resumePayload, pcBlocks)
+              emitCallAndHandleSuspension(callTmp, pcPointId, tpe, ctxPtr, fb, framePtr, resumePayload, pcBlocks, exnHandlerOpt)
             case _ =>
-              val payload = unwindThunkToValuePayload(callTmp, ctxPtr, fb)
+              val payload = unwindThunkToValuePayloadOrPropagateExn(callTmp, ctxPtr, fb, exnHandlerOpt)
               unboxFromI64(payload, tpe, fb)
           }
       }
@@ -1958,11 +3803,10 @@ object LlvmBackend {
     }
 
     private def emitResumptionInvokeWrapper(name: String, argTpe: SimpleType): LlvmIr.Function = {
-      val llvmArgTpe = llvmTypeOf(argTpe)
       val params = List(
         LlvmIr.Param("ctx", Type.Ptr),
         LlvmIr.Param("self", Type.Ptr),
-        LlvmIr.Param("arg0", llvmArgTpe)
+        LlvmIr.Param("arg0", Type.I64)
       )
 
       val fb = new FunBuilder()
@@ -1971,13 +3815,12 @@ object LlvmBackend {
 
       val ctxPtr = Value.Local("ctx", Type.Ptr)
       val selfPtr = Value.Local("self", Type.Ptr)
-      val arg0 = Value.Local("arg0", llvmArgTpe)
+      val arg0Payload = Value.Local("arg0", Type.I64)
 
-      val resBits = loadI64Slot(selfPtr, Value.IntConst(1L, Type.I64), fb)
+      val resBits = loadObjI64Slot(selfPtr, Value.IntConst(0L, Type.I64), fb)
       val resPtr = castValue(resBits, Type.Ptr, fb)
-      val payload = boxToI64(arg0, argTpe, fb)
       val callTmp = freshTmp(flixResultType)
-      fb.current.emitAssign(callTmp, Op.Call(flixResultType, "flix_resumption_rewind", List(ctxPtr, resPtr, payload)))
+      fb.current.emitAssign(callTmp, Op.Call(flixResultType, "flix_resumption_rewind", List(ctxPtr, resPtr, arg0Payload)))
       fb.current.setTerminator(Terminator.Ret(flixResultType, callTmp))
 
       LlvmIr.Function(name, flixResultType, params, fb.result())
@@ -2012,32 +3855,29 @@ object LlvmBackend {
 
       // Load handler rule closure pointer from handler slots.
       val closureSlot = 2L + 2L * opIdx.toLong + 1L
-      val cloBits = loadI64Slot(handlerPtr, Value.IntConst(closureSlot, Type.I64), fb)
+      val cloBits = loadObjI64Slot(handlerPtr, Value.IntConst(closureSlot, Type.I64), fb)
       val cloPtr = castValue(cloBits, Type.Ptr, fb)
 
       // Allocate continuation closure that captures the resumption.
-      val kInvokeName = getOrEmitResumptionInvokeWrapper(opDef.tpe)
+      getOrEmitResumptionInvokeWrapper(opDef.tpe)
       val kPtr = freshTmp(Type.Ptr)
-      fb.current.emitAssign(kPtr, Op.Call(Type.Ptr, "malloc", List(Value.IntConst(16L, Type.I64))))
-
-      val kCodeBits = freshTmp(Type.I64)
-      fb.current.emitAssign(kCodeBits, Op.Cast("ptrtoint", Type.I64, Value.Global(kInvokeName, Type.Ptr)))
-      storeI64Slot(kPtr, Value.IntConst(0L, Type.I64), kCodeBits, fb)
+      val kTi = Value.Global(LlvmNames.kTypeInfoName(opDef.tpe), Type.Ptr)
+      fb.current.emitAssign(kPtr, Op.Call(Type.Ptr, "flix_alloc", List(ctxPtr, kTi)))
 
       val resBits = freshTmp(Type.I64)
       fb.current.emitAssign(resBits, Op.Cast("ptrtoint", Type.I64, resumptionPtr))
-      storeI64Slot(kPtr, Value.IntConst(1L, Type.I64), resBits, fb)
+      storeObjI64Slot(kPtr, Value.IntConst(0L, Type.I64), resBits, fb)
 
       val closureDef = root.defs(closureSym)
       val capturedArgs = closureDef.cparams.zipWithIndex.map {
         case (cp, i) =>
-          val payload = loadI64Slot(cloPtr, Value.IntConst((i + 1).toLong, Type.I64), fb)
+          val payload = loadObjI64Slot(cloPtr, Value.IntConst(i.toLong, Type.I64), fb)
           unboxFromI64(payload, cp.tpe, fb)
       }
 
       val opArgs = opDef.fparams.zipWithIndex.map {
         case (fp, i) =>
-          val payload = loadI64Slot(suspensionPtr, Value.IntConst((5L + i.toLong), Type.I64), fb)
+          val payload = loadObjI64Slot(suspensionPtr, Value.IntConst((5L + i.toLong), Type.I64), fb)
           unboxFromI64(payload, fp.tpe, fb)
       }
 
@@ -2070,11 +3910,12 @@ object LlvmBackend {
                           fb: FunBuilder,
                           lenv: Map[Symbol.LabelSym, String],
                           slotTypes: Map[Symbol.VarSym, Type],
-                          selfTailLabel: Option[String]): Option[List[Value]] = {
+                          selfTailLabel: Option[String],
+                          exnHandlerOpt: Option[ExnHandler] = None): Option[List[Value]] = {
       val buf = mutable.ListBuffer.empty[Value]
       val it = exps.iterator
       while (it.hasNext && !fb.current.isTerminated) {
-        buf.addOne(emitExpr(it.next(), env, ctxPtr, fb, lenv, slotTypes, selfTailLabel))
+        buf.addOne(emitExpr(it.next(), env, ctxPtr, fb, lenv, slotTypes, selfTailLabel, exnHandlerOpt))
       }
       if (fb.current.isTerminated) None else Some(buf.toList)
     }
@@ -2120,7 +3961,7 @@ object LlvmBackend {
       }
     }
 
-    private def emitConstant(cst: Constant, fb: FunBuilder): Value = cst match {
+    private def emitConstant(cst: Constant, ctxPtr: Value, fb: FunBuilder): Value = cst match {
       case Constant.Unit =>
         Value.IntConst(0L, Type.I64)
 
@@ -2161,21 +4002,33 @@ object LlvmBackend {
 
       case Constant.Str(lit) =>
         val len = lit.length.toLong
-        val slots = 1L + len
-        val sizeBytes = Value.IntConst(slots * 8L, Type.I64)
+        val lenI64 = Value.IntConst(len, Type.I64)
+
+        val bytesChars = freshTmp(Type.I64)
+        fb.current.emitAssign(bytesChars, Op.Bin("mul", Type.I64, lenI64, Value.IntConst(2L, Type.I64)))
+        val sizeBytes = freshTmp(Type.I64)
+        fb.current.emitAssign(sizeBytes, Op.Bin("add", Type.I64, bytesChars, Value.IntConst(flixStringDataOffsetBytes, Type.I64)))
 
         val strPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(strPtr, Op.Call(Type.Ptr, "malloc", List(sizeBytes)))
+        val strTi = Value.Global(LlvmNames.stringTypeInfoName, Type.Ptr)
+        fb.current.emitAssign(strPtr, Op.Call(Type.Ptr, "flix_alloc_flex", List(ctxPtr, strTi, sizeBytes)))
 
         val lenPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(lenPtr, Op.Gep(Type.I64, strPtr, Value.IntConst(0L, Type.I64)))
-        fb.current.emitStore(Value.IntConst(len, Type.I64), lenPtr)
+        fb.current.emitAssign(lenPtr, Op.Gep(Type.I8, strPtr, Value.IntConst(flixStringLenOffsetBytes, Type.I64)))
+        fb.current.emitStore(Value.IntConst(len, Type.I32), lenPtr)
+
+        val reservedPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(reservedPtr, Op.Gep(Type.I8, strPtr, Value.IntConst(flixStringReservedOffsetBytes, Type.I64)))
+        fb.current.emitStore(Value.IntConst(0L, Type.I32), reservedPtr)
+
+        val basePtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(basePtr, Op.Gep(Type.I8, strPtr, Value.IntConst(flixStringDataOffsetBytes, Type.I64)))
 
         var i = 0
         while (i < lit.length) {
-          val slotPtr = freshTmp(Type.Ptr)
-          fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, strPtr, Value.IntConst((i + 1).toLong, Type.I64)))
-          fb.current.emitStore(Value.IntConst(lit.charAt(i).toLong, Type.I64), slotPtr)
+          val cuPtr = freshTmp(Type.Ptr)
+          fb.current.emitAssign(cuPtr, Op.Gep(Type.I16, basePtr, Value.IntConst(i.toLong, Type.I64)))
+          fb.current.emitStore(Value.IntConst(lit.charAt(i).toLong, Type.I16), cuPtr)
           i += 1
         }
 
@@ -2202,105 +4055,243 @@ object LlvmBackend {
       fb.current.emitStore(payload, slotPtr)
     }
 
+    private def objPayloadBase(objPtr0: Value, fb: FunBuilder): Value = {
+      val objPtr = castValue(objPtr0, Type.Ptr, fb)
+      val payloadBase = freshTmp(Type.Ptr)
+      fb.current.emitAssign(payloadBase, Op.Gep(flixObjType, objPtr, Value.IntConst(1L, Type.I64)))
+      payloadBase
+    }
+
+    private def objPayloadI64SlotPtr(objPtr0: Value, idx: Value, fb: FunBuilder): Value = {
+      val payloadBase = objPayloadBase(objPtr0, fb)
+      val slotPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, payloadBase, idx))
+      slotPtr
+    }
+
+    private def loadObjI64Slot(objPtr0: Value, idx: Value, fb: FunBuilder): Value = {
+      val payloadBase = objPayloadBase(objPtr0, fb)
+      val slotPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, payloadBase, idx))
+      val payload = freshTmp(Type.I64)
+      fb.current.emitAssign(payload, Op.Load(Type.I64, slotPtr))
+      payload
+    }
+
+    private def storeObjI64Slot(objPtr0: Value, idx: Value, payload: Value, fb: FunBuilder): Unit = {
+      val payloadBase = objPayloadBase(objPtr0, fb)
+      val slotPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, payloadBase, idx))
+      fb.current.emitStore(payload, slotPtr)
+    }
+
     private def loadTupleElement(tuplePtr0: Value, idx: Long, tpe: SimpleType, fb: FunBuilder): Value = {
-      val payload = loadI64Slot(tuplePtr0, Value.IntConst(idx, Type.I64), fb)
+      val payload = loadObjI64Slot(tuplePtr0, Value.IntConst(idx, Type.I64), fb)
       unboxFromI64(payload, tpe, fb)
     }
 
-    private def allocTuple2(payload0: Value, payload1: Value, fb: FunBuilder): Value = {
+    private def allocTuple2(tupleTpe: SimpleType.Tuple, payload0: Value, payload1: Value, ctxPtr: Value, fb: FunBuilder): Value = {
       val tupPtr = freshTmp(Type.Ptr)
-      fb.current.emitAssign(tupPtr, Op.Call(Type.Ptr, "malloc", List(Value.IntConst(16L, Type.I64))))
-      storeI64Slot(tupPtr, Value.IntConst(0L, Type.I64), payload0, fb)
-      storeI64Slot(tupPtr, Value.IntConst(1L, Type.I64), payload1, fb)
+      val tupTi = Value.Global(LlvmNames.tupleTypeInfoName(tupleTpe), Type.Ptr)
+      fb.current.emitAssign(tupPtr, Op.Call(Type.Ptr, "flix_alloc", List(ctxPtr, tupTi)))
+      storeObjI64Slot(tupPtr, Value.IntConst(0L, Type.I64), payload0, fb)
+      storeObjI64Slot(tupPtr, Value.IntConst(1L, Type.I64), payload1, fb)
       tupPtr
     }
 
-    private def stringLenI64(strPtr0: Value, fb: FunBuilder): Value = {
+    private val flixObjHeaderBytes: Long = 8L
+    private val flixStringLenOffsetBytes: Long = 8L
+    private val flixStringReservedOffsetBytes: Long = 12L
+    private val flixStringDataOffsetBytes: Long = 16L
+
+    private def stringLenI32(strPtr0: Value, fb: FunBuilder): Value = {
       val strPtr = castValue(strPtr0, Type.Ptr, fb)
       val lenPtr = freshTmp(Type.Ptr)
-      fb.current.emitAssign(lenPtr, Op.Gep(Type.I64, strPtr, Value.IntConst(0L, Type.I64)))
+      fb.current.emitAssign(lenPtr, Op.Gep(Type.I8, strPtr, Value.IntConst(flixStringLenOffsetBytes, Type.I64)))
+      val lenI32 = freshTmp(Type.I32)
+      fb.current.emitAssign(lenI32, Op.Load(Type.I32, lenPtr))
+      lenI32
+    }
+
+    private def stringLenI64(strPtr0: Value, fb: FunBuilder): Value = {
+      val lenI32 = stringLenI32(strPtr0, fb)
       val lenI64 = freshTmp(Type.I64)
-      fb.current.emitAssign(lenI64, Op.Load(Type.I64, lenPtr))
+      fb.current.emitAssign(lenI64, Op.Cast("zext", Type.I64, lenI32))
       lenI64
     }
 
-    private def stringCharPayloadI64(strPtr0: Value, idxI64: Value, fb: FunBuilder): Value = {
+    private def stringCodeUnitPtr(strPtr0: Value, idxI64: Value, fb: FunBuilder): Value = {
       val strPtr = castValue(strPtr0, Type.Ptr, fb)
-      val slotIdx = freshTmp(Type.I64)
-      fb.current.emitAssign(slotIdx, Op.Bin("add", Type.I64, idxI64, Value.IntConst(1L, Type.I64)))
-      loadI64Slot(strPtr, slotIdx, fb)
+      val basePtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(basePtr, Op.Gep(Type.I8, strPtr, Value.IntConst(flixStringDataOffsetBytes, Type.I64)))
+      val cuPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(cuPtr, Op.Gep(Type.I16, basePtr, idxI64))
+      cuPtr
     }
 
-    private def allocString(lenI64: Value, fb: FunBuilder): Value = {
-      val slots = freshTmp(Type.I64)
-      fb.current.emitAssign(slots, Op.Bin("add", Type.I64, lenI64, Value.IntConst(1L, Type.I64)))
+    private def stringCharPayloadI64(strPtr0: Value, idxI64: Value, fb: FunBuilder): Value = {
+      val cuPtr = stringCodeUnitPtr(strPtr0, idxI64, fb)
+      val cuI16 = freshTmp(Type.I16)
+      fb.current.emitAssign(cuI16, Op.Load(Type.I16, cuPtr))
+      val cuI64 = freshTmp(Type.I64)
+      fb.current.emitAssign(cuI64, Op.Cast("zext", Type.I64, cuI16))
+      cuI64
+    }
+
+    private def storeStringCharPayload(strPtr0: Value, idxI64: Value, payloadI64: Value, fb: FunBuilder): Unit = {
+      val cuPtr = stringCodeUnitPtr(strPtr0, idxI64, fb)
+      val cuI16 = freshTmp(Type.I16)
+      fb.current.emitAssign(cuI16, Op.Cast("trunc", Type.I16, payloadI64))
+      fb.current.emitStore(cuI16, cuPtr)
+    }
+
+    private def allocString(lenI64: Value, ctxPtr: Value, fb: FunBuilder): Value = {
+      val bytesChars = freshTmp(Type.I64)
+      fb.current.emitAssign(bytesChars, Op.Bin("mul", Type.I64, lenI64, Value.IntConst(2L, Type.I64)))
       val sizeBytes = freshTmp(Type.I64)
-      fb.current.emitAssign(sizeBytes, Op.Bin("mul", Type.I64, slots, Value.IntConst(8L, Type.I64)))
+      fb.current.emitAssign(sizeBytes, Op.Bin("add", Type.I64, bytesChars, Value.IntConst(flixStringDataOffsetBytes, Type.I64)))
+
       val strPtr = freshTmp(Type.Ptr)
-      fb.current.emitAssign(strPtr, Op.Call(Type.Ptr, "malloc", List(sizeBytes)))
-      storeI64Slot(strPtr, Value.IntConst(0L, Type.I64), lenI64, fb)
+      val strTi = Value.Global(LlvmNames.stringTypeInfoName, Type.Ptr)
+      fb.current.emitAssign(strPtr, Op.Call(Type.Ptr, "flix_alloc_flex", List(ctxPtr, strTi, sizeBytes)))
+
+      val lenI32 = freshTmp(Type.I32)
+      fb.current.emitAssign(lenI32, Op.Cast("trunc", Type.I32, lenI64))
+
+      val lenPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(lenPtr, Op.Gep(Type.I8, strPtr, Value.IntConst(flixStringLenOffsetBytes, Type.I64)))
+      fb.current.emitStore(lenI32, lenPtr)
+
+      val reservedPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(reservedPtr, Op.Gep(Type.I8, strPtr, Value.IntConst(flixStringReservedOffsetBytes, Type.I64)))
+      fb.current.emitStore(Value.IntConst(0L, Type.I32), reservedPtr)
+
       strPtr
     }
 
-    private def emitApplyAtomic(op: AtomicOp, argTpes: List[SimpleType], args: List[Value], resultTpe: SimpleType, ctxPtr: Value, fb: FunBuilder): Value = op match {
+    private def emitStringEquals(str1Ptr0: Value, str2Ptr0: Value, fb: FunBuilder): Value = {
+      val str1Ptr = castValue(str1Ptr0, Type.Ptr, fb)
+      val str2Ptr = castValue(str2Ptr0, Type.Ptr, fb)
+
+      val len1 = stringLenI64(str1Ptr, fb)
+      val len2 = stringLenI64(str2Ptr, fb)
+
+      val lenEq = freshTmp(Type.I1)
+      fb.current.emitAssign(lenEq, Op.ICmp("eq", len1, len2))
+
+      val lenOkLabel = freshLabel("seq_len_ok")
+      val lenBadLabel = freshLabel("seq_len_bad")
+      val loopLabel = freshLabel("seq_loop")
+      val bodyLabel = freshLabel("seq_body")
+      val contLabel = freshLabel("seq_cont")
+      val mismatchLabel = freshLabel("seq_mismatch")
+      val doneLabel = freshLabel("seq_done")
+      val endLabel = freshLabel("seq_end")
+
+      fb.current.setTerminator(Terminator.CondBr(lenEq, lenOkLabel, lenBadLabel))
+
+      val resultIncomings = mutable.ArrayBuffer.empty[(Value, String)]
+
+      val lenBadBlock = fb.newBlock(lenBadLabel)
+      fb.setCurrent(lenBadBlock)
+      fb.current.setTerminator(Terminator.Br(endLabel))
+      resultIncomings.addOne((Value.IntConst(0L, Type.I1), lenBadLabel))
+
+      val lenOkBlock = fb.newBlock(lenOkLabel)
+      fb.setCurrent(lenOkBlock)
+      val iPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(iPtr, Op.Alloca(Type.I64))
+      fb.current.emitStore(Value.IntConst(0L, Type.I64), iPtr)
+      fb.current.setTerminator(Terminator.Br(loopLabel))
+
+      val loopBlock = fb.newBlock(loopLabel)
+      fb.setCurrent(loopBlock)
+      val iVal = freshTmp(Type.I64)
+      fb.current.emitAssign(iVal, Op.Load(Type.I64, iPtr))
+      val more = freshTmp(Type.I1)
+      fb.current.emitAssign(more, Op.ICmp("slt", iVal, len1))
+      fb.current.setTerminator(Terminator.CondBr(more, bodyLabel, doneLabel))
+
+      val bodyBlock = fb.newBlock(bodyLabel)
+      fb.setCurrent(bodyBlock)
+      val c1 = stringCharPayloadI64(str1Ptr, iVal, fb)
+      val c2 = stringCharPayloadI64(str2Ptr, iVal, fb)
+      val chEq = freshTmp(Type.I1)
+      fb.current.emitAssign(chEq, Op.ICmp("eq", c1, c2))
+      fb.current.setTerminator(Terminator.CondBr(chEq, contLabel, mismatchLabel))
+
+      val contBlock = fb.newBlock(contLabel)
+      fb.setCurrent(contBlock)
+      val iNext = freshTmp(Type.I64)
+      fb.current.emitAssign(iNext, Op.Bin("add", Type.I64, iVal, Value.IntConst(1L, Type.I64)))
+      fb.current.emitStore(iNext, iPtr)
+      fb.current.setTerminator(Terminator.Br(loopLabel))
+
+      val mismatchBlock = fb.newBlock(mismatchLabel)
+      fb.setCurrent(mismatchBlock)
+      fb.current.setTerminator(Terminator.Br(endLabel))
+      resultIncomings.addOne((Value.IntConst(0L, Type.I1), mismatchLabel))
+
+      val doneBlock = fb.newBlock(doneLabel)
+      fb.setCurrent(doneBlock)
+      fb.current.setTerminator(Terminator.Br(endLabel))
+      resultIncomings.addOne((Value.IntConst(1L, Type.I1), doneLabel))
+
+      val endBlock = fb.newBlock(endLabel)
+      fb.setCurrent(endBlock)
+      val phi = freshTmp(Type.I1)
+      endBlock.emitPhi(phi, resultIncomings.toList)
+      phi
+    }
+
+    private def emitApplyAtomic(op: AtomicOp,
+                               argTpes: List[SimpleType],
+                               args: List[Value],
+                               resultTpe: SimpleType,
+                               ctxPtr: Value,
+                               fb: FunBuilder,
+                               exnHandlerOpt: Option[ExnHandler] = None): Value = op match {
       case AtomicOp.Closure(sym) =>
         val captured = args.zip(argTpes).map {
           case (v, tpe) => boxToI64(v, tpe, fb)
         }
-
-        val slots = 1L + captured.length.toLong
-        val sizeBytes = Value.IntConst(slots * 8L, Type.I64)
-
         val cloPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(cloPtr, Op.Call(Type.Ptr, "malloc", List(sizeBytes)))
-
-        // Slot 0: invoke function pointer, stored as i64.
-        val codePtr = Value.Global(LlvmNames.closureInvokeName(sym), Type.Ptr)
-        val codeI64 = freshTmp(Type.I64)
-        fb.current.emitAssign(codeI64, Op.Cast("ptrtoint", Type.I64, codePtr))
-
-        val slot0Ptr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(slot0Ptr, Op.Gep(Type.I64, cloPtr, Value.IntConst(0L, Type.I64)))
-        fb.current.emitStore(codeI64, slot0Ptr)
+        val cloTi = Value.Global(LlvmNames.closureTypeInfoName(sym), Type.Ptr)
+        fb.current.emitAssign(cloPtr, Op.Call(Type.Ptr, "flix_alloc", List(ctxPtr, cloTi)))
 
         captured.zipWithIndex.foreach {
           case (payload, i) =>
-            val slotPtr = freshTmp(Type.Ptr)
-            fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, cloPtr, Value.IntConst((i + 1).toLong, Type.I64)))
-            fb.current.emitStore(payload, slotPtr)
+            storeObjI64Slot(cloPtr, Value.IntConst(i.toLong, Type.I64), payload, fb)
         }
 
         cloPtr
 
       case AtomicOp.Tuple =>
-        val elms = args.zip(argTpes).map {
-          case (v, tpe) => boxToI64(v, tpe, fb)
+        resultTpe match {
+          case tupTpe: SimpleType.Tuple =>
+            val elms = args.zip(argTpes).map {
+              case (v, tpe) => boxToI64(v, tpe, fb)
+            }
+
+            val tupPtr = freshTmp(Type.Ptr)
+            val tupTi = Value.Global(LlvmNames.tupleTypeInfoName(tupTpe), Type.Ptr)
+            fb.current.emitAssign(tupPtr, Op.Call(Type.Ptr, "flix_alloc", List(ctxPtr, tupTi)))
+
+            elms.zipWithIndex.foreach {
+              case (payload, i) =>
+                storeObjI64Slot(tupPtr, Value.IntConst(i.toLong, Type.I64), payload, fb)
+            }
+
+            tupPtr
+          case _ =>
+            fb.current.emitTrap()
+            Value.Undef(Type.Ptr)
         }
-
-        val slots = elms.length.toLong
-        val sizeBytes = Value.IntConst(slots * 8L, Type.I64)
-
-        val tupPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(tupPtr, Op.Call(Type.Ptr, "malloc", List(sizeBytes)))
-
-        elms.zipWithIndex.foreach {
-          case (payload, i) =>
-            val slotPtr = freshTmp(Type.Ptr)
-            fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, tupPtr, Value.IntConst(i.toLong, Type.I64)))
-            fb.current.emitStore(payload, slotPtr)
-        }
-
-        tupPtr
 
       case AtomicOp.Index(idx) =>
         val tuplePtr0 = args.headOption.getOrElse(Value.Undef(Type.Ptr))
         val tuplePtr = castValue(tuplePtr0, Type.Ptr, fb)
-
-        val slotPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, tuplePtr, Value.IntConst(idx.toLong, Type.I64)))
-
-        val payload = freshTmp(Type.I64)
-        fb.current.emitAssign(payload, Op.Load(Type.I64, slotPtr))
+        val payload = loadObjI64Slot(tuplePtr, Value.IntConst(idx.toLong, Type.I64), fb)
         unboxFromI64(payload, resultTpe, fb)
 
       case AtomicOp.RecordSelect(label) =>
@@ -2314,11 +4305,7 @@ object LlvmBackend {
           fb.current.emitTrap()
           Value.Undef(llvmTypeOf(resultTpe))
         } else {
-          val slotPtr = freshTmp(Type.Ptr)
-          fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, recordPtr, Value.IntConst(idx.toLong, Type.I64)))
-
-          val payload = freshTmp(Type.I64)
-          fb.current.emitAssign(payload, Op.Load(Type.I64, slotPtr))
+          val payload = loadObjI64Slot(recordPtr, Value.IntConst(idx.toLong, Type.I64), fb)
           unboxFromI64(payload, resultTpe, fb)
         }
 
@@ -2333,30 +4320,23 @@ object LlvmBackend {
         val restFields = recordFields(restTpe)
         val restIndex = restFields.zipWithIndex.map { case ((l, _), i) => l -> i }.toMap
 
-        val slots = resultFields.length.toLong
-        val sizeBytes = Value.IntConst(slots * 8L, Type.I64)
-
         val recPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(recPtr, Op.Call(Type.Ptr, "malloc", List(sizeBytes)))
+        val recTi = Value.Global(LlvmNames.recordTypeInfoName(resultTpe), Type.Ptr)
+        fb.current.emitAssign(recPtr, Op.Call(Type.Ptr, "flix_alloc", List(ctxPtr, recTi)))
 
         val vPayload = boxToI64(v0, vTpe, fb)
 
         resultFields.zipWithIndex.foreach {
           case ((fldLabel, _), i) =>
-            val slotPtr = freshTmp(Type.Ptr)
-            fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, recPtr, Value.IntConst(i.toLong, Type.I64)))
             if (fldLabel == label.name) {
-              fb.current.emitStore(vPayload, slotPtr)
+              storeObjI64Slot(recPtr, Value.IntConst(i.toLong, Type.I64), vPayload, fb)
             } else {
               restIndex.get(fldLabel) match {
                 case None =>
                   fb.current.emitTrap()
                 case Some(oldIdx) =>
-                  val oldSlotPtr = freshTmp(Type.Ptr)
-                  fb.current.emitAssign(oldSlotPtr, Op.Gep(Type.I64, restPtr, Value.IntConst(oldIdx.toLong, Type.I64)))
-                  val payload = freshTmp(Type.I64)
-                  fb.current.emitAssign(payload, Op.Load(Type.I64, oldSlotPtr))
-                  fb.current.emitStore(payload, slotPtr)
+                  val payload = loadObjI64Slot(restPtr, Value.IntConst(oldIdx.toLong, Type.I64), fb)
+                  storeObjI64Slot(recPtr, Value.IntConst(i.toLong, Type.I64), payload, fb)
               }
             }
         }
@@ -2375,25 +4355,19 @@ object LlvmBackend {
           Value.Null(Type.Ptr)
         } else {
           val oldIndex = oldFields.zipWithIndex.map { case ((l, _), i) => l -> i }.toMap
-          val slots = newFields.length.toLong
-          val sizeBytes = Value.IntConst(slots * 8L, Type.I64)
 
           val recPtr = freshTmp(Type.Ptr)
-          fb.current.emitAssign(recPtr, Op.Call(Type.Ptr, "malloc", List(sizeBytes)))
+          val recTi = Value.Global(LlvmNames.recordTypeInfoName(resultTpe), Type.Ptr)
+          fb.current.emitAssign(recPtr, Op.Call(Type.Ptr, "flix_alloc", List(ctxPtr, recTi)))
 
           newFields.zipWithIndex.foreach {
             case ((fldLabel, _), i) =>
-              val slotPtr = freshTmp(Type.Ptr)
-              fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, recPtr, Value.IntConst(i.toLong, Type.I64)))
               oldIndex.get(fldLabel) match {
                 case None =>
                   fb.current.emitTrap()
                 case Some(oldIdx) =>
-                  val oldSlotPtr = freshTmp(Type.Ptr)
-                  fb.current.emitAssign(oldSlotPtr, Op.Gep(Type.I64, recordPtr, Value.IntConst(oldIdx.toLong, Type.I64)))
-                  val payload = freshTmp(Type.I64)
-                  fb.current.emitAssign(payload, Op.Load(Type.I64, oldSlotPtr))
-                  fb.current.emitStore(payload, slotPtr)
+                  val payload = loadObjI64Slot(recordPtr, Value.IntConst(oldIdx.toLong, Type.I64), fb)
+                  storeObjI64Slot(recPtr, Value.IntConst(i.toLong, Type.I64), payload, fb)
               }
           }
 
@@ -2412,21 +4386,15 @@ object LlvmBackend {
             Value.Undef(Type.Ptr)
 
           case Some(id) =>
-            val slots = 1L + payloads.length.toLong
-            val sizeBytes = Value.IntConst(slots * 8L, Type.I64)
-
+            // Layout: header + payload[0]=tag word, payload[1..]=fields.
             val objPtr = freshTmp(Type.Ptr)
-            fb.current.emitAssign(objPtr, Op.Call(Type.Ptr, "malloc", List(sizeBytes)))
+            val tagTi = Value.Global(LlvmNames.tagTypeInfoName(sym), Type.Ptr)
+            fb.current.emitAssign(objPtr, Op.Call(Type.Ptr, "flix_alloc", List(ctxPtr, tagTi)))
 
-            val tagPtr = freshTmp(Type.Ptr)
-            fb.current.emitAssign(tagPtr, Op.Gep(Type.I64, objPtr, Value.IntConst(0L, Type.I64)))
-            fb.current.emitStore(Value.IntConst(id, Type.I64), tagPtr)
-
+            storeObjI64Slot(objPtr, Value.IntConst(0L, Type.I64), Value.IntConst(id, Type.I64), fb)
             payloads.zipWithIndex.foreach {
               case (payload, i) =>
-                val slotPtr = freshTmp(Type.Ptr)
-                fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, objPtr, Value.IntConst((i + 1).toLong, Type.I64)))
-                fb.current.emitStore(payload, slotPtr)
+                storeObjI64Slot(objPtr, Value.IntConst((i + 1).toLong, Type.I64), payload, fb)
             }
 
             objPtr
@@ -2443,11 +4411,7 @@ object LlvmBackend {
             Value.Undef(Type.I1)
 
           case Some(id) =>
-            val tagPtr = freshTmp(Type.Ptr)
-            fb.current.emitAssign(tagPtr, Op.Gep(Type.I64, objPtr, Value.IntConst(0L, Type.I64)))
-
-            val tagVal = freshTmp(Type.I64)
-            fb.current.emitAssign(tagVal, Op.Load(Type.I64, tagPtr))
+            val tagVal = loadObjI64Slot(objPtr, Value.IntConst(0L, Type.I64), fb)
 
             val cmp = freshTmp(Type.I1)
             fb.current.emitAssign(cmp, Op.ICmp("eq", tagVal, Value.IntConst(id, Type.I64)))
@@ -2466,11 +4430,7 @@ object LlvmBackend {
 
           case Some(id) =>
             // Defensive: trap if the tag doesn't match.
-            val tagPtr = freshTmp(Type.Ptr)
-            fb.current.emitAssign(tagPtr, Op.Gep(Type.I64, objPtr, Value.IntConst(0L, Type.I64)))
-
-            val tagVal = freshTmp(Type.I64)
-            fb.current.emitAssign(tagVal, Op.Load(Type.I64, tagPtr))
+            val tagVal = loadObjI64Slot(objPtr, Value.IntConst(0L, Type.I64), fb)
 
             val ok = freshTmp(Type.I1)
             fb.current.emitAssign(ok, Op.ICmp("eq", tagVal, Value.IntConst(id, Type.I64)))
@@ -2481,17 +4441,14 @@ object LlvmBackend {
 
             fb.current.setTerminator(Terminator.CondBr(ok, thenLabel, elseLabel))
 
-            val slot = (idx + 1).toLong
             val joinTpe = llvmTypeOf(resultTpe)
             val incomings = mutable.ArrayBuffer.empty[(Value, String)]
 
             // Ok path.
             val okBlock = fb.newBlock(thenLabel)
             fb.setCurrent(okBlock)
-            val slotPtr = freshTmp(Type.Ptr)
-            fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, objPtr, Value.IntConst(slot, Type.I64)))
-            val payload = freshTmp(Type.I64)
-            fb.current.emitAssign(payload, Op.Load(Type.I64, slotPtr))
+            val slot = (idx + 1).toLong
+            val payload = loadObjI64Slot(objPtr, Value.IntConst(slot, Type.I64), fb)
             val valueOk = unboxFromI64(payload, resultTpe, fb)
             if (!fb.current.isTerminated) {
               val v = coerceValue(valueOk, joinTpe, fb)
@@ -2590,34 +4547,92 @@ object LlvmBackend {
         unboxFromI64(payload, resultTpe, fb)
 
       case AtomicOp.ArrayLit =>
-        val elms = args.zip(argTpes).map {
-          case (v, tpe) => boxToI64(v, tpe, fb)
+        val (rcPtr, elms, elmTpes) = argTpes.headOption match {
+          case Some(SimpleType.Region) =>
+            val rc0 = args.headOption.getOrElse(Value.Null(Type.Ptr))
+            (castValue(rc0, Type.Ptr, fb), args.drop(1), argTpes.drop(1))
+          case _ =>
+            (Value.Null(Type.Ptr), args, argTpes)
         }
 
-        val len = elms.length.toLong
-        val slots = 1L + len
-        val sizeBytes = Value.IntConst(slots * 8L, Type.I64)
+        val elemTpe = resultTpe match {
+          case SimpleType.Array(t) => t
+          case _ => SimpleType.Object
+        }
+        // We only track/write-barrier GC heap pointers (not region-scoped pointers).
+        val isPtrArray = isGcRootType(elemTpe)
+        val isInt8Array = !isPtrArray && elemTpe == SimpleType.Int8
+
+        val (len, sizeBytes, elemSizeI32) = if (isInt8Array) {
+          val len0 = elms.length.toLong
+          (len0, Value.IntConst(16L + len0, Type.I64), Value.IntConst(1L, Type.I32))
+        } else {
+          val len0 = elms.length.toLong
+          (len0, Value.IntConst(16L + len0 * 8L, Type.I64), Value.IntConst(8L, Type.I32))
+        }
+
+        val arrTiName = if (isPtrArray) LlvmNames.arrayPtrTypeInfoName else LlvmNames.arrayPrimTypeInfoName
+        val arrTi = Value.Global(arrTiName, Type.Ptr)
 
         val arrPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(arrPtr, Op.Call(Type.Ptr, "malloc", List(sizeBytes)))
+        fb.current.emitAssign(arrPtr, Op.Call(Type.Ptr, "flix_region_alloc_flex", List(ctxPtr, rcPtr, arrTi, sizeBytes)))
 
         val lenPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(lenPtr, Op.Gep(Type.I64, arrPtr, Value.IntConst(0L, Type.I64)))
-        fb.current.emitStore(Value.IntConst(len, Type.I64), lenPtr)
+        fb.current.emitAssign(lenPtr, Op.Gep(Type.I8, arrPtr, Value.IntConst(8L, Type.I64)))
+        fb.current.emitStore(Value.IntConst(len, Type.I32), lenPtr)
 
-        elms.zipWithIndex.foreach {
-          case (payload, i) =>
-            val slotPtr = freshTmp(Type.Ptr)
-            fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, arrPtr, Value.IntConst((i + 1).toLong, Type.I64)))
-            fb.current.emitStore(payload, slotPtr)
+        val elemSizePtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(elemSizePtr, Op.Gep(Type.I8, arrPtr, Value.IntConst(12L, Type.I64)))
+        fb.current.emitStore(elemSizeI32, elemSizePtr)
+
+        val elmsPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(elmsPtr, Op.Gep(Type.I8, arrPtr, Value.IntConst(16L, Type.I64)))
+
+        if (isInt8Array) {
+          elms.zipWithIndex.foreach {
+            case (v, i) =>
+              val slotPtr = freshTmp(Type.Ptr)
+              fb.current.emitAssign(slotPtr, Op.Gep(Type.I8, elmsPtr, Value.IntConst(i.toLong, Type.I64)))
+              val byteVal = castValue(v, Type.I8, fb)
+              fb.current.emitStore(byteVal, slotPtr)
+          }
+        } else {
+          val payloads = elms.zip(elmTpes).map {
+            case (v, tpe) => boxToI64(v, tpe, fb)
+          }
+          payloads.zipWithIndex.foreach {
+            case (payload, i) =>
+              val slotPtr = freshTmp(Type.Ptr)
+              fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, elmsPtr, Value.IntConst(i.toLong, Type.I64)))
+              if (isPtrArray) emitStorePtrLike(ctxPtr, slotPtr, payload, fb)
+              else fb.current.emitStore(payload, slotPtr)
+          }
+        }
+
+        if (isPtrArray) {
+          emitRememberPtrArray(ctxPtr, rcPtr, arrPtr, Value.IntConst(len, Type.I64), fb)
         }
 
         arrPtr
 
       case AtomicOp.ArrayNew =>
-        val default0 = args.headOption.getOrElse(Value.Undef(Type.I64))
-        val len0 = args.drop(1).headOption.getOrElse(Value.Undef(Type.I32))
-        val defaultTpe = argTpes.headOption.getOrElse(SimpleType.Object)
+        val (rcPtr, default0, defaultTpe, len0) = argTpes.headOption match {
+          case Some(SimpleType.Region) =>
+            val rc0 = args.headOption.getOrElse(Value.Null(Type.Ptr))
+            val d0 = args.drop(1).headOption.getOrElse(Value.Undef(Type.I64))
+            val l0 = args.drop(2).headOption.getOrElse(Value.Undef(Type.I32))
+            val dt = argTpes.drop(1).headOption.getOrElse(SimpleType.Object)
+            (castValue(rc0, Type.Ptr, fb), d0, dt, l0)
+          case _ =>
+            val d0 = args.headOption.getOrElse(Value.Undef(Type.I64))
+            val l0 = args.drop(1).headOption.getOrElse(Value.Undef(Type.I32))
+            val dt = argTpes.headOption.getOrElse(SimpleType.Object)
+            (Value.Null(Type.Ptr), d0, dt, l0)
+        }
+
+        // We only track/write-barrier GC heap pointers (not region-scoped pointers).
+        val isPtrArray = isGcRootType(defaultTpe)
+        val isInt8Array = !isPtrArray && defaultTpe == SimpleType.Int8
 
         val lenI64 = castValue(len0, Type.I64, fb)
         val negative = freshTmp(Type.I1)
@@ -2639,20 +4654,42 @@ object LlvmBackend {
         val okBlock = fb.newBlock(okLabel)
         fb.setCurrent(okBlock)
 
-        val slots = freshTmp(Type.I64)
-        fb.current.emitAssign(slots, Op.Bin("add", Type.I64, lenI64, Value.IntConst(1L, Type.I64)))
+        val sizeBytes = if (isInt8Array) {
+          val sz = freshTmp(Type.I64)
+          fb.current.emitAssign(sz, Op.Bin("add", Type.I64, lenI64, Value.IntConst(16L, Type.I64)))
+          sz
+        } else {
+          val elmsBytes = freshTmp(Type.I64)
+          fb.current.emitAssign(elmsBytes, Op.Bin("mul", Type.I64, lenI64, Value.IntConst(8L, Type.I64)))
 
-        val sizeBytes = freshTmp(Type.I64)
-        fb.current.emitAssign(sizeBytes, Op.Bin("mul", Type.I64, slots, Value.IntConst(8L, Type.I64)))
+          val sz = freshTmp(Type.I64)
+          fb.current.emitAssign(sz, Op.Bin("add", Type.I64, elmsBytes, Value.IntConst(16L, Type.I64)))
+          sz
+        }
+
+        val arrTiName = if (isPtrArray) LlvmNames.arrayPtrTypeInfoName else LlvmNames.arrayPrimTypeInfoName
+        val arrTi = Value.Global(arrTiName, Type.Ptr)
 
         val arrPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(arrPtr, Op.Call(Type.Ptr, "malloc", List(sizeBytes)))
+        fb.current.emitAssign(arrPtr, Op.Call(Type.Ptr, "flix_region_alloc_flex", List(ctxPtr, rcPtr, arrTi, sizeBytes)))
+
+        val lenI32 = freshTmp(Type.I32)
+        fb.current.emitAssign(lenI32, Op.Cast("trunc", Type.I32, lenI64))
 
         val lenPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(lenPtr, Op.Gep(Type.I64, arrPtr, Value.IntConst(0L, Type.I64)))
-        fb.current.emitStore(lenI64, lenPtr)
+        fb.current.emitAssign(lenPtr, Op.Gep(Type.I8, arrPtr, Value.IntConst(8L, Type.I64)))
+        fb.current.emitStore(lenI32, lenPtr)
 
-        val defaultPayload = boxToI64(default0, defaultTpe, fb)
+        val elemSizePtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(elemSizePtr, Op.Gep(Type.I8, arrPtr, Value.IntConst(12L, Type.I64)))
+        if (isInt8Array) fb.current.emitStore(Value.IntConst(1L, Type.I32), elemSizePtr)
+        else fb.current.emitStore(Value.IntConst(8L, Type.I32), elemSizePtr)
+
+        val elmsPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(elmsPtr, Op.Gep(Type.I8, arrPtr, Value.IntConst(16L, Type.I64)))
+
+        val defaultPayload = if (isInt8Array) Value.Undef(Type.I64) else boxToI64(default0, defaultTpe, fb)
+        val defaultByte = if (isInt8Array) castValue(default0, Type.I8, fb) else Value.Undef(Type.I8)
 
         // Initialize elements with the default value.
         val iPtr = freshTmp(Type.Ptr)
@@ -2675,11 +4712,15 @@ object LlvmBackend {
 
         val bodyBlock = fb.newBlock(bodyLabel)
         fb.setCurrent(bodyBlock)
-        val slotIdx = freshTmp(Type.I64)
-        fb.current.emitAssign(slotIdx, Op.Bin("add", Type.I64, iVal, Value.IntConst(1L, Type.I64)))
         val slotPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, arrPtr, slotIdx))
-        fb.current.emitStore(defaultPayload, slotPtr)
+        if (isInt8Array) {
+          fb.current.emitAssign(slotPtr, Op.Gep(Type.I8, elmsPtr, iVal))
+          fb.current.emitStore(defaultByte, slotPtr)
+        } else {
+          fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, elmsPtr, iVal))
+          if (isPtrArray) emitStorePtrLike(ctxPtr, slotPtr, defaultPayload, fb)
+          else fb.current.emitStore(defaultPayload, slotPtr)
+        }
         val iNext = freshTmp(Type.I64)
         fb.current.emitAssign(iNext, Op.Bin("add", Type.I64, iVal, Value.IntConst(1L, Type.I64)))
         fb.current.emitStore(iNext, iPtr)
@@ -2687,6 +4728,9 @@ object LlvmBackend {
 
         val endBlock = fb.newBlock(endLabel)
         fb.setCurrent(endBlock)
+        if (isPtrArray) {
+          emitRememberPtrArray(ctxPtr, rcPtr, arrPtr, lenI64, fb)
+        }
         fb.current.setTerminator(Terminator.Br(contLabel))
 
         val contBlock = fb.newBlock(contLabel)
@@ -2700,9 +4744,11 @@ object LlvmBackend {
         val idxI64 = castValue(idx0, Type.I64, fb)
 
         val lenPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(lenPtr, Op.Gep(Type.I64, arrPtr, Value.IntConst(0L, Type.I64)))
+        fb.current.emitAssign(lenPtr, Op.Gep(Type.I8, arrPtr, Value.IntConst(8L, Type.I64)))
+        val lenI32 = freshTmp(Type.I32)
+        fb.current.emitAssign(lenI32, Op.Load(Type.I32, lenPtr))
         val lenI64 = freshTmp(Type.I64)
-        fb.current.emitAssign(lenI64, Op.Load(Type.I64, lenPtr))
+        fb.current.emitAssign(lenI64, Op.Cast("zext", Type.I64, lenI32))
 
         val neg = freshTmp(Type.I1)
         fb.current.emitAssign(neg, Op.ICmp("slt", idxI64, Value.IntConst(0L, Type.I64)))
@@ -2724,13 +4770,22 @@ object LlvmBackend {
 
         val okBlock = fb.newBlock(okLabel)
         fb.setCurrent(okBlock)
-        val slotIdx = freshTmp(Type.I64)
-        fb.current.emitAssign(slotIdx, Op.Bin("add", Type.I64, idxI64, Value.IntConst(1L, Type.I64)))
-        val slotPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, arrPtr, slotIdx))
-        val payload = freshTmp(Type.I64)
-        fb.current.emitAssign(payload, Op.Load(Type.I64, slotPtr))
-        val valueOk = unboxFromI64(payload, resultTpe, fb)
+
+        val elmsPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(elmsPtr, Op.Gep(Type.I8, arrPtr, Value.IntConst(16L, Type.I64)))
+        val valueOk = if (resultTpe == SimpleType.Int8) {
+          val bytePtr = freshTmp(Type.Ptr)
+          fb.current.emitAssign(bytePtr, Op.Gep(Type.I8, elmsPtr, idxI64))
+          val byteVal = freshTmp(Type.I8)
+          fb.current.emitAssign(byteVal, Op.Load(Type.I8, bytePtr))
+          byteVal
+        } else {
+          val slotPtr = freshTmp(Type.Ptr)
+          fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, elmsPtr, idxI64))
+          val payload = freshTmp(Type.I64)
+          fb.current.emitAssign(payload, Op.Load(Type.I64, slotPtr))
+          unboxFromI64(payload, resultTpe, fb)
+        }
         if (!fb.current.isTerminated) {
           fb.current.setTerminator(Terminator.Br(endLabel))
         }
@@ -2749,9 +4804,11 @@ object LlvmBackend {
         val idxI64 = castValue(idx0, Type.I64, fb)
 
         val lenPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(lenPtr, Op.Gep(Type.I64, arrPtr, Value.IntConst(0L, Type.I64)))
+        fb.current.emitAssign(lenPtr, Op.Gep(Type.I8, arrPtr, Value.IntConst(8L, Type.I64)))
+        val lenI32 = freshTmp(Type.I32)
+        fb.current.emitAssign(lenI32, Op.Load(Type.I32, lenPtr))
         val lenI64 = freshTmp(Type.I64)
-        fb.current.emitAssign(lenI64, Op.Load(Type.I64, lenPtr))
+        fb.current.emitAssign(lenI64, Op.Cast("zext", Type.I64, lenI32))
 
         val neg = freshTmp(Type.I1)
         fb.current.emitAssign(neg, Op.ICmp("slt", idxI64, Value.IntConst(0L, Type.I64)))
@@ -2773,12 +4830,21 @@ object LlvmBackend {
 
         val okBlock = fb.newBlock(okLabel)
         fb.setCurrent(okBlock)
-        val slotIdx = freshTmp(Type.I64)
-        fb.current.emitAssign(slotIdx, Op.Bin("add", Type.I64, idxI64, Value.IntConst(1L, Type.I64)))
-        val slotPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, arrPtr, slotIdx))
-        val payload = boxToI64(v0, vTpe, fb)
-        fb.current.emitStore(payload, slotPtr)
+
+        val elmsPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(elmsPtr, Op.Gep(Type.I8, arrPtr, Value.IntConst(16L, Type.I64)))
+        if (vTpe == SimpleType.Int8) {
+          val bytePtr = freshTmp(Type.Ptr)
+          fb.current.emitAssign(bytePtr, Op.Gep(Type.I8, elmsPtr, idxI64))
+          val byteVal = castValue(v0, Type.I8, fb)
+          fb.current.emitStore(byteVal, bytePtr)
+        } else {
+          val slotPtr = freshTmp(Type.Ptr)
+          fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, elmsPtr, idxI64))
+          val payload = boxToI64(v0, vTpe, fb)
+          if (isGcRootType(vTpe)) emitStorePtrLike(ctxPtr, slotPtr, payload, fb)
+          else fb.current.emitStore(payload, slotPtr)
+        }
         fb.current.setTerminator(Terminator.Br(endLabel))
 
         val endBlock = fb.newBlock(endLabel)
@@ -2790,24 +4856,22 @@ object LlvmBackend {
         val arrPtr = castValue(arr0, Type.Ptr, fb)
 
         val lenPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(lenPtr, Op.Gep(Type.I64, arrPtr, Value.IntConst(0L, Type.I64)))
-
-        val lenI64 = freshTmp(Type.I64)
-        fb.current.emitAssign(lenI64, Op.Load(Type.I64, lenPtr))
+        fb.current.emitAssign(lenPtr, Op.Gep(Type.I8, arrPtr, Value.IntConst(8L, Type.I64)))
 
         val lenI32 = freshTmp(Type.I32)
-        fb.current.emitAssign(lenI32, Op.Cast("trunc", Type.I32, lenI64))
+        fb.current.emitAssign(lenI32, Op.Load(Type.I32, lenPtr))
         lenI32
 
       case AtomicOp.StructNew(sym, mutability, _) =>
         val struct = root.structs(sym)
         val fieldCount = struct.fields.length
-        val (fieldArgs, fieldTpes) = mutability match {
+        val (rcPtr, fieldArgs, fieldTpes) = mutability match {
           case ca.uwaterloo.flix.language.ast.shared.Mutability.Immutable =>
-            (args, argTpes)
+            (Value.Null(Type.Ptr), args, argTpes)
           case ca.uwaterloo.flix.language.ast.shared.Mutability.Mutable =>
-            // Region is the first argument; ignored for bring-up.
-            (args.drop(1), argTpes.drop(1))
+            val rc0 = args.headOption.getOrElse(Value.Null(Type.Ptr))
+            val rc = castValue(rc0, Type.Ptr, fb)
+            (rc, args.drop(1), argTpes.drop(1))
         }
 
         if (fieldArgs.length != fieldCount) {
@@ -2818,17 +4882,27 @@ object LlvmBackend {
             case (v, tpe) => boxToI64(v, tpe, fb)
           }
 
-          val slots = payloads.length.toLong
-          val sizeBytes = Value.IntConst(slots * 8L, Type.I64)
+          val structFieldTpes = struct.fields.map(_.tpe)
 
           val objPtr = freshTmp(Type.Ptr)
-          fb.current.emitAssign(objPtr, Op.Call(Type.Ptr, "malloc", List(sizeBytes)))
+          val structTi = Value.Global(LlvmNames.structTypeInfoName(sym), Type.Ptr)
+          mutability match {
+            case ca.uwaterloo.flix.language.ast.shared.Mutability.Mutable =>
+              fb.current.emitAssign(objPtr, Op.Call(Type.Ptr, "flix_region_alloc", List(ctxPtr, rcPtr, structTi)))
+            case ca.uwaterloo.flix.language.ast.shared.Mutability.Immutable =>
+              fb.current.emitAssign(objPtr, Op.Call(Type.Ptr, "flix_alloc", List(ctxPtr, structTi)))
+          }
 
           payloads.zipWithIndex.foreach {
             case (payload, i) =>
-              val slotPtr = freshTmp(Type.Ptr)
-              fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, objPtr, Value.IntConst(i.toLong, Type.I64)))
-              fb.current.emitStore(payload, slotPtr)
+              mutability match {
+                case ca.uwaterloo.flix.language.ast.shared.Mutability.Mutable if isGcRootType(structFieldTpes(i)) =>
+                  val slotPtr = objPayloadI64SlotPtr(objPtr, Value.IntConst(i.toLong, Type.I64), fb)
+                  emitStorePtrLike(ctxPtr, slotPtr, payload, fb)
+                  fb.current.emitCallVoid("flix_region_remember_slot", List(ctxPtr, rcPtr, slotPtr))
+                case _ =>
+                  storeObjI64Slot(objPtr, Value.IntConst(i.toLong, Type.I64), payload, fb)
+              }
           }
 
           objPtr
@@ -2844,10 +4918,7 @@ object LlvmBackend {
           fb.current.emitTrap()
           Value.Undef(llvmTypeOf(resultTpe))
         } else {
-          val slotPtr = freshTmp(Type.Ptr)
-          fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, structPtr, Value.IntConst(idx.toLong, Type.I64)))
-          val payload = freshTmp(Type.I64)
-          fb.current.emitAssign(payload, Op.Load(Type.I64, slotPtr))
+          val payload = loadObjI64Slot(structPtr, Value.IntConst(idx.toLong, Type.I64), fb)
           unboxFromI64(payload, resultTpe, fb)
         }
 
@@ -2863,10 +4934,10 @@ object LlvmBackend {
         if (idx < 0) {
           fb.current.emitTrap()
         } else {
-          val slotPtr = freshTmp(Type.Ptr)
-          fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, structPtr, Value.IntConst(idx.toLong, Type.I64)))
+          val slotPtr = objPayloadI64SlotPtr(structPtr, Value.IntConst(idx.toLong, Type.I64), fb)
           val payload = boxToI64(v0, vTpe, fb)
-          fb.current.emitStore(payload, slotPtr)
+          if (isGcRootType(struct.fields(idx).tpe)) emitStorePtrLike(ctxPtr, slotPtr, payload, fb)
+          else fb.current.emitStore(payload, slotPtr)
         }
         Value.IntConst(0L, Type.I64)
 
@@ -2876,18 +4947,18 @@ object LlvmBackend {
 
         val expPayload = boxToI64(exp0, expTpe, fb)
 
-        // Layout: [0] = exp payload (i64), [1] = value payload (i64, valid iff exp == 0).
-        val sizeBytes = Value.IntConst(16L, Type.I64)
+        val innerTpe = resultTpe match {
+          case SimpleType.Lazy(t) => t
+          case _ => SimpleType.Object
+        }
+
+        // Layout: payload[0] = exp payload (i64), payload[1] = value payload (i64, valid iff exp == 0).
         val lazyPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(lazyPtr, Op.Call(Type.Ptr, "malloc", List(sizeBytes)))
+        val lazyTi = Value.Global(LlvmNames.lazyTypeInfoName(innerTpe), Type.Ptr)
+        fb.current.emitAssign(lazyPtr, Op.Call(Type.Ptr, "flix_alloc", List(ctxPtr, lazyTi)))
 
-        val slot0Ptr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(slot0Ptr, Op.Gep(Type.I64, lazyPtr, Value.IntConst(0L, Type.I64)))
-        fb.current.emitStore(expPayload, slot0Ptr)
-
-        val slot1Ptr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(slot1Ptr, Op.Gep(Type.I64, lazyPtr, Value.IntConst(1L, Type.I64)))
-        fb.current.emitStore(Value.IntConst(0L, Type.I64), slot1Ptr)
+        storeObjI64Slot(lazyPtr, Value.IntConst(0L, Type.I64), expPayload, fb)
+        storeObjI64Slot(lazyPtr, Value.IntConst(1L, Type.I64), Value.IntConst(0L, Type.I64), fb)
 
         lazyPtr
 
@@ -2895,10 +4966,7 @@ object LlvmBackend {
         val lazy0 = args.headOption.getOrElse(Value.Undef(Type.Ptr))
         val lazyPtr = castValue(lazy0, Type.Ptr, fb)
 
-        val slot0Ptr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(slot0Ptr, Op.Gep(Type.I64, lazyPtr, Value.IntConst(0L, Type.I64)))
-        val expPayload = freshTmp(Type.I64)
-        fb.current.emitAssign(expPayload, Op.Load(Type.I64, slot0Ptr))
+        val expPayload = loadObjI64Slot(lazyPtr, Value.IntConst(0L, Type.I64), fb)
 
         val isForced = freshTmp(Type.I1)
         fb.current.emitAssign(isForced, Op.ICmp("eq", expPayload, Value.IntConst(0L, Type.I64)))
@@ -2915,10 +4983,7 @@ object LlvmBackend {
         // Already forced: load cached value.
         val forcedBlock = fb.newBlock(forcedLabel)
         fb.setCurrent(forcedBlock)
-        val slot1Ptr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(slot1Ptr, Op.Gep(Type.I64, lazyPtr, Value.IntConst(1L, Type.I64)))
-        val cachedPayload = freshTmp(Type.I64)
-        fb.current.emitAssign(cachedPayload, Op.Load(Type.I64, slot1Ptr))
+        val cachedPayload = loadObjI64Slot(lazyPtr, Value.IntConst(1L, Type.I64), fb)
         val cachedValue = unboxFromI64(cachedPayload, resultTpe, fb)
         if (!fb.current.isTerminated) {
           val v = coerceValue(cachedValue, joinTpe, fb)
@@ -2934,24 +4999,13 @@ object LlvmBackend {
         val cloPtr = freshTmp(Type.Ptr)
         fb.current.emitAssign(cloPtr, Op.Cast("inttoptr", Type.Ptr, expPayload))
 
-        // Load invoke pointer from closure slot 0.
-        val cloSlot0Ptr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(cloSlot0Ptr, Op.Gep(Type.I64, cloPtr, Value.IntConst(0L, Type.I64)))
-        val codeI64 = freshTmp(Type.I64)
-        fb.current.emitAssign(codeI64, Op.Load(Type.I64, cloSlot0Ptr))
-        val codePtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(codePtr, Op.Cast("inttoptr", Type.Ptr, codeI64))
-
         val callTmp = freshTmp(flixResultType)
-        fb.current.emitAssign(callTmp, Op.CallIndirect(flixResultType, codePtr, List(ctxPtr, cloPtr, Value.IntConst(0L, Type.I64))))
-        val payloadTmp = unwindThunkToValuePayload(callTmp, ctxPtr, fb)
+        fb.current.emitAssign(callTmp, Op.Call(flixResultType, "flix_invoke_thunk", List(ctxPtr, cloPtr, Value.IntConst(0L, Type.I64))))
+        val payloadTmp = unwindThunkToValuePayloadOrPropagateExn(callTmp, ctxPtr, fb, exnHandlerOpt)
 
         // Cache the value and mark as forced.
-        val slot1Ptr2 = freshTmp(Type.Ptr)
-        fb.current.emitAssign(slot1Ptr2, Op.Gep(Type.I64, lazyPtr, Value.IntConst(1L, Type.I64)))
-        fb.current.emitStore(payloadTmp, slot1Ptr2)
-
-        fb.current.emitStore(Value.IntConst(0L, Type.I64), slot0Ptr)
+        storeObjI64Slot(lazyPtr, Value.IntConst(1L, Type.I64), payloadTmp, fb)
+        storeObjI64Slot(lazyPtr, Value.IntConst(0L, Type.I64), Value.IntConst(0L, Type.I64), fb)
 
         val computedValue = unboxFromI64(payloadTmp, resultTpe, fb)
         if (!fb.current.isTerminated) {
@@ -2977,28 +5031,8 @@ object LlvmBackend {
         val cloPtr = castValue(clo0, Type.Ptr, fb)
         val rcPtr = castValue(rc0, Type.Ptr, fb)
 
-        // Bring-up: only support spawning in the Static region (represented as null).
-        val isStatic = freshTmp(Type.I1)
-        fb.current.emitAssign(isStatic, Op.ICmp("eq", rcPtr, Value.Null(Type.Ptr)))
-
-        val okLabel = freshLabel("spawn_ok")
-        val badLabel = freshLabel("spawn_bad")
-        val endLabel = freshLabel("spawn_end")
-        fb.current.setTerminator(Terminator.CondBr(isStatic, okLabel, badLabel))
-
-        val okBlock = fb.newBlock(okLabel)
-        fb.setCurrent(okBlock)
         val callTmp = freshTmp(Type.I64)
-        fb.current.emitAssign(callTmp, Op.Call(Type.I64, "flix_spawn", List(ctxPtr, cloPtr)))
-        fb.current.setTerminator(Terminator.Br(endLabel))
-
-        val badBlock = fb.newBlock(badLabel)
-        fb.setCurrent(badBlock)
-        fb.current.emitTrap()
-        fb.current.setTerminator(Terminator.Unreachable)
-
-        val endBlock = fb.newBlock(endLabel)
-        fb.setCurrent(endBlock)
+        fb.current.emitAssign(callTmp, Op.Call(Type.I64, "flix_spawn", List(ctxPtr, rcPtr, cloPtr)))
         Value.IntConst(0L, Type.I64)
 
       case AtomicOp.ChannelNew =>
@@ -3029,7 +5063,42 @@ object LlvmBackend {
         fb.current.emitAssign(payload, Op.Call(Type.I64, "flix_channel_get", List(chanPtr)))
         unboxFromI64(payload, resultTpe, fb)
 
-      case AtomicOp.HoleError(_) | AtomicOp.MatchError | AtomicOp.CastError(_, _) | AtomicOp.Throw =>
+      case AtomicOp.InvokeMethod(method) if method.getDeclaringClass.getName == "java.lang.String" && method.getName == "equals" =>
+        // String.equals(Object): in Flix this is used to implement string equality.
+        // If the argument is not a string we return false (matches JVM semantics).
+        val recv = args.headOption.getOrElse(Value.Undef(Type.Ptr))
+        argTpes.drop(1).headOption match {
+          case Some(SimpleType.String) =>
+            val other = args.drop(1).headOption.getOrElse(Value.Undef(Type.Ptr))
+            emitStringEquals(recv, other, fb)
+          case _ =>
+            Value.IntConst(0L, Type.I1)
+        }
+
+      case AtomicOp.Throw =>
+        val exnVal = args.headOption.getOrElse(Value.Undef(llvmTypeOf(SimpleType.Object)))
+        val exnTpe = argTpes.headOption.getOrElse(SimpleType.Object)
+        val payload0 = boxToI64(exnVal, exnTpe, fb)
+
+        // Attach a portable logical stack trace on first throw.
+        val exnPtr = castValue(payload0, Type.Ptr, fb)
+        val tracedExnPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tracedExnPtr, Op.Call(Type.Ptr, "flix_exn_with_trace", List(exnPtr)))
+        val payload = freshTmp(Type.I64)
+        fb.current.emitAssign(payload, Op.Cast("ptrtoint", Type.I64, tracedExnPtr))
+
+        exnHandlerOpt match {
+          case Some(ExnHandler(label, slotPtr)) =>
+            fb.current.emitStore(payload, slotPtr)
+            fb.current.setTerminator(Terminator.Br(label))
+            Value.Undef(llvmTypeOf(resultTpe))
+          case None =>
+            val r = packResultTagged(ResultTagException, payload, fb)
+            fb.current.setTerminator(Terminator.Ret(flixResultType, r))
+            Value.Undef(llvmTypeOf(resultTpe))
+        }
+
+      case AtomicOp.HoleError(_) | AtomicOp.MatchError | AtomicOp.CastError(_, _) =>
         fb.current.emitTrap()
         fb.current.setTerminator(Terminator.Unreachable)
         Value.Undef(llvmTypeOf(resultTpe))
@@ -3039,17 +5108,52 @@ object LlvmBackend {
         Value.IntConst(ExnKindId.of(tpe).toLong, Type.I32)
 
       case AtomicOp.Unary(sop) =>
-        emitUnary(sop, args.headOption.getOrElse(Value.Undef(llvmTypeOf(resultTpe))), fb)
+        emitUnary(sop, args.headOption.getOrElse(Value.Undef(llvmTypeOf(resultTpe))), ctxPtr, fb)
 
       case AtomicOp.Binary(sop) =>
         val a = args.headOption.getOrElse(Value.Undef(Type.I64))
         val b = args.drop(1).headOption.getOrElse(Value.Undef(Type.I64))
-        emitBinary(sop, a, b, fb)
+        emitBinary(sop, a, b, ctxPtr, fb)
 
       case AtomicOp.Box =>
-        val v = args.headOption.getOrElse(Value.Undef(Type.I64))
+        val v = args.headOption.getOrElse(Value.Undef(llvmTypeOf(argTpes.headOption.getOrElse(SimpleType.Object))))
         val tpe = argTpes.headOption.getOrElse(SimpleType.Object)
-        boxToI64(v, tpe, fb)
+        tpe match {
+          case SimpleType.Bool =>
+            val tmp = freshTmp(Type.I64)
+            fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_box_bool", List(castValue(v, Type.I1, fb))))
+            tmp
+          case SimpleType.Char =>
+            val tmp = freshTmp(Type.I64)
+            fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_box_char", List(castValue(v, Type.I32, fb))))
+            tmp
+          case SimpleType.Int8 =>
+            val tmp = freshTmp(Type.I64)
+            fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_box_int8", List(castValue(v, Type.I8, fb))))
+            tmp
+          case SimpleType.Int16 =>
+            val tmp = freshTmp(Type.I64)
+            fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_box_int16", List(castValue(v, Type.I16, fb))))
+            tmp
+          case SimpleType.Int32 =>
+            val tmp = freshTmp(Type.I64)
+            fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_box_int32", List(castValue(v, Type.I32, fb))))
+            tmp
+          case SimpleType.Int64 =>
+            val tmp = freshTmp(Type.I64)
+            fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_box_int64", List(castValue(v, Type.I64, fb))))
+            tmp
+          case SimpleType.Float32 =>
+            val tmp = freshTmp(Type.I64)
+            fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_box_float32", List(castValue(v, Type.Float, fb))))
+            tmp
+          case SimpleType.Float64 =>
+            val tmp = freshTmp(Type.I64)
+            fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_box_float64", List(castValue(v, Type.Double, fb))))
+            tmp
+          case _ =>
+            boxToI64(v, tpe, fb)
+        }
 
       case AtomicOp.Unbox =>
         val payload = args.headOption.getOrElse(Value.Undef(Type.I64))
@@ -3067,7 +5171,43 @@ object LlvmBackend {
             fb.current.emitTrap()
             Value.Undef(Type.I64)
         }
-        unboxFromI64(i64Payload, resultTpe, fb)
+        resultTpe match {
+          case SimpleType.Bool =>
+            val tmp = freshTmp(Type.I64)
+            fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_unbox_bool", List(i64Payload)))
+            unboxFromI64(tmp, resultTpe, fb)
+          case SimpleType.Char =>
+            val tmp = freshTmp(Type.I64)
+            fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_unbox_char", List(i64Payload)))
+            unboxFromI64(tmp, resultTpe, fb)
+          case SimpleType.Int8 =>
+            val tmp = freshTmp(Type.I64)
+            fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_unbox_int8", List(i64Payload)))
+            unboxFromI64(tmp, resultTpe, fb)
+          case SimpleType.Int16 =>
+            val tmp = freshTmp(Type.I64)
+            fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_unbox_int16", List(i64Payload)))
+            unboxFromI64(tmp, resultTpe, fb)
+          case SimpleType.Int32 =>
+            val tmp = freshTmp(Type.I64)
+            fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_unbox_int32", List(i64Payload)))
+            unboxFromI64(tmp, resultTpe, fb)
+          case SimpleType.Int64 =>
+            val tmp = freshTmp(Type.I64)
+            fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_unbox_int64", List(i64Payload)))
+            unboxFromI64(tmp, resultTpe, fb)
+          case SimpleType.Float32 =>
+            val tmp = freshTmp(Type.I64)
+            fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_unbox_float32", List(i64Payload)))
+            unboxFromI64(tmp, resultTpe, fb)
+          case SimpleType.Float64 =>
+            val tmp = freshTmp(Type.I64)
+            fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_unbox_float64", List(i64Payload)))
+            unboxFromI64(tmp, resultTpe, fb)
+          case _ =>
+            // Unboxing a non-primitive is an erased cast: interpret the bits as the expected value.
+            unboxFromI64(i64Payload, resultTpe, fb)
+        }
 
       case AtomicOp.Cast =>
         val v = args.headOption.getOrElse(Value.Undef(llvmTypeOf(resultTpe)))
@@ -3079,77 +5219,86 @@ object LlvmBackend {
         Value.Undef(llvmTypeOf(resultTpe))
     }
 
-    private def emitUnary(op: UnaryOp, x: Value, fb: FunBuilder): Value = op match {
+    private def emitUnary(op: UnaryOp, x: Value, ctxPtr: Value, fb: FunBuilder): Value = op match {
       case SemanticOp.BoolOp.Not =>
         val tmp = freshTmp(Type.I1)
         fb.current.emitAssign(tmp, Op.Bin("xor", Type.I1, x, Value.IntConst(1L, Type.I1)))
         tmp
 
       case SemanticOp.CharOp.ToUpperCase =>
-        val geA = freshTmp(Type.I1)
-        fb.current.emitAssign(geA, Op.ICmp("uge", x, Value.IntConst(97L, Type.I32))) // 'a'
-        val leZ = freshTmp(Type.I1)
-        fb.current.emitAssign(leZ, Op.ICmp("ule", x, Value.IntConst(122L, Type.I32))) // 'z'
-        val isLower = freshTmp(Type.I1)
-        fb.current.emitAssign(isLower, Op.Bin("and", Type.I1, geA, leZ))
-
-        val yesLabel = freshLabel("ctoupper_yes")
-        val noLabel = freshLabel("ctoupper_no")
-        val endLabel = freshLabel("ctoupper_end")
-        fb.current.setTerminator(Terminator.CondBr(isLower, yesLabel, noLabel))
-
-        val incomings = mutable.ArrayBuffer.empty[(Value, String)]
-
-        val yesBlock = fb.newBlock(yesLabel)
-        fb.setCurrent(yesBlock)
-        val upper = freshTmp(Type.I32)
-        fb.current.emitAssign(upper, Op.Bin("sub", Type.I32, x, Value.IntConst(32L, Type.I32)))
-        fb.current.setTerminator(Terminator.Br(endLabel))
-        incomings.addOne((upper, yesLabel))
-
-        val noBlock = fb.newBlock(noLabel)
-        fb.setCurrent(noBlock)
-        fb.current.setTerminator(Terminator.Br(endLabel))
-        incomings.addOne((x, noLabel))
-
-        val endBlock = fb.newBlock(endLabel)
-        fb.setCurrent(endBlock)
-        val phi = freshTmp(Type.I32)
-        endBlock.emitPhi(phi, incomings.toList)
-        phi
+        val tmp = freshTmp(Type.I32)
+        fb.current.emitAssign(tmp, Op.Call(Type.I32, "flix_char_to_upper_case", List(x)))
+        tmp
 
       case SemanticOp.CharOp.ToLowerCase =>
-        val geA = freshTmp(Type.I1)
-        fb.current.emitAssign(geA, Op.ICmp("uge", x, Value.IntConst(65L, Type.I32))) // 'A'
-        val leZ = freshTmp(Type.I1)
-        fb.current.emitAssign(leZ, Op.ICmp("ule", x, Value.IntConst(90L, Type.I32))) // 'Z'
-        val isUpper = freshTmp(Type.I1)
-        fb.current.emitAssign(isUpper, Op.Bin("and", Type.I1, geA, leZ))
+        val tmp = freshTmp(Type.I32)
+        fb.current.emitAssign(tmp, Op.Call(Type.I32, "flix_char_to_lower_case", List(x)))
+        tmp
 
-        val yesLabel = freshLabel("ctolower_yes")
-        val noLabel = freshLabel("ctolower_no")
-        val endLabel = freshLabel("ctolower_end")
-        fb.current.setTerminator(Terminator.CondBr(isUpper, yesLabel, noLabel))
+      case SemanticOp.CharOp.ToTitleCase =>
+        val tmp = freshTmp(Type.I32)
+        fb.current.emitAssign(tmp, Op.Call(Type.I32, "flix_char_to_title_case", List(x)))
+        tmp
 
-        val incomings = mutable.ArrayBuffer.empty[(Value, String)]
+      case SemanticOp.CharOp.IsLetter =>
+        val tmp = freshTmp(Type.I1)
+        fb.current.emitAssign(tmp, Op.Call(Type.I1, "flix_char_is_letter", List(x)))
+        tmp
 
-        val yesBlock = fb.newBlock(yesLabel)
-        fb.setCurrent(yesBlock)
-        val lower = freshTmp(Type.I32)
-        fb.current.emitAssign(lower, Op.Bin("add", Type.I32, x, Value.IntConst(32L, Type.I32)))
-        fb.current.setTerminator(Terminator.Br(endLabel))
-        incomings.addOne((lower, yesLabel))
+      case SemanticOp.CharOp.IsDigit =>
+        val tmp = freshTmp(Type.I1)
+        fb.current.emitAssign(tmp, Op.Call(Type.I1, "flix_char_is_digit", List(x)))
+        tmp
 
-        val noBlock = fb.newBlock(noLabel)
-        fb.setCurrent(noBlock)
-        fb.current.setTerminator(Terminator.Br(endLabel))
-        incomings.addOne((x, noLabel))
+      case SemanticOp.CharOp.IsLetterOrDigit =>
+        val tmp = freshTmp(Type.I1)
+        fb.current.emitAssign(tmp, Op.Call(Type.I1, "flix_char_is_letter_or_digit", List(x)))
+        tmp
 
-        val endBlock = fb.newBlock(endLabel)
-        fb.setCurrent(endBlock)
-        val phi = freshTmp(Type.I32)
-        endBlock.emitPhi(phi, incomings.toList)
-        phi
+      case SemanticOp.CharOp.IsLowerCase =>
+        val tmp = freshTmp(Type.I1)
+        fb.current.emitAssign(tmp, Op.Call(Type.I1, "flix_char_is_lower_case", List(x)))
+        tmp
+
+      case SemanticOp.CharOp.IsUpperCase =>
+        val tmp = freshTmp(Type.I1)
+        fb.current.emitAssign(tmp, Op.Call(Type.I1, "flix_char_is_upper_case", List(x)))
+        tmp
+
+      case SemanticOp.CharOp.IsTitleCase =>
+        val tmp = freshTmp(Type.I1)
+        fb.current.emitAssign(tmp, Op.Call(Type.I1, "flix_char_is_title_case", List(x)))
+        tmp
+
+      case SemanticOp.CharOp.IsWhitespace =>
+        val tmp = freshTmp(Type.I1)
+        fb.current.emitAssign(tmp, Op.Call(Type.I1, "flix_char_is_whitespace", List(x)))
+        tmp
+
+      case SemanticOp.CharOp.IsDefined =>
+        val tmp = freshTmp(Type.I1)
+        fb.current.emitAssign(tmp, Op.Call(Type.I1, "flix_char_is_defined", List(x)))
+        tmp
+
+      case SemanticOp.CharOp.IsISOControl =>
+        val tmp = freshTmp(Type.I1)
+        fb.current.emitAssign(tmp, Op.Call(Type.I1, "flix_char_is_iso_control", List(x)))
+        tmp
+
+      case SemanticOp.CharOp.IsMirrored =>
+        val tmp = freshTmp(Type.I1)
+        fb.current.emitAssign(tmp, Op.Call(Type.I1, "flix_char_is_mirrored", List(x)))
+        tmp
+
+      case SemanticOp.CharOp.IsSurrogate =>
+        val tmp = freshTmp(Type.I1)
+        fb.current.emitAssign(tmp, Op.Call(Type.I1, "flix_char_is_surrogate", List(x)))
+        tmp
+
+      case SemanticOp.CharOp.GetNumericValue =>
+        val tmp = freshTmp(Type.I32)
+        fb.current.emitAssign(tmp, Op.Call(Type.I32, "flix_char_get_numeric_value", List(x)))
+        tmp
 
       case SemanticOp.Int8Op.Neg =>
         val tmp = freshTmp(Type.I8)
@@ -3360,13 +5509,13 @@ object LlvmBackend {
         tmp
 
       case SemanticOp.PlatformOp.FileSeparator =>
-        emitConstant(Constant.Str(java.io.File.separator), fb)
+        emitConstant(Constant.Str(java.io.File.separator), ctxPtr, fb)
 
       case SemanticOp.PlatformOp.PathSeparator =>
-        emitConstant(Constant.Str(java.io.File.pathSeparator), fb)
+        emitConstant(Constant.Str(java.io.File.pathSeparator), ctxPtr, fb)
 
       case SemanticOp.PlatformOp.LineSeparator =>
-        emitConstant(Constant.Str(System.lineSeparator()), fb)
+        emitConstant(Constant.Str(System.lineSeparator()), ctxPtr, fb)
 
       case SemanticOp.ObjectOp.IsNull =>
         val asI64 = castValue(x, Type.I64, fb)
@@ -3446,11 +5595,12 @@ object LlvmBackend {
         tmp
 
       case SemanticOp.RegexOp.NewMatcher =>
-        // Argument: (rc, rgx, input). rc ignored for bring-up.
+        // Argument: (rc, rgx, input).
+        val rcPtr = castValue(loadTupleElement(x, 0L, SimpleType.Region, fb), Type.Ptr, fb)
         val rgx = loadTupleElement(x, 1L, SimpleType.Regex, fb)
         val in = loadTupleElement(x, 2L, SimpleType.String, fb)
         val tmp = freshTmp(Type.Ptr)
-        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_regex_new_matcher", List(rgx, in)))
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_regex_new_matcher", List(ctxPtr, rcPtr, rgx, in)))
         tmp
 
       case SemanticOp.RegexOp.MatcherMatches =>
@@ -3499,12 +5649,13 @@ object LlvmBackend {
         tmp
 
       case SemanticOp.RegexOp.MatcherSetBounds =>
-        // Argument: (rc, matcher, start, end). rc ignored for bring-up.
+        // Argument: (rc, matcher, start, end).
+        val rcPtr = castValue(loadTupleElement(x, 0L, SimpleType.Region, fb), Type.Ptr, fb)
         val m = loadTupleElement(x, 1L, SimpleType.RegexMatcher, fb)
         val start = loadTupleElement(x, 2L, SimpleType.Int32, fb)
         val end = loadTupleElement(x, 3L, SimpleType.Int32, fb)
         val tmp = freshTmp(Type.I64)
-        fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_regex_matcher_set_bounds", List(m, start, end)))
+        fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_regex_matcher_set_bounds", List(ctxPtr, rcPtr, m, start, end)))
         tmp
 
       case SemanticOp.RegexOp.MatcherStart =>
@@ -3537,24 +5688,25 @@ object LlvmBackend {
         tmp
 
       case SemanticOp.RegexOp.Split =>
-        // Argument: (rc, rgx, input). rc ignored for bring-up.
+        // Argument: (rc, rgx, input).
+        val rcPtr = castValue(loadTupleElement(x, 0L, SimpleType.Region, fb), Type.Ptr, fb)
         val rgx = loadTupleElement(x, 1L, SimpleType.Regex, fb)
         val in = loadTupleElement(x, 2L, SimpleType.String, fb)
         val tmp = freshTmp(Type.Ptr)
-        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_regex_split", List(rgx, in)))
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_regex_split", List(ctxPtr, rcPtr, rgx, in)))
         tmp
 
       case SemanticOp.ToStringOp.CharToString =>
-        emitCharToString(x, fb)
+        emitCharToString(x, ctxPtr, fb)
 
       case SemanticOp.ToStringOp.Int8ToString =>
-        emitIntToStringNoMin(castValue(x, Type.I64, fb), fb)
+        emitIntToStringNoMin(castValue(x, Type.I64, fb), ctxPtr, fb)
 
       case SemanticOp.ToStringOp.Int16ToString =>
-        emitIntToStringNoMin(castValue(x, Type.I64, fb), fb)
+        emitIntToStringNoMin(castValue(x, Type.I64, fb), ctxPtr, fb)
 
       case SemanticOp.ToStringOp.Int32ToString =>
-        emitIntToStringNoMin(castValue(x, Type.I64, fb), fb)
+        emitIntToStringNoMin(castValue(x, Type.I64, fb), ctxPtr, fb)
 
       case SemanticOp.ToStringOp.Int64ToString =>
         val xi64 = castValue(x, Type.I64, fb)
@@ -3571,13 +5723,13 @@ object LlvmBackend {
 
         val minBlock = fb.newBlock(minLabel)
         fb.setCurrent(minBlock)
-        val minStr = emitConstant(Constant.Str("-9223372036854775808"), fb)
+        val minStr = emitConstant(Constant.Str("-9223372036854775808"), ctxPtr, fb)
         fb.current.setTerminator(Terminator.Br(endLabel))
         incomings.addOne((minStr, minLabel))
 
         val notBlock = fb.newBlock(notLabel)
         fb.setCurrent(notBlock)
-        val s = emitIntToStringNoMin(xi64, fb)
+        val s = emitIntToStringNoMin(xi64, ctxPtr, fb)
         fb.current.setTerminator(Terminator.Br(endLabel))
         incomings.addOne((s, notLabel))
 
@@ -3598,13 +5750,13 @@ object LlvmBackend {
         tmp
 
       case SemanticOp.StringBuilderOp.New =>
-        emitStringBuilderNew(x, fb)
+        emitStringBuilderNew(ctxPtr, x, fb)
 
       case SemanticOp.StringBuilderOp.AppendString =>
-        emitStringBuilderAppendString(x, fb)
+        emitStringBuilderAppendString(ctxPtr, x, fb)
 
       case SemanticOp.StringBuilderOp.AppendCodePoint =>
-        emitStringBuilderAppendCodePoint(x, fb)
+        emitStringBuilderAppendCodePoint(ctxPtr, x, fb)
 
       case SemanticOp.StringBuilderOp.CharAt =>
         emitStringBuilderCharAt(x, fb)
@@ -3613,48 +5765,53 @@ object LlvmBackend {
         emitStringBuilderLength(x, fb)
 
       case SemanticOp.StringBuilderOp.SetLength =>
-        emitStringBuilderSetLength(x, fb)
+        emitStringBuilderSetLength(ctxPtr, x, fb)
 
       case SemanticOp.StringBuilderOp.ToString =>
-        emitStringBuilderToString(x, fb)
+        emitStringBuilderToString(ctxPtr, x, fb)
 
       case SemanticOp.ParseOp.Int8FromString =>
-        emitParseIntTuple(x, Value.IntConst(10L, Type.I64), -128L, 127L, fb)
+        emitParseIntTuple(x, Value.IntConst(10L, Type.I64), -128L, 127L, SimpleType.Int8, ctxPtr, fb)
 
       case SemanticOp.ParseOp.Int16FromString =>
-        emitParseIntTuple(x, Value.IntConst(10L, Type.I64), -32768L, 32767L, fb)
+        emitParseIntTuple(x, Value.IntConst(10L, Type.I64), -32768L, 32767L, SimpleType.Int16, ctxPtr, fb)
 
       case SemanticOp.ParseOp.Int32FromString =>
-        emitParseIntTuple(x, Value.IntConst(10L, Type.I64), Int.MinValue.toLong, Int.MaxValue.toLong, fb)
+        emitParseIntTuple(x, Value.IntConst(10L, Type.I64), Int.MinValue.toLong, Int.MaxValue.toLong, SimpleType.Int32, ctxPtr, fb)
 
       case SemanticOp.ParseOp.Int64FromString =>
-        emitParseIntTuple(x, Value.IntConst(10L, Type.I64), Long.MinValue, Long.MaxValue, fb)
+        emitParseIntTuple(x, Value.IntConst(10L, Type.I64), Long.MinValue, Long.MaxValue, SimpleType.Int64, ctxPtr, fb)
 
       case SemanticOp.ParseOp.Int32Parse =>
         val radixI64 = castValue(loadTupleElement(x, 0, SimpleType.Int32, fb), Type.I64, fb)
         val sPtr = loadTupleElement(x, 1, SimpleType.String, fb)
-        emitParseIntTuple(sPtr, radixI64, Int.MinValue.toLong, Int.MaxValue.toLong, fb)
+        emitParseIntTuple(sPtr, radixI64, Int.MinValue.toLong, Int.MaxValue.toLong, SimpleType.Int32, ctxPtr, fb)
 
       case SemanticOp.ParseOp.Int64Parse =>
         val radixI64 = castValue(loadTupleElement(x, 0, SimpleType.Int32, fb), Type.I64, fb)
         val sPtr = loadTupleElement(x, 1, SimpleType.String, fb)
-        emitParseIntTuple(sPtr, radixI64, Long.MinValue, Long.MaxValue, fb)
+        emitParseIntTuple(sPtr, radixI64, Long.MinValue, Long.MaxValue, SimpleType.Int64, ctxPtr, fb)
 
       case SemanticOp.ParseOp.Float32FromString =>
-        emitParseFloatTuple(x, is32 = true, fb)
+        emitParseFloatTuple(x, is32 = true, ctxPtr, fb)
 
       case SemanticOp.ParseOp.Float64FromString =>
-        emitParseFloatTuple(x, is32 = false, fb)
+        emitParseFloatTuple(x, is32 = false, ctxPtr, fb)
 
       case SemanticOp.StringOp.Length =>
-        val strPtr = castValue(x, Type.Ptr, fb)
-        val lenPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(lenPtr, Op.Gep(Type.I64, strPtr, Value.IntConst(0L, Type.I64)))
-        val lenI64 = freshTmp(Type.I64)
-        fb.current.emitAssign(lenI64, Op.Load(Type.I64, lenPtr))
-        val lenI32 = freshTmp(Type.I32)
-        fb.current.emitAssign(lenI32, Op.Cast("trunc", Type.I32, lenI64))
-        lenI32
+        stringLenI32(x, fb)
+
+      case SemanticOp.StringOp.ToLowerCase =>
+        val inPtr = castValue(x, Type.Ptr, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_string_to_lower_case", List(ctxPtr, inPtr)))
+        tmp
+
+      case SemanticOp.StringOp.ToUpperCase =>
+        val inPtr = castValue(x, Type.Ptr, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_string_to_upper_case", List(ctxPtr, inPtr)))
+        tmp
 
       case SemanticOp.HashOp.CharHash =>
         val tmp = freshTmp(Type.I32)
@@ -3758,11 +5915,7 @@ object LlvmBackend {
 
       case SemanticOp.HashOp.StringHash =>
         val strPtr = castValue(x, Type.Ptr, fb)
-
-        val lenPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(lenPtr, Op.Gep(Type.I64, strPtr, Value.IntConst(0L, Type.I64)))
-        val lenI64 = freshTmp(Type.I64)
-        fb.current.emitAssign(lenI64, Op.Load(Type.I64, lenPtr))
+        val lenI64 = stringLenI64(strPtr, fb)
 
         val iPtr = freshTmp(Type.Ptr)
         fb.current.emitAssign(iPtr, Op.Alloca(Type.I64))
@@ -3788,12 +5941,7 @@ object LlvmBackend {
 
         val bodyBlock = fb.newBlock(bodyLabel)
         fb.setCurrent(bodyBlock)
-        val slotIdx = freshTmp(Type.I64)
-        fb.current.emitAssign(slotIdx, Op.Bin("add", Type.I64, iVal, Value.IntConst(1L, Type.I64)))
-        val slotPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, strPtr, slotIdx))
-        val payload = freshTmp(Type.I64)
-        fb.current.emitAssign(payload, Op.Load(Type.I64, slotPtr))
+        val payload = stringCharPayloadI64(strPtr, iVal, fb)
         val ch = freshTmp(Type.I32)
         fb.current.emitAssign(ch, Op.Cast("trunc", Type.I32, payload))
 
@@ -3864,6 +6012,151 @@ object LlvmBackend {
         fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_new_id", List(unit)))
         tmp
 
+      case SemanticOp.IoOp.FileExists =>
+        val path = castValue(x, Type.Ptr, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_file_exists", List(path)))
+        tmp
+
+      case SemanticOp.IoOp.FileIsDirectory =>
+        val path = castValue(x, Type.Ptr, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_file_is_directory", List(path)))
+        tmp
+
+      case SemanticOp.IoOp.FileIsRegularFile =>
+        val path = castValue(x, Type.Ptr, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_file_is_regular_file", List(path)))
+        tmp
+
+      case SemanticOp.IoOp.FileIsReadable =>
+        val path = castValue(x, Type.Ptr, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_file_is_readable", List(path)))
+        tmp
+
+      case SemanticOp.IoOp.FileIsSymbolicLink =>
+        val path = castValue(x, Type.Ptr, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_file_is_symbolic_link", List(path)))
+        tmp
+
+      case SemanticOp.IoOp.FileIsWritable =>
+        val path = castValue(x, Type.Ptr, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_file_is_writable", List(path)))
+        tmp
+
+      case SemanticOp.IoOp.FileIsExecutable =>
+        val path = castValue(x, Type.Ptr, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_file_is_executable", List(path)))
+        tmp
+
+      case SemanticOp.IoOp.FileAccessTime =>
+        val path = castValue(x, Type.Ptr, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_file_access_time", List(path)))
+        tmp
+
+      case SemanticOp.IoOp.FileCreationTime =>
+        val path = castValue(x, Type.Ptr, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_file_creation_time", List(path)))
+        tmp
+
+      case SemanticOp.IoOp.FileModificationTime =>
+        val path = castValue(x, Type.Ptr, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_file_modification_time", List(path)))
+        tmp
+
+      case SemanticOp.IoOp.FileSize =>
+        val path = castValue(x, Type.Ptr, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_file_size", List(path)))
+        tmp
+
+      case SemanticOp.IoOp.FileRead =>
+        val path = castValue(x, Type.Ptr, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_file_read", List(path)))
+        tmp
+
+      case SemanticOp.IoOp.FileReadLines =>
+        val rc = loadTupleElement(x, 0L, SimpleType.Region, fb)
+        val path = loadTupleElement(x, 1L, SimpleType.String, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_file_read_lines", List(ctxPtr, rc, path)))
+        tmp
+
+      case SemanticOp.IoOp.FileReadBytes =>
+        val rc = loadTupleElement(x, 0L, SimpleType.Region, fb)
+        val path = loadTupleElement(x, 1L, SimpleType.String, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_file_read_bytes", List(ctxPtr, rc, path)))
+        tmp
+
+      case SemanticOp.IoOp.FileList =>
+        val rc = loadTupleElement(x, 0L, SimpleType.Region, fb)
+        val path = loadTupleElement(x, 1L, SimpleType.String, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_file_list", List(ctxPtr, rc, path)))
+        tmp
+
+      case SemanticOp.IoOp.FileWrite =>
+        val data = loadTupleElement(x, 0L, SimpleType.String, fb)
+        val path = loadTupleElement(x, 1L, SimpleType.String, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_file_write", List(data, path)))
+        tmp
+
+      case SemanticOp.IoOp.FileWriteBytes =>
+        val bytes = loadTupleElement(x, 0L, SimpleType.Array(SimpleType.Int8), fb)
+        val path = loadTupleElement(x, 1L, SimpleType.String, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_file_write_bytes", List(bytes, path)))
+        tmp
+
+      case SemanticOp.IoOp.FileAppend =>
+        val data = loadTupleElement(x, 0L, SimpleType.String, fb)
+        val path = loadTupleElement(x, 1L, SimpleType.String, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_file_append", List(data, path)))
+        tmp
+
+      case SemanticOp.IoOp.FileAppendBytes =>
+        val bytes = loadTupleElement(x, 0L, SimpleType.Array(SimpleType.Int8), fb)
+        val path = loadTupleElement(x, 1L, SimpleType.String, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_file_append_bytes", List(bytes, path)))
+        tmp
+
+      case SemanticOp.IoOp.FileTruncate =>
+        val path = castValue(x, Type.Ptr, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_file_truncate", List(path)))
+        tmp
+
+      case SemanticOp.IoOp.FileMkDir =>
+        val path = castValue(x, Type.Ptr, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_file_mkdir", List(path)))
+        tmp
+
+      case SemanticOp.IoOp.FileMkDirs =>
+        val path = castValue(x, Type.Ptr, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_file_mkdirs", List(path)))
+        tmp
+
+      case SemanticOp.IoOp.FileMkTempDir =>
+        val prefix = castValue(x, Type.Ptr, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_file_mk_temp_dir", List(prefix)))
+        tmp
+
       case SemanticOp.IoOp.TcpSocketRead =>
         val id = loadTupleElement(x, 0L, SimpleType.Int64, fb)
         val buf = loadTupleElement(x, 1L, SimpleType.Array(SimpleType.Int8), fb)
@@ -3896,6 +6189,12 @@ object LlvmBackend {
         val port = loadTupleElement(x, 1L, SimpleType.Int32, fb)
         val tmp = freshTmp(Type.Ptr)
         fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_tcp_server_bind", List(ipBytes, port)))
+        tmp
+
+      case SemanticOp.IoOp.TcpServerLocalPort =>
+        val id = castValue(x, Type.I64, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_tcp_server_local_port", List(id)))
         tmp
 
       case SemanticOp.IoOp.TcpServerAccept =>
@@ -3990,19 +6289,19 @@ object LlvmBackend {
         val hasBody = loadTupleElement(x, 3L, SimpleType.Bool, fb)
         val body = loadTupleElement(x, 4L, SimpleType.String, fb)
         val tmp = freshTmp(Type.Ptr)
-        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_http_request", List(method, url, headers, hasBody, body)))
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_http_request", List(ctxPtr, method, url, headers, hasBody, body)))
         tmp
 
       case SemanticOp.IoOp.EnvGetArgs =>
         val region = castValue(x, Type.Ptr, fb)
         val tmp = freshTmp(Type.Ptr)
-        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_env_get_args", List(region)))
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_env_get_args", List(ctxPtr, region)))
         tmp
 
       case SemanticOp.IoOp.EnvGetEnvPairs =>
         val region = castValue(x, Type.Ptr, fb)
         val tmp = freshTmp(Type.Ptr)
-        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_env_get_env_pairs", List(region)))
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_env_get_env_pairs", List(ctxPtr, region)))
         tmp
 
       case SemanticOp.IoOp.EnvGetVar =>
@@ -4028,14 +6327,14 @@ object LlvmBackend {
         Value.Undef(x.tpe)
     }
 
-    private def emitCharToString(ch: Value, fb: FunBuilder): Value = {
+    private def emitCharToString(ch: Value, ctxPtr: Value, fb: FunBuilder): Value = {
       val payload = boxToI64(ch, SimpleType.Char, fb)
-      val strPtr = allocString(Value.IntConst(1L, Type.I64), fb)
-      storeI64Slot(strPtr, Value.IntConst(1L, Type.I64), payload, fb)
+      val strPtr = allocString(Value.IntConst(1L, Type.I64), ctxPtr, fb)
+      storeStringCharPayload(strPtr, Value.IntConst(0L, Type.I64), payload, fb)
       strPtr
     }
 
-    private def emitIntToStringNoMin(xI64: Value, fb: FunBuilder): Value = {
+    private def emitIntToStringNoMin(xI64: Value, ctxPtr: Value, fb: FunBuilder): Value = {
       val isNeg = freshTmp(Type.I1)
       fb.current.emitAssign(isNeg, Op.ICmp("slt", xI64, Value.IntConst(0L, Type.I64)))
 
@@ -4110,7 +6409,7 @@ object LlvmBackend {
       val totalLen = freshTmp(Type.I64)
       fb.current.emitAssign(totalLen, Op.Bin("add", Type.I64, digits, signOffset))
 
-      val strPtr = allocString(totalLen, fb)
+      val strPtr = allocString(totalLen, ctxPtr, fb)
 
       // Fill digits from the end.
       val kPtr = freshTmp(Type.Ptr)
@@ -4149,9 +6448,7 @@ object LlvmBackend {
       val ch = freshTmp(Type.I64)
       fb.current.emitAssign(ch, Op.Bin("add", Type.I64, digit, Value.IntConst(48L, Type.I64)))
 
-      val slotIdx = freshTmp(Type.I64)
-      fb.current.emitAssign(slotIdx, Op.Bin("add", Type.I64, kVal, Value.IntConst(1L, Type.I64)))
-      storeI64Slot(strPtr, slotIdx, ch, fb)
+      storeStringCharPayload(strPtr, kVal, ch, fb)
 
       val kNext = freshTmp(Type.I64)
       fb.current.emitAssign(kNext, Op.Bin("sub", Type.I64, kVal, Value.IntConst(1L, Type.I64)))
@@ -4167,7 +6464,7 @@ object LlvmBackend {
 
       val signBlock = fb.newBlock(signLabel)
       fb.setCurrent(signBlock)
-      storeI64Slot(strPtr, Value.IntConst(1L, Type.I64), Value.IntConst(45L, Type.I64), fb) // '-'
+      storeStringCharPayload(strPtr, Value.IntConst(0L, Type.I64), Value.IntConst(45L, Type.I64), fb) // '-'
       fb.current.setTerminator(Terminator.Br(endLabel))
 
       val endBlock = fb.newBlock(endLabel)
@@ -4198,7 +6495,7 @@ object LlvmBackend {
       storeI64Slot(sbPtr0, Value.IntConst(2L, Type.I64), bits, fb)
     }
 
-    private def sbEnsureCapacity(sbPtr0: Value, neededLenI64: Value, fb: FunBuilder): Unit = {
+    private def sbEnsureCapacity(ctxPtr: Value, rcPtr: Value, sbPtr0: Value, neededLenI64: Value, fb: FunBuilder): Unit = {
       val sbPtr = castValue(sbPtr0, Type.Ptr, fb)
       val cap = sbCapI64(sbPtr, fb)
       val enough = freshTmp(Type.I1)
@@ -4249,7 +6546,7 @@ object LlvmBackend {
       val sizeBytes = freshTmp(Type.I64)
       fb.current.emitAssign(sizeBytes, Op.Bin("mul", Type.I64, newCap, Value.IntConst(8L, Type.I64)))
       val newBuf = freshTmp(Type.Ptr)
-      fb.current.emitAssign(newBuf, Op.Call(Type.Ptr, "malloc", List(sizeBytes)))
+      fb.current.emitAssign(newBuf, Op.Call(Type.Ptr, "flix_region_malloc", List(ctxPtr, rcPtr, sizeBytes)))
 
       // Copy existing data.
       val oldBuf = sbDataPtr(sbPtr, fb)
@@ -4294,16 +6591,18 @@ object LlvmBackend {
       fb.setCurrent(endBlock)
     }
 
-    private def emitStringBuilderNew(_rc: Value, fb: FunBuilder): Value = {
+    private def emitStringBuilderNew(ctxPtr: Value, rc0: Value, fb: FunBuilder): Value = {
+      val rcPtr = castValue(rc0, Type.Ptr, fb)
+
       // Layout: [0]=len (i64), [1]=cap (i64), [2]=dataPtr bits (i64).
       val handlePtr = freshTmp(Type.Ptr)
-      fb.current.emitAssign(handlePtr, Op.Call(Type.Ptr, "malloc", List(Value.IntConst(24L, Type.I64))))
+      fb.current.emitAssign(handlePtr, Op.Call(Type.Ptr, "flix_region_malloc", List(ctxPtr, rcPtr, Value.IntConst(24L, Type.I64))))
 
       val initCap = Value.IntConst(16L, Type.I64)
       val bufBytes = freshTmp(Type.I64)
       fb.current.emitAssign(bufBytes, Op.Bin("mul", Type.I64, initCap, Value.IntConst(8L, Type.I64)))
       val bufPtr = freshTmp(Type.Ptr)
-      fb.current.emitAssign(bufPtr, Op.Call(Type.Ptr, "malloc", List(bufBytes)))
+      fb.current.emitAssign(bufPtr, Op.Call(Type.Ptr, "flix_region_malloc", List(ctxPtr, rcPtr, bufBytes)))
 
       sbStoreLen(handlePtr, Value.IntConst(0L, Type.I64), fb)
       sbStoreCap(handlePtr, initCap, fb)
@@ -4311,7 +6610,8 @@ object LlvmBackend {
       handlePtr
     }
 
-    private def emitStringBuilderAppendString(argsTuple: Value, fb: FunBuilder): Value = {
+    private def emitStringBuilderAppendString(ctxPtr: Value, argsTuple: Value, fb: FunBuilder): Value = {
+      val rcPtr = castValue(loadTupleElement(argsTuple, 0, SimpleType.Region, fb), Type.Ptr, fb)
       val sbPtr = loadTupleElement(argsTuple, 1, SimpleType.StringBuilderHandle, fb)
       val sPtr = loadTupleElement(argsTuple, 2, SimpleType.String, fb)
 
@@ -4321,7 +6621,7 @@ object LlvmBackend {
       val newLen = freshTmp(Type.I64)
       fb.current.emitAssign(newLen, Op.Bin("add", Type.I64, sbLen, sLen))
 
-      sbEnsureCapacity(sbPtr, newLen, fb)
+      sbEnsureCapacity(ctxPtr, rcPtr, sbPtr, newLen, fb)
 
       val dataPtr = sbDataPtr(sbPtr, fb)
 
@@ -4359,7 +6659,8 @@ object LlvmBackend {
       Value.IntConst(0L, Type.I64)
     }
 
-    private def emitStringBuilderAppendCodePoint(argsTuple: Value, fb: FunBuilder): Value = {
+    private def emitStringBuilderAppendCodePoint(ctxPtr: Value, argsTuple: Value, fb: FunBuilder): Value = {
+      val rcPtr = castValue(loadTupleElement(argsTuple, 0, SimpleType.Region, fb), Type.Ptr, fb)
       val sbPtr = loadTupleElement(argsTuple, 1, SimpleType.StringBuilderHandle, fb)
       val cpI64 = castValue(loadTupleElement(argsTuple, 2, SimpleType.Int32, fb), Type.I64, fb)
 
@@ -4395,7 +6696,7 @@ object LlvmBackend {
       fb.setCurrent(oneBlock)
       val newLen1 = freshTmp(Type.I64)
       fb.current.emitAssign(newLen1, Op.Bin("add", Type.I64, sbLen, Value.IntConst(1L, Type.I64)))
-      sbEnsureCapacity(sbPtr, newLen1, fb)
+      sbEnsureCapacity(ctxPtr, rcPtr, sbPtr, newLen1, fb)
       val dataPtr1 = sbDataPtr(sbPtr, fb)
       storeI64Slot(dataPtr1, sbLen, cpI64, fb)
       sbStoreLen(sbPtr, newLen1, fb)
@@ -4405,7 +6706,7 @@ object LlvmBackend {
       fb.setCurrent(twoBlock)
       val newLen2 = freshTmp(Type.I64)
       fb.current.emitAssign(newLen2, Op.Bin("add", Type.I64, sbLen, Value.IntConst(2L, Type.I64)))
-      sbEnsureCapacity(sbPtr, newLen2, fb)
+      sbEnsureCapacity(ctxPtr, rcPtr, sbPtr, newLen2, fb)
       val dataPtr2 = sbDataPtr(sbPtr, fb)
 
       val cpPrime = freshTmp(Type.I64)
@@ -4483,7 +6784,8 @@ object LlvmBackend {
       lenI32
     }
 
-    private def emitStringBuilderSetLength(argsTuple: Value, fb: FunBuilder): Value = {
+    private def emitStringBuilderSetLength(ctxPtr: Value, argsTuple: Value, fb: FunBuilder): Value = {
+      val rcPtr = castValue(loadTupleElement(argsTuple, 0, SimpleType.Region, fb), Type.Ptr, fb)
       val sbPtr = loadTupleElement(argsTuple, 1, SimpleType.StringBuilderHandle, fb)
       val newLenI64 = castValue(loadTupleElement(argsTuple, 2, SimpleType.Int32, fb), Type.I64, fb)
 
@@ -4518,7 +6820,7 @@ object LlvmBackend {
 
       val growBlock = fb.newBlock(growLabel)
       fb.setCurrent(growBlock)
-      sbEnsureCapacity(sbPtr, newLenI64, fb)
+      sbEnsureCapacity(ctxPtr, rcPtr, sbPtr, newLenI64, fb)
       val dataPtr = sbDataPtr(sbPtr, fb)
 
       val iPtr = freshTmp(Type.Ptr)
@@ -4556,12 +6858,12 @@ object LlvmBackend {
       Value.IntConst(0L, Type.I64)
     }
 
-    private def emitStringBuilderToString(argsTuple: Value, fb: FunBuilder): Value = {
+    private def emitStringBuilderToString(ctxPtr: Value, argsTuple: Value, fb: FunBuilder): Value = {
       val sbPtr = loadTupleElement(argsTuple, 1, SimpleType.StringBuilderHandle, fb)
       val lenI64 = sbLenI64(sbPtr, fb)
       val dataPtr = sbDataPtr(sbPtr, fb)
 
-      val strPtr = allocString(lenI64, fb)
+      val strPtr = allocString(lenI64, ctxPtr, fb)
 
       val iPtr = freshTmp(Type.Ptr)
       fb.current.emitAssign(iPtr, Op.Alloca(Type.I64))
@@ -4583,9 +6885,7 @@ object LlvmBackend {
       val bodyBlock = fb.newBlock(bodyLabel)
       fb.setCurrent(bodyBlock)
       val payload = loadI64Slot(dataPtr, iVal, fb)
-      val slotIdx = freshTmp(Type.I64)
-      fb.current.emitAssign(slotIdx, Op.Bin("add", Type.I64, iVal, Value.IntConst(1L, Type.I64)))
-      storeI64Slot(strPtr, slotIdx, payload, fb)
+      storeStringCharPayload(strPtr, iVal, payload, fb)
       val iNext = freshTmp(Type.I64)
       fb.current.emitAssign(iNext, Op.Bin("add", Type.I64, iVal, Value.IntConst(1L, Type.I64)))
       fb.current.emitStore(iNext, iPtr)
@@ -4678,7 +6978,7 @@ object LlvmBackend {
       (start, end)
     }
 
-    private def emitParseIntTuple(strPtr0: Value, radixI64: Value, minVal: Long, maxVal: Long, fb: FunBuilder): Value = {
+    private def emitParseIntTuple(strPtr0: Value, radixI64: Value, minVal: Long, maxVal: Long, valueTpe: SimpleType, ctxPtr: Value, fb: FunBuilder): Value = {
       val strPtr = castValue(strPtr0, Type.Ptr, fb)
       val (start, end) = emitTrimBounds(strPtr, fb)
 
@@ -4989,10 +7289,11 @@ object LlvmBackend {
       fb.current.emitAssign(okPayload, Op.Cast("zext", Type.I64, ok))
       val resPayload = freshTmp(Type.I64)
       fb.current.emitAssign(resPayload, Op.Load(Type.I64, resPtr))
-      allocTuple2(okPayload, resPayload, fb)
+      val tupleTpe = SimpleType.mkTuple(List(SimpleType.Bool, valueTpe))
+      allocTuple2(tupleTpe, okPayload, resPayload, ctxPtr, fb)
     }
 
-    private def emitParseFloatTuple(strPtr0: Value, is32: Boolean, fb: FunBuilder): Value = {
+    private def emitParseFloatTuple(strPtr0: Value, is32: Boolean, ctxPtr: Value, fb: FunBuilder): Value = {
       val strPtr = castValue(strPtr0, Type.Ptr, fb)
       val (start, end) = emitTrimBounds(strPtr, fb)
 
@@ -5718,10 +8019,12 @@ object LlvmBackend {
         boxToI64(vFinalD, SimpleType.Float64, fb)
       }
 
-      allocTuple2(okPayload, valuePayload, fb)
+      val valueTpe = if (is32) SimpleType.Float32 else SimpleType.Float64
+      val tupleTpe = SimpleType.mkTuple(List(SimpleType.Bool, valueTpe))
+      allocTuple2(tupleTpe, okPayload, valuePayload, ctxPtr, fb)
     }
 
-    private def emitBinary(op: BinaryOp, a: Value, b: Value, fb: FunBuilder): Value = op match {
+    private def emitBinary(op: BinaryOp, a: Value, b: Value, ctxPtr: Value, fb: FunBuilder): Value = op match {
       case SemanticOp.BoolOp.And =>
         val tmp = freshTmp(Type.I1)
         fb.current.emitAssign(tmp, Op.Bin("and", Type.I1, a, b))
@@ -6072,140 +8375,23 @@ object LlvmBackend {
         fb.current.emitAssign(tmp, Op.ICmp("uge", a, b))
         tmp
 
+      case SemanticOp.CharOp.IsSurrogatePair =>
+        val tmp = freshTmp(Type.I1)
+        fb.current.emitAssign(tmp, Op.Call(Type.I1, "flix_char_is_surrogate_pair", List(a, b)))
+        tmp
+
+      case SemanticOp.CharOp.ToCodePoint =>
+        val tmp = freshTmp(Type.I32)
+        fb.current.emitAssign(tmp, Op.Call(Type.I32, "flix_char_to_code_point", List(a, b)))
+        tmp
+
       case SemanticOp.CharOp.Digit =>
-        // Bring-up: ASCII only. Returns -1 if not representable.
-        val ch = a
-        val radix = b
-
-        val radixLo = freshTmp(Type.I1)
-        fb.current.emitAssign(radixLo, Op.ICmp("slt", radix, Value.IntConst(2L, Type.I32)))
-        val radixHi = freshTmp(Type.I1)
-        fb.current.emitAssign(radixHi, Op.ICmp("sgt", radix, Value.IntConst(36L, Type.I32)))
-        val radixBad = freshTmp(Type.I1)
-        fb.current.emitAssign(radixBad, Op.Bin("or", Type.I1, radixLo, radixHi))
-
-        val badRadixLabel = freshLabel("cdigit_bad_radix")
-        val computeLabel = freshLabel("cdigit_compute")
-        val endLabel = freshLabel("cdigit_end")
-        fb.current.setTerminator(Terminator.CondBr(radixBad, badRadixLabel, computeLabel))
-
-        val incomings = mutable.ArrayBuffer.empty[(Value, String)]
-
-        val badRadixBlock = fb.newBlock(badRadixLabel)
-        fb.setCurrent(badRadixBlock)
-        val badRadixRes = Value.IntConst(-1L, Type.I32)
-        fb.current.setTerminator(Terminator.Br(endLabel))
-        incomings.addOne((badRadixRes, badRadixLabel))
-
-        val computeBlock = fb.newBlock(computeLabel)
-        fb.setCurrent(computeBlock)
-
-        val isNumLo = freshTmp(Type.I1)
-        fb.current.emitAssign(isNumLo, Op.ICmp("uge", ch, Value.IntConst(48L, Type.I32))) // '0'
-        val isNumHi = freshTmp(Type.I1)
-        fb.current.emitAssign(isNumHi, Op.ICmp("ule", ch, Value.IntConst(57L, Type.I32))) // '9'
-        val isNum = freshTmp(Type.I1)
-        fb.current.emitAssign(isNum, Op.Bin("and", Type.I1, isNumLo, isNumHi))
-
-        val numLabel = freshLabel("cdigit_num")
-        val lowerCheckLabel = freshLabel("cdigit_lower_check")
-        fb.current.setTerminator(Terminator.CondBr(isNum, numLabel, lowerCheckLabel))
-
-        val digitIncomings = mutable.ArrayBuffer.empty[(Value, String)]
-        val digitEndLabel = freshLabel("cdigit_digit_end")
-
-        val numBlock = fb.newBlock(numLabel)
-        fb.setCurrent(numBlock)
-        val dNum = freshTmp(Type.I32)
-        fb.current.emitAssign(dNum, Op.Bin("sub", Type.I32, ch, Value.IntConst(48L, Type.I32)))
-        fb.current.setTerminator(Terminator.Br(digitEndLabel))
-        digitIncomings.addOne((dNum, numLabel))
-
-        val lowerCheckBlock = fb.newBlock(lowerCheckLabel)
-        fb.setCurrent(lowerCheckBlock)
-        val isLowerLo = freshTmp(Type.I1)
-        fb.current.emitAssign(isLowerLo, Op.ICmp("uge", ch, Value.IntConst(97L, Type.I32))) // 'a'
-        val isLowerHi = freshTmp(Type.I1)
-        fb.current.emitAssign(isLowerHi, Op.ICmp("ule", ch, Value.IntConst(122L, Type.I32))) // 'z'
-        val isLower = freshTmp(Type.I1)
-        fb.current.emitAssign(isLower, Op.Bin("and", Type.I1, isLowerLo, isLowerHi))
-
-        val lowerLabel = freshLabel("cdigit_lower")
-        val upperCheckLabel = freshLabel("cdigit_upper_check")
-        fb.current.setTerminator(Terminator.CondBr(isLower, lowerLabel, upperCheckLabel))
-
-        val lowerBlock = fb.newBlock(lowerLabel)
-        fb.setCurrent(lowerBlock)
-        val dLower0 = freshTmp(Type.I32)
-        fb.current.emitAssign(dLower0, Op.Bin("sub", Type.I32, ch, Value.IntConst(97L, Type.I32)))
-        val dLower = freshTmp(Type.I32)
-        fb.current.emitAssign(dLower, Op.Bin("add", Type.I32, dLower0, Value.IntConst(10L, Type.I32)))
-        fb.current.setTerminator(Terminator.Br(digitEndLabel))
-        digitIncomings.addOne((dLower, lowerLabel))
-
-        val upperCheckBlock = fb.newBlock(upperCheckLabel)
-        fb.setCurrent(upperCheckBlock)
-        val isUpperLo = freshTmp(Type.I1)
-        fb.current.emitAssign(isUpperLo, Op.ICmp("uge", ch, Value.IntConst(65L, Type.I32))) // 'A'
-        val isUpperHi = freshTmp(Type.I1)
-        fb.current.emitAssign(isUpperHi, Op.ICmp("ule", ch, Value.IntConst(90L, Type.I32))) // 'Z'
-        val isUpper = freshTmp(Type.I1)
-        fb.current.emitAssign(isUpper, Op.Bin("and", Type.I1, isUpperLo, isUpperHi))
-
-        val upperLabel = freshLabel("cdigit_upper")
-        val invalidLabel = freshLabel("cdigit_invalid")
-        fb.current.setTerminator(Terminator.CondBr(isUpper, upperLabel, invalidLabel))
-
-        val upperBlock = fb.newBlock(upperLabel)
-        fb.setCurrent(upperBlock)
-        val dUpper0 = freshTmp(Type.I32)
-        fb.current.emitAssign(dUpper0, Op.Bin("sub", Type.I32, ch, Value.IntConst(65L, Type.I32)))
-        val dUpper = freshTmp(Type.I32)
-        fb.current.emitAssign(dUpper, Op.Bin("add", Type.I32, dUpper0, Value.IntConst(10L, Type.I32)))
-        fb.current.setTerminator(Terminator.Br(digitEndLabel))
-        digitIncomings.addOne((dUpper, upperLabel))
-
-        val invalidBlock = fb.newBlock(invalidLabel)
-        fb.setCurrent(invalidBlock)
-        val invalidDigit = Value.IntConst(-1L, Type.I32)
-        fb.current.setTerminator(Terminator.Br(digitEndLabel))
-        digitIncomings.addOne((invalidDigit, invalidLabel))
-
-        val digitEndBlock = fb.newBlock(digitEndLabel)
-        fb.setCurrent(digitEndBlock)
-        val digitPhi = freshTmp(Type.I32)
-        digitEndBlock.emitPhi(digitPhi, digitIncomings.toList)
-
-        val nonNeg = freshTmp(Type.I1)
-        fb.current.emitAssign(nonNeg, Op.ICmp("sge", digitPhi, Value.IntConst(0L, Type.I32)))
-        val ltRadix = freshTmp(Type.I1)
-        fb.current.emitAssign(ltRadix, Op.ICmp("slt", digitPhi, radix))
-        val okDigit = freshTmp(Type.I1)
-        fb.current.emitAssign(okDigit, Op.Bin("and", Type.I1, nonNeg, ltRadix))
-
-        val okLabel = freshLabel("cdigit_ok")
-        val badLabel = freshLabel("cdigit_bad")
-        fb.current.setTerminator(Terminator.CondBr(okDigit, okLabel, badLabel))
-
-        val okBlock = fb.newBlock(okLabel)
-        fb.setCurrent(okBlock)
-        fb.current.setTerminator(Terminator.Br(endLabel))
-        incomings.addOne((digitPhi, okLabel))
-
-        val badBlock = fb.newBlock(badLabel)
-        fb.setCurrent(badBlock)
-        val badRes = Value.IntConst(-1L, Type.I32)
-        fb.current.setTerminator(Terminator.Br(endLabel))
-        incomings.addOne((badRes, badLabel))
-
-        val endBlock = fb.newBlock(endLabel)
-        fb.setCurrent(endBlock)
-        val phi = freshTmp(Type.I32)
-        endBlock.emitPhi(phi, incomings.toList)
-        phi
+        val tmp = freshTmp(Type.I32)
+        fb.current.emitAssign(tmp, Op.Call(Type.I32, "flix_char_digit", List(a, b)))
+        tmp
 
       case SemanticOp.CharOp.ForDigit =>
-        // Bring-up: ASCII only. Returns '\\u0000' if not representable.
+        // Matches Java's Character.forDigit: ASCII only ('0'..'9','a'..'z') or '\\u0000' if not representable.
         val n = a
         val radix = b
 
@@ -6275,30 +8461,13 @@ object LlvmBackend {
         val s1Ptr = castValue(a, Type.Ptr, fb)
         val s2Ptr = castValue(b, Type.Ptr, fb)
 
-        val len1Ptr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(len1Ptr, Op.Gep(Type.I64, s1Ptr, Value.IntConst(0L, Type.I64)))
-        val len1 = freshTmp(Type.I64)
-        fb.current.emitAssign(len1, Op.Load(Type.I64, len1Ptr))
-
-        val len2Ptr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(len2Ptr, Op.Gep(Type.I64, s2Ptr, Value.IntConst(0L, Type.I64)))
-        val len2 = freshTmp(Type.I64)
-        fb.current.emitAssign(len2, Op.Load(Type.I64, len2Ptr))
+        val len1 = stringLenI64(s1Ptr, fb)
+        val len2 = stringLenI64(s2Ptr, fb)
 
         val newLen = freshTmp(Type.I64)
         fb.current.emitAssign(newLen, Op.Bin("add", Type.I64, len1, len2))
 
-        val slots = freshTmp(Type.I64)
-        fb.current.emitAssign(slots, Op.Bin("add", Type.I64, newLen, Value.IntConst(1L, Type.I64)))
-        val sizeBytes = freshTmp(Type.I64)
-        fb.current.emitAssign(sizeBytes, Op.Bin("mul", Type.I64, slots, Value.IntConst(8L, Type.I64)))
-
-        val strPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(strPtr, Op.Call(Type.Ptr, "malloc", List(sizeBytes)))
-
-        val outLenPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(outLenPtr, Op.Gep(Type.I64, strPtr, Value.IntConst(0L, Type.I64)))
-        fb.current.emitStore(newLen, outLenPtr)
+        val outPtr = allocString(newLen, ctxPtr, fb)
 
         val iPtr = freshTmp(Type.Ptr)
         fb.current.emitAssign(iPtr, Op.Alloca(Type.I64))
@@ -6324,15 +8493,8 @@ object LlvmBackend {
 
         val body1Block = fb.newBlock(body1Label)
         fb.setCurrent(body1Block)
-        val srcIdx1 = freshTmp(Type.I64)
-        fb.current.emitAssign(srcIdx1, Op.Bin("add", Type.I64, iVal, Value.IntConst(1L, Type.I64)))
-        val srcPtr1 = freshTmp(Type.Ptr)
-        fb.current.emitAssign(srcPtr1, Op.Gep(Type.I64, s1Ptr, srcIdx1))
-        val payload1 = freshTmp(Type.I64)
-        fb.current.emitAssign(payload1, Op.Load(Type.I64, srcPtr1))
-        val dstPtr1 = freshTmp(Type.Ptr)
-        fb.current.emitAssign(dstPtr1, Op.Gep(Type.I64, strPtr, srcIdx1))
-        fb.current.emitStore(payload1, dstPtr1)
+        val payload1 = stringCharPayloadI64(s1Ptr, iVal, fb)
+        storeStringCharPayload(outPtr, iVal, payload1, fb)
         val iNext1 = freshTmp(Type.I64)
         fb.current.emitAssign(iNext1, Op.Bin("add", Type.I64, iVal, Value.IntConst(1L, Type.I64)))
         fb.current.emitStore(iNext1, iPtr)
@@ -6353,20 +8515,10 @@ object LlvmBackend {
 
         val body2Block = fb.newBlock(body2Label)
         fb.setCurrent(body2Block)
-        val srcIdx2 = freshTmp(Type.I64)
-        fb.current.emitAssign(srcIdx2, Op.Bin("add", Type.I64, jVal, Value.IntConst(1L, Type.I64)))
-        val srcPtr2 = freshTmp(Type.Ptr)
-        fb.current.emitAssign(srcPtr2, Op.Gep(Type.I64, s2Ptr, srcIdx2))
-        val payload2 = freshTmp(Type.I64)
-        fb.current.emitAssign(payload2, Op.Load(Type.I64, srcPtr2))
-
-        val dstIdx2a = freshTmp(Type.I64)
-        fb.current.emitAssign(dstIdx2a, Op.Bin("add", Type.I64, len1, jVal))
+        val payload2 = stringCharPayloadI64(s2Ptr, jVal, fb)
         val dstIdx2 = freshTmp(Type.I64)
-        fb.current.emitAssign(dstIdx2, Op.Bin("add", Type.I64, dstIdx2a, Value.IntConst(1L, Type.I64)))
-        val dstPtr2 = freshTmp(Type.Ptr)
-        fb.current.emitAssign(dstPtr2, Op.Gep(Type.I64, strPtr, dstIdx2))
-        fb.current.emitStore(payload2, dstPtr2)
+        fb.current.emitAssign(dstIdx2, Op.Bin("add", Type.I64, len1, jVal))
+        storeStringCharPayload(outPtr, dstIdx2, payload2, fb)
 
         val jNext2 = freshTmp(Type.I64)
         fb.current.emitAssign(jNext2, Op.Bin("add", Type.I64, jVal, Value.IntConst(1L, Type.I64)))
@@ -6379,16 +8531,12 @@ object LlvmBackend {
 
         val contBlock = fb.newBlock(contLabel)
         fb.setCurrent(contBlock)
-        strPtr
+        outPtr
 
       case SemanticOp.StringOp.CharAt =>
         val strPtr = castValue(a, Type.Ptr, fb)
         val idxI64 = castValue(b, Type.I64, fb)
-
-        val lenPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(lenPtr, Op.Gep(Type.I64, strPtr, Value.IntConst(0L, Type.I64)))
-        val lenI64 = freshTmp(Type.I64)
-        fb.current.emitAssign(lenI64, Op.Load(Type.I64, lenPtr))
+        val lenI64 = stringLenI64(strPtr, fb)
 
         val neg = freshTmp(Type.I1)
         fb.current.emitAssign(neg, Op.ICmp("slt", idxI64, Value.IntConst(0L, Type.I64)))
@@ -6410,12 +8558,7 @@ object LlvmBackend {
 
         val okBlock = fb.newBlock(okLabel)
         fb.setCurrent(okBlock)
-        val slotIdx = freshTmp(Type.I64)
-        fb.current.emitAssign(slotIdx, Op.Bin("add", Type.I64, idxI64, Value.IntConst(1L, Type.I64)))
-        val slotPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(slotPtr, Op.Gep(Type.I64, strPtr, slotIdx))
-        val payload = freshTmp(Type.I64)
-        fb.current.emitAssign(payload, Op.Load(Type.I64, slotPtr))
+        val payload = stringCharPayloadI64(strPtr, idxI64, fb)
         val ch = unboxFromI64(payload, SimpleType.Char, fb)
         if (!fb.current.isTerminated) fb.current.setTerminator(Terminator.Br(endLabel))
 
@@ -6426,11 +8569,7 @@ object LlvmBackend {
       case SemanticOp.StringOp.Repeat =>
         val strPtr0 = castValue(a, Type.Ptr, fb)
         val nI64 = castValue(b, Type.I64, fb)
-
-        val lenPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(lenPtr, Op.Gep(Type.I64, strPtr0, Value.IntConst(0L, Type.I64)))
-        val lenI64 = freshTmp(Type.I64)
-        fb.current.emitAssign(lenI64, Op.Load(Type.I64, lenPtr))
+        val lenI64 = stringLenI64(strPtr0, fb)
 
         val isNeg = freshTmp(Type.I1)
         fb.current.emitAssign(isNeg, Op.ICmp("slt", nI64, Value.IntConst(0L, Type.I64)))
@@ -6443,11 +8582,7 @@ object LlvmBackend {
 
         val negBlock = fb.newBlock(negLabel)
         fb.setCurrent(negBlock)
-        val emptyPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(emptyPtr, Op.Call(Type.Ptr, "malloc", List(Value.IntConst(8L, Type.I64))))
-        val emptyLenPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(emptyLenPtr, Op.Gep(Type.I64, emptyPtr, Value.IntConst(0L, Type.I64)))
-        fb.current.emitStore(Value.IntConst(0L, Type.I64), emptyLenPtr)
+        val emptyPtr = allocString(Value.IntConst(0L, Type.I64), ctxPtr, fb)
         fb.current.setTerminator(Terminator.Br(contLabel))
 
         val okBlock = fb.newBlock(okLabel)
@@ -6455,16 +8590,7 @@ object LlvmBackend {
 
         val newLen = freshTmp(Type.I64)
         fb.current.emitAssign(newLen, Op.Bin("mul", Type.I64, lenI64, nI64))
-        val slots = freshTmp(Type.I64)
-        fb.current.emitAssign(slots, Op.Bin("add", Type.I64, newLen, Value.IntConst(1L, Type.I64)))
-        val sizeBytes = freshTmp(Type.I64)
-        fb.current.emitAssign(sizeBytes, Op.Bin("mul", Type.I64, slots, Value.IntConst(8L, Type.I64)))
-
-        val outPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(outPtr, Op.Call(Type.Ptr, "malloc", List(sizeBytes)))
-        val outLenPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(outLenPtr, Op.Gep(Type.I64, outPtr, Value.IntConst(0L, Type.I64)))
-        fb.current.emitStore(newLen, outLenPtr)
+        val outPtr = allocString(newLen, ctxPtr, fb)
 
         val rPtr = freshTmp(Type.Ptr)
         fb.current.emitAssign(rPtr, Op.Alloca(Type.I64))
@@ -6506,22 +8632,13 @@ object LlvmBackend {
 
         val bodyIBlock = fb.newBlock(bodyILabel)
         fb.setCurrent(bodyIBlock)
-        val srcIdx = freshTmp(Type.I64)
-        fb.current.emitAssign(srcIdx, Op.Bin("add", Type.I64, iVal, Value.IntConst(1L, Type.I64)))
-        val srcPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(srcPtr, Op.Gep(Type.I64, strPtr0, srcIdx))
-        val payload = freshTmp(Type.I64)
-        fb.current.emitAssign(payload, Op.Load(Type.I64, srcPtr))
+        val payload = stringCharPayloadI64(strPtr0, iVal, fb)
 
         val base = freshTmp(Type.I64)
         fb.current.emitAssign(base, Op.Bin("mul", Type.I64, rVal, lenI64))
         val dstIdx0 = freshTmp(Type.I64)
         fb.current.emitAssign(dstIdx0, Op.Bin("add", Type.I64, base, iVal))
-        val dstIdx = freshTmp(Type.I64)
-        fb.current.emitAssign(dstIdx, Op.Bin("add", Type.I64, dstIdx0, Value.IntConst(1L, Type.I64)))
-        val dstPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(dstPtr, Op.Gep(Type.I64, outPtr, dstIdx))
-        fb.current.emitStore(payload, dstPtr)
+        storeStringCharPayload(outPtr, dstIdx0, payload, fb)
 
         val iNext = freshTmp(Type.I64)
         fb.current.emitAssign(iNext, Op.Bin("add", Type.I64, iVal, Value.IntConst(1L, Type.I64)))
@@ -7170,38 +9287,67 @@ object LlvmBackend {
     /**
       * Local function builder utilities.
       */
-    private final class FunBuilder {
-      private val blocks = mutable.ArrayBuffer.empty[BlockBuilder]
-      private val blockMap = mutable.Map.empty[String, BlockBuilder]
+		    private final class FunBuilder {
+		      private val blocks = mutable.ArrayBuffer.empty[BlockBuilder]
+		      private val blockMap = mutable.Map.empty[String, BlockBuilder]
 
-      var current: BlockBuilder = _
+		      var current: BlockBuilder = _
+		      var traceEnabled: Boolean = false
+		      var rootsToPop: Long = 0L
 
-      def newBlock(label: String): BlockBuilder = {
-        val b = new BlockBuilder(label)
-        blocks.addOne(b)
-        blockMap.put(label, b)
-        b
-      }
+		      def newBlock(label: String): BlockBuilder = {
+		        val b = new BlockBuilder(label, this)
+		        blocks.addOne(b)
+		        blockMap.put(label, b)
+	        b
+	      }
 
       def setCurrent(b: BlockBuilder): Unit = {
         current = b
       }
 
+      def getBlock(label: String): Option[BlockBuilder] = blockMap.get(label)
+
       def result(): List[LlvmIr.Block] = {
         blocks.toList.map(_.toBlock)
       }
-    }
+	    }
 
-    private final class BlockBuilder(val label: String) {
-      private val phis = mutable.ArrayBuffer.empty[Instr.Phi]
-      private val instrs = mutable.ArrayBuffer.empty[Instr]
-      private var term: Option[Terminator] = None
+	    private final class BlockBuilder(val label: String, fb: FunBuilder) {
+	      private val phis = mutable.ArrayBuffer.empty[Instr.Phi]
+	      private val instrs = mutable.ArrayBuffer.empty[Instr]
+	      private var term: Option[Terminator] = None
 
       def isTerminated: Boolean = term.nonEmpty
 
-      def emitAssign(dest: Value.Local, op: Op): Unit = {
-        ensureNotTerminated()
-        instrs.addOne(Instr.Assign(dest, op))
+	      def emitAssign(dest: Value.Local, op: Op): Unit = {
+	        op match {
+	          case Op.Alloca(_) if label != "entry" =>
+	            // Avoid `alloca` in loop bodies (including the self-tail loop), which would grow the
+	            // stack each iteration and eventually crash (stack overflow). We hoist all `alloca`
+	            // instructions into the entry block.
+	            fb.getBlock("entry") match {
+	              case Some(entry) =>
+	                entry.emitPrologueAssign(dest, op)
+	              case None =>
+	                // Should not happen: every function builder creates an "entry" block first.
+	                ensureNotTerminated()
+	                instrs.addOne(Instr.Assign(dest, op))
+	            }
+	          case _ =>
+	            ensureNotTerminated()
+	            instrs.addOne(Instr.Assign(dest, op))
+	        }
+	      }
+
+      /**
+        * Inserts an assignment at the beginning of the instruction stream (after any phi nodes).
+        *
+        * This is used to hoist `alloca`-style temporaries into a dominating block even after the
+        * block has been terminated.
+        */
+      def emitPrologueAssign(dest: Value.Local, op: Op): Unit = {
+        instrs.insert(0, Instr.Assign(dest, op))
       }
 
       def emitStore(value: Value, addr: Value): Unit = {
@@ -7227,10 +9373,20 @@ object LlvmBackend {
         instrs.addOne(Instr.CallVoid("llvm.trap", Nil))
       }
 
-      def setTerminator(t: Terminator): Unit = {
-        ensureNotTerminated()
-        term = Some(t)
-      }
+		      def setTerminator(t: Terminator): Unit = {
+		        ensureNotTerminated()
+		        t match {
+		          case Terminator.Ret(_, _) =>
+		            if (fb.rootsToPop > 0) {
+		              instrs.addOne(Instr.CallVoid("flix_gc_pop_roots", List(Value.Local("ctx", Type.Ptr), Value.IntConst(fb.rootsToPop, Type.I64))))
+		            }
+		            if (fb.traceEnabled) {
+		              instrs.addOne(Instr.CallVoid("flix_trace_pop", Nil))
+		            }
+		          case _ => ()
+		        }
+		        term = Some(t)
+		      }
 
       private def ensureNotTerminated(): Unit = {
         if (term.nonEmpty) {
@@ -7247,21 +9403,126 @@ object LlvmBackend {
     }
   }
 
-  private object LlvmNames {
-    def defName(sym: Symbol.DefnSym): String =
-      s"flix_${LlvmNamesInternal.mangle(sym.toString)}"
+	    private object LlvmNames {
+	      def defName(sym: Symbol.DefnSym): String =
+	        s"flix_${LlvmNamesInternal.mangle(sym.toString)}"
 
-    def frameApplyName(sym: Symbol.DefnSym): String =
-      s"flix_frame_apply_${LlvmNamesInternal.mangle(sym.toString)}"
+      def exportName(sym: Symbol.DefnSym): String =
+        s"flix_export_${LlvmNamesInternal.mangle(sym.toString)}"
 
-    def closureInvokeName(sym: Symbol.DefnSym): String =
-      s"flix_clo_invoke_${LlvmNamesInternal.mangle(sym.toString)}"
+      def exportResumeName(sym: Symbol.DefnSym): String =
+        s"flix_export_resume_${LlvmNamesInternal.mangle(sym.toString)}"
+
+	      def frameApplyName(sym: Symbol.DefnSym): String =
+	        s"flix_frame_apply_${LlvmNamesInternal.mangle(sym.toString)}"
+
+	      def traceName(sym: Symbol.DefnSym): String =
+	        s"flix_trace_name_${LlvmNamesInternal.mangle(sym.toString)}"
+
+      def effectName(sym: Symbol.EffSym): String =
+        s"flix_effect_name_${LlvmNamesInternal.mangle(sym.toString)}"
+
+      def opName(sym: Symbol.OpSym): String =
+        s"flix_op_name_${LlvmNamesInternal.mangle(sym.toString)}"
+
+	      def closureInvokeName(sym: Symbol.DefnSym): String =
+	        s"flix_clo_invoke_${LlvmNamesInternal.mangle(sym.toString)}"
+
+    def closureTypeInfoName(sym: Symbol.DefnSym): String =
+      s"flix_ti_clo_${LlvmNamesInternal.mangle(sym.toString)}"
+
+    def closurePtrOffsName(sym: Symbol.DefnSym): String =
+      s"${closureTypeInfoName(sym)}_ptr_offs"
 
     def thunkInvokeName(sym: Symbol.DefnSym): String =
       s"flix_thunk_invoke_${LlvmNamesInternal.mangle(sym.toString)}"
 
-    def thunkApplyClosureName(argTpe: Type): String =
-      s"flix_thunk_apply_clo_${LlvmNamesInternal.mangle(argTpe.render)}"
+    def kTypeInfoName(argTpe: SimpleType): String =
+      s"flix_ti_k_${typeKey(argTpe)}"
+
+    def kPtrOffsName(argTpe: SimpleType): String =
+      s"${kTypeInfoName(argTpe)}_ptr_offs"
+
+    private def typeKey(tpe: SimpleType): String = {
+      val s = tpe.toString
+      val base = LlvmNamesInternal.mangle(s)
+      val md = java.security.MessageDigest.getInstance("SHA-1")
+      val digest = md.digest(s.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+      val hash = digest.take(8).map(b => f"${b & 0xff}%02x").mkString
+      s"${base}_$hash"
+    }
+
+    def lazyTypeInfoName(innerTpe: SimpleType): String =
+      s"flix_ti_lazy_${typeKey(innerTpe)}"
+
+    def lazyPtrOffsName(innerTpe: SimpleType): String =
+      s"${lazyTypeInfoName(innerTpe)}_ptr_offs"
+
+	    def tupleTypeInfoName(tpe: SimpleType.Tuple): String =
+	      s"flix_ti_tuple_${typeKey(tpe)}"
+
+	    def tuplePtrOffsName(tpe: SimpleType.Tuple): String =
+	      s"${tupleTypeInfoName(tpe)}_ptr_offs"
+
+      def tagTypeInfoName(sym: Symbol.CaseSym): String =
+        s"flix_ti_tag_${LlvmNamesInternal.mangle(sym.toString)}"
+
+      def tagPtrOffsName(sym: Symbol.CaseSym): String =
+        s"${tagTypeInfoName(sym)}_ptr_offs"
+
+      def structTypeInfoName(sym: Symbol.StructSym): String =
+        s"flix_ti_struct_${LlvmNamesInternal.mangle(sym.toString)}"
+
+      def structPtrOffsName(sym: Symbol.StructSym): String =
+        s"${structTypeInfoName(sym)}_ptr_offs"
+
+      def recordTypeInfoName(tpe: SimpleType): String =
+        s"flix_ti_record_${typeKey(tpe)}"
+
+      def recordPtrOffsName(tpe: SimpleType): String =
+        s"${recordTypeInfoName(tpe)}_ptr_offs"
+
+    def thunkApplyClosureName(argTpe: SimpleType): String =
+      s"flix_thunk_apply_clo_${typeKey(argTpe)}"
+
+    def thunkTypeInfoName(sym: Symbol.DefnSym): String =
+      s"flix_ti_thunk_${LlvmNamesInternal.mangle(sym.toString)}"
+
+    def thunkPtrOffsName(sym: Symbol.DefnSym): String =
+      s"${thunkTypeInfoName(sym)}_ptr_offs"
+
+    def thunkApplyClosureTypeInfoName(argTpe: SimpleType): String =
+      s"flix_ti_thunk_apply_clo_${typeKey(argTpe)}"
+
+    def thunkApplyClosurePtrOffsName(argTpe: SimpleType): String =
+      s"${thunkApplyClosureTypeInfoName(argTpe)}_ptr_offs"
+
+    def arrayPrimTypeInfoName: String =
+      "flix_ti_array_prim"
+
+    def arrayPrimPtrOffsName: String =
+      s"${arrayPrimTypeInfoName}_ptr_offs"
+
+    def arrayPtrTypeInfoName: String =
+      "flix_ti_array_ptr"
+
+    def arrayPtrPtrOffsName: String =
+      s"${arrayPtrTypeInfoName}_ptr_offs"
+
+    def stringTypeInfoName: String =
+      "flix_ti_string"
+
+    def handlerTypeInfoName: String =
+      "flix_ti_handler"
+
+    def suspensionTypeInfoName: String =
+      "flix_ti_suspension"
+
+    def frameTypeInfoName(sym: Symbol.DefnSym): String =
+      s"flix_ti_frame_${LlvmNamesInternal.mangle(sym.toString)}"
+
+    def framePtrOffsName(sym: Symbol.DefnSym): String =
+      s"${frameTypeInfoName(sym)}_ptr_offs"
 
     def paramName(i: Int): String =
       s"a$i"

@@ -25,4 +25,12 @@ mod Test.Portable.Regex {
         let rgx = Regex.compile(",");
         assertTrue(Regex.split(rgx, "a,b,c") == "a" :: "b" :: "c" :: Nil, "split01 failed.")
 
+    pub def runAll(): Unit = {
+        let _ = isMatch01();
+        let _ = isSubmatch01();
+        let _ = replace01();
+        let _ = split01();
+        ()
+    }
+
 }

@@ -38,12 +38,15 @@ class PortableStdlibProfileSuite extends AnyFunSuite {
       outputJvm = false,
     )
 
+  private val preludeFile = Paths.get("main/test/flix/Prelude.flix")
+
   private val testDir = Paths.get("main/test/flix/portable")
 
   private def compile(file: java.nio.file.Path): Unit = {
     val flix = new Flix()
     flix.setOptions(TestOptions)
     implicit val sctx: SecurityContext = SecurityContext.Unrestricted
+    flix.addFile(preludeFile)
     flix.addFile(file)
 
     val (optRoot, errors) = flix.check()

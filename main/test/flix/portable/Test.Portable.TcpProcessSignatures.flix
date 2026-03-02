@@ -3,16 +3,16 @@ mod Test.Portable.TcpProcessSignatures {
     // Compile-only signatures (not executed) to ensure these types/effects are present
     // in the portable stdlib profile.
 
-    def tcpConnectSig(ip: IpAddr, port: Int16): TcpSocket \ TcpConnect =
+    def tcpConnectSig(ip: IpAddr, port: Int32): TcpSocket \ TcpConnect =
         TcpConnect.connect(ip, port)
 
-    def tcpConnectWithResultSig(ip: IpAddr, port: Int16): Result[IoError, TcpSocket] \ TcpConnectWithResult =
+    def tcpConnectWithResultSig(ip: IpAddr, port: Int32): Result[IoError, TcpSocket] \ TcpConnectWithResult =
         TcpConnectWithResult.connect(ip, port)
 
-    def tcpBindSig(ip: IpAddr, port: Int16): TcpServer \ TcpBind =
+    def tcpBindSig(ip: IpAddr, port: Int32): TcpServer \ TcpBind =
         TcpBind.bind(ip, port)
 
-    def tcpBindWithResultSig(ip: IpAddr, port: Int16): Result[IoError, TcpServer] \ TcpBindWithResult =
+    def tcpBindWithResultSig(ip: IpAddr, port: Int32): Result[IoError, TcpServer] \ TcpBindWithResult =
         TcpBindWithResult.bind(ip, port)
 
     def tcpAcceptSig(server: TcpServer): TcpSocket \ TcpAccept =
@@ -32,6 +32,9 @@ mod Test.Portable.TcpProcessSignatures {
 
     def tcpServerCloseSig(server: TcpServer): Result[IoError, Unit] \ IO =
         TcpServer.close(server)
+
+    def tcpServerLocalPortSig(server: TcpServer): Result[IoError, Int32] \ IO =
+        TcpServer.localPort(server)
 
     def processExecSig(cmd: String, args: List[String]): ProcessHandle \ Process =
         Process.exec(cmd, args)
@@ -90,6 +93,7 @@ mod Test.Portable.TcpProcessSignatures {
         let _ = tcpSocketWriteSig;
         let _ = tcpSocketCloseSig;
         let _ = tcpServerCloseSig;
+        let _ = tcpServerLocalPortSig;
         let _ = processExecSig;
         let _ = processIsAliveSig;
         let _ = processStdinSig;
@@ -105,6 +109,11 @@ mod Test.Portable.TcpProcessSignatures {
         let _ = httpWithResultGetSig;
         let _ = httpRunWithIOSig;
         let _ = httpWithResultRunWithIOSig;
+        ()
+    }
+
+    pub def runAll(): Unit = {
+        let _ = smoke01();
         ()
     }
 

@@ -26,6 +26,23 @@ pub enum Exn {
     case Exn(Int32, AnyType, AnyType)
 }
 
+///
+/// A designated cancellation payload.
+///
+/// The LLVM runtime throws `Exn.mk(Cancelled(...))` (or an equivalent runtime-constructed `Exn`)
+/// when a task observes cooperative cancellation.
+///
+/// The `cause` indicates why cancellation was requested (typically a child or parent exception).
+///
+/// Note: Flix currently requires structs to have at least one type parameter, so we define a
+/// payload struct and expose a parameterless alias for ergonomic catching: `case exn: Cancelled => ...`.
+///
+pub struct CancelledPayload[_: Eff] {
+    cause: Exn
+}
+
+pub type alias Cancelled = CancelledPayload[Static]
+
 pub mod Exn {
 
     ///
@@ -34,12 +51,12 @@ pub mod Exn {
     /// v0: this is intentionally opaque; the runtime will eventually provide a concrete shape
     /// and formatting support.
     ///
-    pub type Trace = AnyType
+    pub type alias Trace = AnyType
 
     ///
     /// Constructs an exception from the given `payload`.
     ///
-    /// Captures a (portable) logical stack trace.
+    /// The portable backends attach a (portable) logical stack trace when the exception is thrown.
     ///
     pub def mk(payload: a): Exn =
         Exn.Exn(%%EXN_KIND_ID%%(payload), unchecked_cast(payload as AnyType), emptyTrace())
@@ -71,16 +88,15 @@ pub mod Exn {
     /// This is intended to be used under a matching catch rule (where the kind id has already
     /// been checked by the runtime/compiler).
     ///
-    pub def payloadAs[a](exn: Exn): a =
+    pub def payloadAs[a: Type](exn: Exn): a =
         unchecked_cast(payload(exn) as a)
 
     ///
     /// Returns an empty trace value.
     ///
-    /// v0: the trace is present but not yet populated by the runtime.
+    /// v0: the runtime populates the trace at the first throw site.
     ///
     pub def emptyTrace(): Trace =
         unchecked_cast(null as Trace)
 
 }
-

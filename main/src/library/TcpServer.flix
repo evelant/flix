@@ -35,4 +35,12 @@ pub mod TcpServer {
         let (ok, msg) = %%TCP_SERVER_CLOSE%%(id);
         if (ok) Ok(()) else Err(IoError(ErrorKind.Other, msg))
 
+    ///
+    /// Returns the local port that the server is bound to.
+    ///
+    pub def localPort(server: TcpServer): Result[IoError, Int32] \ IO =
+        let TcpServer(id) = server;
+        let (ok, port, msg) = %%TCP_SERVER_LOCAL_PORT%%(id);
+        if (ok) Ok(port) else Err(IoError(ErrorKind.Other, msg))
+
 }

@@ -299,9 +299,13 @@ object Safety {
 
     case Expr.TryCatch(exp, rules, _, _, _) =>
       visitExp(exp)
-      rules.foreach { case CatchRule(bnd, clazz, e, loc) =>
+      rules.foreach { case CatchRule(bnd, catchTpe, e, loc) =>
         checkPermissions(loc.security, loc)
-        checkCatchClass(clazz, bnd.sym.loc)
+        if (isPortableProfile) {
+          checkPortableType(catchTpe)
+        } else {
+          checkCatchType(catchTpe, bnd.sym.loc)
+        }
         visitExp(e)
       }
 
@@ -746,6 +750,10 @@ object Safety {
         case (Type.Var(_, _), _) => ()
         case (_, Some(Type.Var(_, _))) => ()
 
+        // Allow casts involving AnyType (erased boxed values).
+        case (Type.Cst(TypeConstructor.AnyType, _), _) => ()
+        case (_, Some(Type.Cst(TypeConstructor.AnyType, _))) => ()
+
         // Allow casts between Java types.
         case (Type.Cst(TypeConstructor.Native(_), _), _) => ()
         case (_, Some(Type.Cst(TypeConstructor.Native(_), _))) => ()
@@ -935,23 +943,36 @@ object Safety {
   }
 
   /**
-    * Checks that `clazz` is [[java.lang.Throwable]] or a subclass.
+    * Checks that `catchTpe` is [[java.lang.Throwable]] or a subclass.
     *
-    * @param clazz the Java class specified in the catch clause
+    * @param catchTpe the type specified in the catch clause
     * @param loc   the location of the catch parameter.
     */
-  private def checkCatchClass(clazz: Class[?], loc: SourceLocation)(implicit sctx: SharedContext): Unit =
-    if (!isThrowable(clazz)) {
-      sctx.errors.add(IllegalCatchType(clazz, loc))
-    }
+  private def checkCatchType(catchTpe: Type, loc: SourceLocation)(implicit sctx: SharedContext, flix: Flix): Unit =
+    if (!isThrowableType(catchTpe)) sctx.errors.add(IllegalCatchType(catchTpe, loc))
 
   /** Returns `true` if `clazz` is [[java.lang.Throwable]] or a subclass of it. */
   private def isThrowable(clazz: Class[?]): Boolean =
     classOf[Throwable].isAssignableFrom(clazz)
 
-  /** Checks that the type of the argument to `throw` is [[java.lang.Throwable]] or a subclass. */
-  private def checkThrow(exp: Expr)(implicit sctx: SharedContext, flix: Flix): Unit =
-    if (!isThrowableType(exp.tpe)) sctx.errors.add(IllegalThrowType(exp.tpe, exp.loc))
+  /**
+    * Checks that the type of the argument to `throw` matches the active stdlib profile.
+    *
+    * - JVM profile: operand must be a `java.lang.Throwable` (or subclass).
+    * - Portable profile: operand must be a `Exn` value.
+    */
+  private def checkThrow(exp: Expr)(implicit sctx: SharedContext, flix: Flix): Unit = {
+    if (isPortableProfile) {
+      if (!isExnType(exp.tpe)) sctx.errors.add(IllegalThrowType(exp.tpe, exp.loc))
+    } else {
+      if (!isThrowableType(exp.tpe)) sctx.errors.add(IllegalThrowType(exp.tpe, exp.loc))
+    }
+  }
+
+  private def isExnType(tpe0: Type): Boolean = Type.eraseAliases(tpe0) match {
+    case Type.Cst(TypeConstructor.Enum(sym, _), _) => sym.text == "Exn" && sym.namespace.isEmpty
+    case _ => false
+  }
 
   /** Returns `true` if `tpe` is [[java.lang.Throwable]] or a subclass of it. */
   @tailrec

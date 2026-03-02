@@ -131,8 +131,13 @@ object Simplifier {
           SimplifiedAst.Expr.ApplyAtomic(AtomicOp.InvokeMethod(method), es, t, purity, loc)
 
         case AtomicOp.ArrayLit | AtomicOp.ArrayNew =>
-          // The region expression is dropped (head of exps / es)
-          val es1 = es.tail
+          // The array primops take an explicit `Region` argument in source/MonoAst.
+          // For the JVM backend we drop it (regions are not a memory domain there),
+          // but LLVM targets need it to allocate in region arenas.
+          val es1 = flix.options.target match {
+            case CompilationTarget.Jvm => es.tail
+            case _ => es
+          }
           val t = visitType(tpe)
           SimplifiedAst.Expr.ApplyAtomic(op, es1, t, purity, loc)
 
@@ -236,9 +241,9 @@ object Simplifier {
     case MonoAst.Expr.TryCatch(exp, rules, tpe, eff, loc) =>
       val e = visitExp(exp)
       val rs = rules map {
-        case MonoAst.CatchRule(sym, clazz, body) =>
+        case MonoAst.CatchRule(sym, catchTpe, body) =>
           val b = visitExp(body)
-          SimplifiedAst.CatchRule(sym, clazz, b)
+          SimplifiedAst.CatchRule(sym, visitType(catchTpe), b)
       }
       val t = visitType(tpe)
       SimplifiedAst.Expr.TryCatch(e, rs, t, simplifyEffect(eff), loc)

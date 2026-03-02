@@ -88,25 +88,24 @@ pub mod ProcessWithResult {
         run {
             f(x)
         } with handler ProcessWithResult {
-            def execWithCwdAndEnv(cmd, args, cwdOpt, env, k) = region rc {
-                let argv = List.toArray(rc, cmd :: args);
+            def execWithCwdAndEnv(cmd, args, cwdOpt, env, k) = {
+                let res = region rc {
+                    let argv = List.toArray(rc, cmd :: args);
 
-                let envPairs = env
-                    |> Map.toList
-                    |> List.flatMap(e -> fst(e) :: snd(e) :: Nil);
-                let envArr = List.toArray(rc, envPairs);
+                    let envPairs = env
+                        |> Map.toList
+                        |> List.flatMap(e -> fst(e) :: snd(e) :: Nil);
+                    let envArr = List.toArray(rc, envPairs);
 
-                let (hasCwd, cwdStr) = match cwdOpt {
-                    case Some(cwd) => (true, cwd)
-                    case None => (false, "")
+                    let (hasCwd, cwdStr) = match cwdOpt {
+                        case Some(cwd) => (true, cwd)
+                        case None => (false, "")
+                    };
+
+                    let (ok, id, kind, msg) = %%PROCESS_EXEC%%((argv, hasCwd, cwdStr, envArr));
+                    if (ok) Ok(ProcessHandle(id)) else Err(IoError(IoError.errorKindFromCode(kind), msg))
                 };
-
-                let (ok, id, kind, msg) = %%PROCESS_EXEC%%((argv, hasCwd, cwdStr, envArr));
-                if (ok) {
-                    k(Ok(ProcessHandle(id)))
-                } else {
-                    k(Err(IoError(IoError.errorKindFromCode(kind), msg)))
-                }
+                k(res)
             }
 
             def exitValue(ph, k) = {

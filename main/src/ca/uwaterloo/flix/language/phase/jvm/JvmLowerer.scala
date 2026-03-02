@@ -215,11 +215,11 @@ object JvmLowerer {
       case LoweredAst.Expr.TryCatch(exp, rules, tpe, purity, loc) =>
         val e = visitExpr(exp)
         val rs = rules.map {
-          case LoweredAst.CatchRule(sym, clazz, body) =>
+          case LoweredAst.CatchRule(sym, catchTpe, body) =>
             val offset = lctx.assignOffset(sym, SimpleType.Object)
             lctx.lparams.addOne(JvmAst.LocalParam(sym, offset, SimpleType.Object))
             val b = visitExpr(body)
-            JvmAst.CatchRule(sym, offset, clazz, b)
+            JvmAst.CatchRule(sym, offset, catchTpe, b)
         }
         JvmAst.Expr.TryCatch(e, rs, tpe, purity, loc)
 

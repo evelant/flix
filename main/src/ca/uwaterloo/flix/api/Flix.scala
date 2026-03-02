@@ -21,7 +21,7 @@ import ca.uwaterloo.flix.language.ast.shared.{AvailableClasses, Input, SecurityC
 import ca.uwaterloo.flix.language.dbg.AstPrinter
 import ca.uwaterloo.flix.language.fmt.FormatOptions
 import ca.uwaterloo.flix.language.phase.*
-import ca.uwaterloo.flix.language.phase.llvm.{LlvmBackend, LlvmNativeDriver, LlvmWriter}
+import ca.uwaterloo.flix.language.phase.llvm.{LlvmBackend, LlvmExportWriter, LlvmNativeDriver, LlvmWriter}
 import ca.uwaterloo.flix.language.phase.jvm.{JvmBackend, JvmLoader, JvmLowerer, JvmWriter}
 import ca.uwaterloo.flix.language.phase.monomorph.Specialization
 import ca.uwaterloo.flix.language.phase.optimizer.{LambdaDrop, Optimizer}
@@ -643,14 +643,17 @@ class Flix {
 
       case _ =>
         val hasMain = loweredAst.mainEntryPoint.nonEmpty
+        val hasExports = loweredAst.defs.values.exists(_.ann.isExport)
         val module = LlvmBackend.run(loweredAst)
-        loweredAst = null // Explicitly null-out such that the memory becomes eligible for GC.
 
         val totalTime = flix.getTotalTime
         val totalSize = LlvmWriter.run(module)
 
-        flix.options.target match {
+        val result = flix.options.target match {
           case CompilationTarget.LlvmNative if hasMain =>
+            if (hasExports) {
+              LlvmExportWriter.run(loweredAst)
+            }
             val artifacts = LlvmNativeDriver.run(LlvmWriter.modulePath(flix.options.outputPath))
             val main = Some((args: Array[String]) => {
               val cmd = (artifacts.executable.toString :: args.toList).asJava
@@ -663,10 +666,19 @@ class Flix {
             })
             new CompilationResult(main, Map.empty, typedAst.sources, totalTime, totalSize)
 
+          case CompilationTarget.LlvmNative if hasExports =>
+            LlvmExportWriter.run(loweredAst)
+            LlvmNativeDriver.buildStaticLibrary(LlvmWriter.modulePath(flix.options.outputPath))
+            LlvmNativeDriver.buildSharedLibrary(LlvmWriter.modulePath(flix.options.outputPath))
+            new CompilationResult(None, Map.empty, typedAst.sources, totalTime, totalSize)
+
           case _ =>
             // LLVM artifacts are written to disk. We do not (yet) support running or loading them.
             new CompilationResult(None, Map.empty, typedAst.sources, totalTime, totalSize)
         }
+
+        loweredAst = null // Explicitly null-out such that the memory becomes eligible for GC.
+        result
     }
 
     // Shutdown fork-join thread pool.
@@ -810,12 +822,22 @@ class Flix {
     * Returns a list of inputs constructed from the strings and paths passed to Flix.
     */
   private def getInputs: List[Input] = {
-    val coreLib = options.stdlibProfile match {
+    // LLVM targets always use the portable stdlib profile (no Java interop).
+    //
+    // Note: We do not treat `options.stdlibProfile = Jvm` as an error here because the Flix API is
+    // used programmatically and we prefer to keep "select target, get the right stdlib" behavior.
+    // The CLI option parsing can still surface a nicer message if we ever want to make this explicit.
+    val effectiveStdlibProfile = options.target match {
+      case CompilationTarget.Jvm => options.stdlibProfile
+      case _ => StdlibProfile.Portable
+    }
+
+    val coreLib = effectiveStdlibProfile match {
       case StdlibProfile.Jvm => Library.CoreLibrary
       case StdlibProfile.Portable => Library.CoreLibraryBase
     }
 
-    val standardLib = options.stdlibProfile match {
+    val standardLib = effectiveStdlibProfile match {
       case StdlibProfile.Jvm => Library.StandardLibrary
       case StdlibProfile.Portable => Library.StandardLibraryPortable
     }

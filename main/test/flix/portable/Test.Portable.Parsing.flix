@@ -28,5 +28,12 @@ mod Test.Portable.Parsing {
             case _ => bug!("expected Float64.fromString to succeed.")
         }
 
-}
+    pub def runAll(): Unit = {
+        let _ = int32FromStringOk01();
+        let _ = int32FromStringErr01();
+        let _ = int32ParseOk01();
+        let _ = float64FromStringOk01();
+        ()
+    }
 
+}

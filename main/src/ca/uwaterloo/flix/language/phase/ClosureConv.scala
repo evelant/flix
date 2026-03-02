@@ -114,9 +114,9 @@ object ClosureConv {
     case Expr.TryCatch(exp, rules, tpe, purity, loc) =>
       val e = visitExp(exp)
       val rs = rules map {
-        case CatchRule(sym, clazz, body) =>
+        case CatchRule(sym, catchTpe, body) =>
           val b = visitExp(body)
-          CatchRule(sym, clazz, b)
+          CatchRule(sym, catchTpe, b)
       }
       Expr.TryCatch(e, rs, tpe, purity, loc)
 
@@ -372,9 +372,9 @@ object ClosureConv {
       case Expr.TryCatch(exp, rules, tpe, purity, loc) =>
         val e = visitExp(exp)
         val rs = rules map {
-          case CatchRule(sym, clazz, body) =>
+          case CatchRule(sym, catchTpe, body) =>
             val b = visitExp(body)
-            CatchRule(sym, clazz, b)
+            CatchRule(sym, catchTpe, b)
         }
         Expr.TryCatch(e, rs, tpe, purity, loc)
 
@@ -595,9 +595,9 @@ object ClosureConv {
       case Expr.TryCatch(exp, rules, tpe, purity, loc) =>
         val e = visit(exp)
         val rs = rules.map {
-          case CatchRule(sym, clazz, exp1) =>
+          case CatchRule(sym, catchTpe, exp1) =>
             val e1 = visit(exp1)
-            CatchRule(sym, clazz, e1)
+            CatchRule(sym, catchTpe, e1)
         }
         Expr.TryCatch(e, rs, tpe, purity, loc)
 

@@ -692,6 +692,7 @@ object Dependencies {
 
   private def visitCatchRule(catchRule: TypedAst.CatchRule)(implicit sctx: SharedContext): Unit = {
     visitBinder(catchRule.bnd)
+    visitType(catchRule.catchTpe)
     visitExp(catchRule.exp)
   }
 

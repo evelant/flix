@@ -2792,7 +2792,7 @@ object Parser2 {
       expect(TokenKind.KeywordCase)
       nameUnqualified(NAME_VARIABLE)
       expect(TokenKind.Colon)
-      nameAllowQualified(NAME_JAVA, tail = Set())
+      Type.ttype()
       if (eat(TokenKind.Equal)) {
         closeWithError(open(), ParseError.ExpectedArrowThickRGotEqual(sctx, previousSourceLocation()))
       } else {
@@ -3536,6 +3536,7 @@ object Parser2 {
         case TokenKind.NameUppercase => nameAllowQualified(NAME_TYPE)
         case TokenKind.NameMath
              | TokenKind.Underscore => nameUnqualified(NAME_VARIABLE)
+        case TokenKind.NameLowercase if nth(1) == TokenKind.Dot => nameAllowQualified(NAME_JAVA, tail = Set())
         case TokenKind.NameLowercase => variableType()
         case TokenKind.KeywordUniv
              | TokenKind.KeywordFalse

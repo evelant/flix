@@ -415,10 +415,11 @@ object TypeReconstruction {
     case KindedAst.Expr.TryCatch(exp, rules, loc) =>
       val e = visitExp(exp)
       val rs = rules map {
-        case KindedAst.CatchRule(sym, clazz, body, ruleLoc) =>
+        case KindedAst.CatchRule(sym, tpe0, body, ruleLoc) =>
           val b = visitExp(body)
-          val bnd = TypedAst.Binder(sym, Type.mkNative(clazz, SourceLocation.Unknown))
-          TypedAst.CatchRule(bnd, clazz, b, ruleLoc)
+          val bnd = TypedAst.Binder(sym, subst(sym.tvar))
+          val tpe = subst(tpe0)
+          TypedAst.CatchRule(bnd, tpe, b, ruleLoc)
       }
       val tpe = rs.head.exp.tpe
       val eff = Type.mkUnion(e.eff :: rs.map(_.exp.eff), loc)

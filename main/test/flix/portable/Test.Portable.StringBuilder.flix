@@ -28,4 +28,11 @@ mod Test.Portable.StringBuilder {
         assertTrue(StringBuilder.toString(sb) == "ab", "lengthAndSetLength01 failed: expected \"ab\".")
     }
 
+    pub def runAll(): Unit = {
+        let _ = basic01();
+        let _ = codePoint01();
+        let _ = lengthAndSetLength01();
+        ()
+    }
+
 }

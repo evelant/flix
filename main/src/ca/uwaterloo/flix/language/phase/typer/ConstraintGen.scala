@@ -23,7 +23,7 @@ import ca.uwaterloo.flix.language.ast.shared.{CheckedCastType, Scope, VarText}
 import ca.uwaterloo.flix.language.ast.{Kind, KindedAst, Name, Scheme, SemanticOp, SourceLocation, Symbol, Type, TypeConstructor}
 import ca.uwaterloo.flix.language.phase.unification.Substitution
 import ca.uwaterloo.flix.util.collection.ListOps
-import ca.uwaterloo.flix.util.{InternalCompilerException, Subeffecting}
+import ca.uwaterloo.flix.util.{InternalCompilerException, StdlibProfile, Subeffecting}
 
 import java.lang.reflect.Modifier
 
@@ -839,6 +839,101 @@ object ConstraintGen {
           val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
           (resTpe, resEff)
 
+        case SemanticOp.IoOp.FileExists
+             | SemanticOp.IoOp.FileIsDirectory
+             | SemanticOp.IoOp.FileIsRegularFile
+             | SemanticOp.IoOp.FileIsReadable
+             | SemanticOp.IoOp.FileIsSymbolicLink
+             | SemanticOp.IoOp.FileIsWritable
+             | SemanticOp.IoOp.FileIsExecutable =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Str, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Bool, Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.FileAccessTime
+             | SemanticOp.IoOp.FileCreationTime
+             | SemanticOp.IoOp.FileModificationTime
+             | SemanticOp.IoOp.FileSize =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Str, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Int64, Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.FileRead =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Str, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Str, Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.FileReadLines
+             | SemanticOp.IoOp.FileList =>
+          val regionVar = freshVar(Kind.Eff, exp.loc)
+          val regionType = Type.mkRegionToStar(regionVar, exp.loc)
+          val argTpe = Type.mkTuple(List(regionType, Type.Str), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.mkArray(Type.Str, regionVar, exp.loc), Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, regionVar, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.FileReadBytes =>
+          val regionVar = freshVar(Kind.Eff, exp.loc)
+          val regionType = Type.mkRegionToStar(regionVar, exp.loc)
+          val argTpe = Type.mkTuple(List(regionType, Type.Str), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.mkArray(Type.Int8, regionVar, exp.loc), Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, regionVar, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.FileWrite
+             | SemanticOp.IoOp.FileAppend =>
+          val argTpe = Type.mkTuple(List(Type.Str, Type.Str), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Unit, Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.FileWriteBytes
+             | SemanticOp.IoOp.FileAppendBytes =>
+          val regionVar = freshVar(Kind.Eff, exp.loc)
+          val argTpe = Type.mkTuple(List(Type.mkArray(Type.Int8, regionVar, exp.loc), Type.Str), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Unit, Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, regionVar, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.FileTruncate
+             | SemanticOp.IoOp.FileMkDir
+             | SemanticOp.IoOp.FileMkDirs =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Str, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Unit, Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.FileMkTempDir =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Str, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Str, Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
+          (resTpe, resEff)
+
         case SemanticOp.IoOp.TcpSocketRead |
              SemanticOp.IoOp.TcpSocketWrite |
              SemanticOp.IoOp.ProcessStdinWrite |
@@ -867,6 +962,14 @@ object ConstraintGen {
           val (tpe, eff) = visitExp(exp)
           c.expectType(expected = Type.Int64, actual = tpe, exp.loc)
           c.unifyType(Type.mkTuple(List(Type.Bool, Type.Int64, Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.TcpServerLocalPort =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Int64, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
           val resTpe = tvar
           val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
           (resTpe, resEff)
@@ -2029,10 +2132,22 @@ object ConstraintGen {
     * Returns the the body's type and the body's effect
     */
   private def visitCatchRule(rule: KindedAst.CatchRule)(implicit c: TypeContext, root: KindedAst.Root, flix: Flix): (Type, Type) = rule match {
-    case KindedAst.CatchRule(sym, clazz, exp, _) =>
-      c.expectType(expected = Type.mkNative(clazz, sym.loc), sym.tvar, sym.loc)
+    case KindedAst.CatchRule(sym, catchTpe, exp, _) =>
+      flix.options.stdlibProfile match {
+        case StdlibProfile.Jvm =>
+          c.expectType(expected = catchTpe, actual = sym.tvar, sym.loc)
+        case StdlibProfile.Portable =>
+          val exnTpe = mkExnType(sym.loc)
+          c.expectType(expected = exnTpe, actual = sym.tvar, sym.loc)
+      }
       visitExp(exp)
   }
+
+  private def mkExnType(loc: SourceLocation)(implicit root: KindedAst.Root): Type =
+    root.enums.keys.find(sym => sym.text == "Exn" && sym.namespace.isEmpty) match {
+      case Some(sym) => Type.mkEnum(sym, Kind.Star, loc)
+      case None => throw InternalCompilerException("Missing enum symbol: Exn.", loc)
+    }
 
   /**
     * Generates constraints unifying the given expected and actual formal parameters.

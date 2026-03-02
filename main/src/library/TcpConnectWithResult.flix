@@ -18,7 +18,7 @@
 /// The effect used to connect to a TCP server.
 ///
 eff TcpConnectWithResult {
-    def connect(ip: IpAddr, port: Int16): Result[IoError, TcpSocket]
+    def connect(ip: IpAddr, port: Int32): Result[IoError, TcpSocket]
 }
 
 pub mod TcpConnectWithResult {
@@ -35,7 +35,7 @@ pub mod TcpConnectWithResult {
             f(x)
         } with handler TcpConnectWithResult {
             def connect(ip, port, k) = {
-                let (ok, id, kind, msg) = %%TCP_SOCKET_CONNECT%%((IpAddr.toBytes(ip), Int16.toInt32(port)));
+                let (ok, id, kind, msg) = %%TCP_SOCKET_CONNECT%%((IpAddr.toBytes(ip), port));
                 if (ok) {
                     k(Ok(TcpSocket.TcpSocket(id)))
                 } else {

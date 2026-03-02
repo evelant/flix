@@ -108,39 +108,42 @@ pub mod HttpWithResult {
         run {
             f(x)
         } with handler HttpWithResult {
-	            def request(method, url, headers, bodyOpt, k) = region rc {
-	                let reqPairs =
-	                    headers
-	                        |> Map.toList
-	                        |> List.flatMap(e -> {
-	                            let key = fst(e);
-	                            let vs = snd(e);
-	                            vs |> List.flatMap(v -> key :: v :: Nil)
-	                        });
-	                let reqHeaders = List.toArray(rc, reqPairs);
+	            def request(method, url, headers, bodyOpt, k) = {
+	                let res = region rc {
+	                    let reqPairs =
+	                        headers
+	                            |> Map.toList
+	                            |> List.flatMap(e -> {
+	                                let key = fst(e);
+	                                let vs = snd(e);
+	                                vs |> List.flatMap(v -> key :: v :: Nil)
+	                            });
+	                    let reqHeaders = List.toArray(rc, reqPairs);
 
-	                let (hasBody, bodyStr) = match bodyOpt {
-	                    case Some(b) => (true, b)
-                    case None => (false, "")
-                };
+	                    let (hasBody, bodyStr) = match bodyOpt {
+	                        case Some(b) => (true, b)
+	                        case None => (false, "")
+	                    };
 
-                let (ok, status, respPairs, respBody, kindCode, msg) = %%HTTP_REQUEST%%((method, url, reqHeaders, hasBody, bodyStr));
-                if (ok) {
-                    let respHeaders = headersFromPairs(respPairs);
-                    k(Ok(Http.Response.Response({
-                        status = status,
-                        headers = respHeaders,
-                        body = respBody
-                    })))
-                } else {
-                    let kind = IoError.errorKindFromCode(kindCode);
-                    let msg1 = match kind {
-                        case ErrorKind.ConnectionFailed => "Connection failed"
-                        case _ => msg
-                    };
-                    k(Err(IoError(kind, msg1)))
-                }
-            }
+	                    let (ok, status, respPairs, respBody, kindCode, msg) = %%HTTP_REQUEST%%((method, url, reqHeaders, hasBody, bodyStr));
+	                    if (ok) {
+	                        let respHeaders = headersFromPairs(respPairs);
+	                        Ok(Http.Response.Response({
+	                            status = status,
+	                            headers = respHeaders,
+	                            body = respBody
+	                        }))
+	                    } else {
+	                        let kind = IoError.errorKindFromCode(kindCode);
+	                        let msg1 = match kind {
+	                            case ErrorKind.ConnectionFailed => "Connection failed"
+	                            case _ => msg
+	                        };
+	                        Err(IoError(kind, msg1))
+	                    }
+	                };
+	                k(res)
+	            }
         }
 
     ///

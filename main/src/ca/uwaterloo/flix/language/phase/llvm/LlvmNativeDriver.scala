@@ -34,7 +34,12 @@ object LlvmNativeDriver {
 
   case class Artifacts(executable: Path)
 
+  case class LibraryArtifacts(staticLibrary: Path)
+
+  case class SharedLibraryArtifacts(sharedLibrary: Path)
+
   private val BundledRuntimeZigResource: String = "/runtime/src/flix_rt_llvm.zig"
+  private val BundledUnicodeCaseTablesZigResource: String = "/runtime/src/unicode_case_tables.zig"
 
   /**
     * Compiles `modulePath` (a `.ll` file) into a native executable in `outputPath/llvm/`.
@@ -45,7 +50,6 @@ object LlvmNativeDriver {
 
     val exeName = if (isWindows) "flix-llvm-native.exe" else "flix-llvm-native"
     val exePath = outDir.resolve(exeName)
-    val runtimeObj = outDir.resolve("flix_rt_llvm.o")
 
     val optFlag = flix.options.build match {
       case Build.Development => "-O0"
@@ -54,24 +58,7 @@ object LlvmNativeDriver {
 
     val runtimeZig = resolveRuntimeZig(outDir)
 
-    // Compile the Zig runtime to an object file.
-    val compileRuntimeCmd = List(
-      "zig",
-      "cc",
-      "-c",
-      "-Wno-override-module",
-      optFlag,
-      runtimeZig.toString,
-      "-o",
-      runtimeObj.toString
-    )
-    val (rtExit, rtOutput) = exec(compileRuntimeCmd, outDir)
-    if (rtExit != 0) {
-      throw InternalCompilerException(
-        s"LLVM-native toolchain failed while compiling runtime (exit $rtExit):\n${compileRuntimeCmd.mkString(" ")}\n\n$rtOutput",
-        SourceLocation.Unknown
-      )
-    }
+    val runtimeObj = compileRuntime(runtimeZig, outDir, optFlag)
 
     val cmd = List(
       "zig",
@@ -96,6 +83,96 @@ object LlvmNativeDriver {
   }
 
   /**
+    * Compiles `modulePath` (a `.ll` file) into a static library in `outputPath/llvm/`.
+    *
+    * The archive contains both the LLVM module object and the Zig runtime object.
+    */
+  def buildStaticLibrary(modulePath: Path)(implicit flix: Flix): LibraryArtifacts = {
+    val outDir = flix.options.outputPath.resolve("llvm").toAbsolutePath
+    Files.createDirectories(outDir)
+
+    val optFlag = flix.options.build match {
+      case Build.Development => "-O0"
+      case Build.Production => "-O2"
+    }
+
+    val runtimeZig = resolveRuntimeZig(outDir)
+    val runtimeObj = compileRuntime(runtimeZig, outDir, optFlag)
+    val moduleObj = compileModule(modulePath, outDir, optFlag)
+
+    val libPath = outDir.resolve("libflix-llvm-native.a")
+    val arCmd = List(
+      "zig",
+      "ar",
+      "rcs",
+      libPath.toString,
+      moduleObj.toString,
+      runtimeObj.toString
+    )
+    val (arExit, arOutput) = exec(arCmd, outDir)
+    if (arExit != 0) {
+      throw InternalCompilerException(
+        s"LLVM-native toolchain failed while creating archive (exit $arExit):\n${arCmd.mkString(" ")}\n\n$arOutput",
+        SourceLocation.Unknown
+      )
+    }
+
+    LibraryArtifacts(libPath)
+  }
+
+  /**
+    * Compiles `modulePath` (a `.ll` file) into a shared library in `outputPath/llvm/`.
+    *
+    * The shared library contains both the LLVM module object and the Zig runtime object.
+    */
+  def buildSharedLibrary(modulePath: Path)(implicit flix: Flix): SharedLibraryArtifacts = {
+    val outDir = flix.options.outputPath.resolve("llvm").toAbsolutePath
+    Files.createDirectories(outDir)
+
+    val optFlag = flix.options.build match {
+      case Build.Development => "-O0"
+      case Build.Production => "-O2"
+    }
+
+    val runtimeZig = resolveRuntimeZig(outDir)
+    val runtimeObj = compileRuntime(runtimeZig, outDir, optFlag)
+    val moduleObj = compileModule(modulePath, outDir, optFlag)
+
+    val libName =
+      if (isWindows) "flix-llvm-native.dll"
+      else if (isMac) "libflix-llvm-native.dylib"
+      else "libflix-llvm-native.so"
+
+    val libPath = outDir.resolve(libName)
+
+    val linkModeFlag = if (isMac) "-dynamiclib" else "-shared"
+    val windowsExportFlags = if (isWindows) List("-Wl,--export-all-symbols") else Nil
+
+    val linkCmd = List(
+      "zig",
+      "cc",
+      linkModeFlag,
+      "-Wno-override-module",
+      optFlag
+    ) ::: windowsExportFlags ::: List(
+      moduleObj.toString,
+      runtimeObj.toString,
+      "-o",
+      libPath.toString
+    )
+
+    val (linkExit, linkOutput) = exec(linkCmd, outDir)
+    if (linkExit != 0) {
+      throw InternalCompilerException(
+        s"LLVM-native toolchain failed while linking shared library (exit $linkExit):\n${linkCmd.mkString(" ")}\n\n$linkOutput",
+        SourceLocation.Unknown
+      )
+    }
+
+    SharedLibraryArtifacts(libPath)
+  }
+
+  /**
     * Resolves the Zig runtime support file for the LLVM-native backend.
     *
     * Bring-up behavior:
@@ -107,20 +184,63 @@ object LlvmNativeDriver {
     if (Files.exists(cwdRuntime)) return cwdRuntime
 
     val dest = outDir.resolve("flix_rt_llvm.zig").toAbsolutePath.normalize()
+    val unicodeDest = outDir.resolve("unicode_case_tables.zig").toAbsolutePath.normalize()
     val is = Option(getClass.getResourceAsStream(BundledRuntimeZigResource)).getOrElse {
       throw InternalCompilerException(
         s"Missing LLVM runtime support file: '$cwdRuntime' and no bundled resource '$BundledRuntimeZigResource' found.",
         SourceLocation.Unknown
       )
     }
+    val unicodeIs = Option(getClass.getResourceAsStream(BundledUnicodeCaseTablesZigResource)).getOrElse {
+      throw InternalCompilerException(
+        s"Missing LLVM runtime support file: '$cwdRuntime' and no bundled resource '$BundledUnicodeCaseTablesZigResource' found.",
+        SourceLocation.Unknown
+      )
+    }
 
     try {
       Files.copy(is, dest, StandardCopyOption.REPLACE_EXISTING)
+      Files.copy(unicodeIs, unicodeDest, StandardCopyOption.REPLACE_EXISTING)
     } finally {
       is.close()
+      unicodeIs.close()
     }
 
     dest
+  }
+
+  private def compileRuntime(runtimeZig: Path, outDir: Path, optFlag: String): Path = {
+    val runtimeObj = outDir.resolve("flix_rt_llvm.o")
+    val compileRuntimeCmd =
+      List("zig", "cc", "-c", "-Wno-override-module") :::
+        picFlags :::
+        List(optFlag, runtimeZig.toString, "-o", runtimeObj.toString)
+    val (rtExit, rtOutput) = exec(compileRuntimeCmd, outDir)
+    if (rtExit != 0) {
+      throw InternalCompilerException(
+        s"LLVM-native toolchain failed while compiling runtime (exit $rtExit):\n${compileRuntimeCmd.mkString(" ")}\n\n$rtOutput",
+        SourceLocation.Unknown
+      )
+    }
+    runtimeObj
+  }
+
+  private def compileModule(modulePath: Path, outDir: Path, optFlag: String): Path = {
+    val moduleObj = outDir.resolve("module.o")
+    val compileModuleCmd =
+      List("zig", "cc", "-c", "-Wno-override-module") :::
+        picFlags :::
+        List(optFlag, modulePath.toString, "-o", moduleObj.toString)
+
+    val (modExit, modOutput) = exec(compileModuleCmd, outDir)
+    if (modExit != 0) {
+      throw InternalCompilerException(
+        s"LLVM-native toolchain failed while compiling module object (exit $modExit):\n${compileModuleCmd.mkString(" ")}\n\n$modOutput",
+        SourceLocation.Unknown
+      )
+    }
+
+    moduleObj
   }
 
   private def exec(cmd: List[String], cwd: Path): (Int, String) = {
@@ -136,5 +256,11 @@ object LlvmNativeDriver {
 
   private def isWindows: Boolean =
     System.getProperty("os.name", "").toLowerCase.contains("win")
+
+  private def isMac: Boolean =
+    System.getProperty("os.name", "").toLowerCase.contains("mac")
+
+  private def picFlags: List[String] =
+    if (isWindows) Nil else List("-fPIC")
 
 }

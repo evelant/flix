@@ -422,7 +422,7 @@ object NamedAst {
 
   case class JvmMethod(ident: Name.Ident, fparams: List[FormalParam], exp: Expr, tpe: Type, eff: Option[Type], loc: SourceLocation)
 
-  case class CatchRule(sym: Symbol.VarSym, className: Name.Ident, exp: Expr, loc: SourceLocation)
+  case class CatchRule(sym: Symbol.VarSym, tpe: Type, exp: Expr, loc: SourceLocation)
 
   case class HandlerRule(op: Name.Ident, fparams: List[FormalParam], exp: Expr, loc: SourceLocation)
 

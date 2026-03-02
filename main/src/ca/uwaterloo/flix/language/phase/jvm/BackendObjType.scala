@@ -28,7 +28,7 @@ import ca.uwaterloo.flix.language.phase.jvm.ClassMaker.Volatility.{IsVolatile, N
 import ca.uwaterloo.flix.language.phase.jvm.JvmName.MethodDescriptor.mkDescriptor
 import ca.uwaterloo.flix.language.phase.jvm.JvmName.{DevFlixRuntime, MethodDescriptor, RootPackage}
 import ca.uwaterloo.flix.util.InternalCompilerException
-import org.objectweb.asm.{MethodVisitor, Opcodes}
+import org.objectweb.asm.{Label, MethodVisitor, Opcodes}
 
 /**
   * Represents all Flix types that are objects on the JVM (array is an exception).
@@ -1554,8 +1554,25 @@ object BackendObjType {
           DUP()
           t.store()
         } {
+          // Joining child threads is required for correct region semantics, including on exceptional exit.
+          // Child exceptions are reported separately; an interrupt should not abort the join loop.
+          val joinStart = new Label()
+          val joinEnd = new Label()
+          val joinHandler = new Label()
+          val joinDone = new Label()
+
+          mv.visitTryCatchBlock(joinStart, joinEnd, joinHandler, JvmName.ofClass(classOf[InterruptedException]).toInternalName)
+
+          mv.visitLabel(joinStart)
           t.load()
           INVOKEVIRTUAL(ClassConstants.Thread.JoinMethod)
+          mv.visitLabel(joinEnd)
+          mv.visitJumpInsn(Opcodes.GOTO, joinDone)
+
+          mv.visitLabel(joinHandler)
+          // Stack: [InterruptedException]
+          POP()
+          mv.visitLabel(joinDone)
         }
         withName(2, JvmName.Iterator.toTpe) { i =>
           thisLoad()
@@ -1578,7 +1595,7 @@ object BackendObjType {
 
     // final public void reportChildException(Throwable e) {
     //   childException = e;
-    //   regionThread.interrupt();
+    //   // Note: do not interrupt the region thread; child exceptions take effect at region exit.
     // }
     def ReportChildExceptionMethod: InstanceMethod = InstanceMethod(this.jvmName, "reportChildException", mkDescriptor(JvmName.Throwable.toTpe)(VoidableType.Void))
 
@@ -1586,9 +1603,6 @@ object BackendObjType {
       thisLoad()
       ALOAD(1)
       PUTFIELD(ChildExceptionField)
-      thisLoad()
-      GETFIELD(RegionThreadField)
-      INVOKEVIRTUAL(ClassConstants.Thread.InterruptMethod)
       RETURN()
     }
 

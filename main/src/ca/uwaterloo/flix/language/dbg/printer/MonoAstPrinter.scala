@@ -1,10 +1,16 @@
 package ca.uwaterloo.flix.language.dbg.printer
 
-import ca.uwaterloo.flix.language.ast.{MonoAst, Symbol}
+import ca.uwaterloo.flix.language.ast.{MonoAst, Symbol, Type, TypeConstructor}
 import ca.uwaterloo.flix.language.ast.MonoAst.{Expr, ExtPattern, ExtTagPattern, Pattern}
 import ca.uwaterloo.flix.language.dbg.DocAst
 
 object MonoAstPrinter {
+
+  private def catchClassOf(tpe0: Type): Class[?] =
+    Type.eraseAliases(tpe0) match {
+      case Type.Cst(TypeConstructor.Native(clazz), _) => clazz
+      case _ => classOf[Object]
+    }
 
   /** Returns the [[DocAst.Program]] representation of `root`. */
   def print(root: MonoAst.Root): DocAst.Program = {
@@ -62,7 +68,7 @@ object MonoAstPrinter {
 
   /** Returns the [[DocAst]] representation of `rule`. */
   private def printCatchRule(rule: MonoAst.CatchRule): (Symbol.VarSym, Class[?], DocAst.Expr) = rule match {
-    case MonoAst.CatchRule(sym, clazz, exp) => (sym, clazz, print(exp))
+    case MonoAst.CatchRule(sym, catchTpe, exp) => (sym, catchClassOf(catchTpe), print(exp))
   }
 
   /** Returns the [[DocAst]] representation of `rule`. */

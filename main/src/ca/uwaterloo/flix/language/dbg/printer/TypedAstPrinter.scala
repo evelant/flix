@@ -3,10 +3,16 @@ package ca.uwaterloo.flix.language.dbg.printer
 import ca.uwaterloo.flix.language.ast.TypedAst.Pattern.Record
 import ca.uwaterloo.flix.language.ast.TypedAst.{Expr, ExtPattern, ExtTagPattern, Pattern}
 import ca.uwaterloo.flix.language.ast.shared.SymUse.{DefSymUse, LocalDefSymUse, SigSymUse}
-import ca.uwaterloo.flix.language.ast.{Symbol, TypedAst}
+import ca.uwaterloo.flix.language.ast.{Symbol, Type, TypeConstructor, TypedAst}
 import ca.uwaterloo.flix.language.dbg.DocAst
 
 object TypedAstPrinter {
+
+  private def catchClassOf(tpe0: Type): Class[?] =
+    Type.eraseAliases(tpe0) match {
+      case Type.Cst(TypeConstructor.Native(clazz), _) => clazz
+      case _ => classOf[Object]
+    }
 
   /**
     * Returns the [[DocAst.Program]] representation of `root`.
@@ -124,7 +130,7 @@ object TypedAstPrinter {
     * Returns the [[DocAst]] representation of `rule`.
     */
   private def printCatchRule(rule: TypedAst.CatchRule): (Symbol.VarSym, Class[?], DocAst.Expr) = rule match {
-    case TypedAst.CatchRule(bnd, clazz, exp, _) => (bnd.sym, clazz, print(exp))
+    case TypedAst.CatchRule(bnd, catchTpe, exp, _) => (bnd.sym, catchClassOf(catchTpe), print(exp))
   }
 
   /**

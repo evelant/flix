@@ -150,10 +150,10 @@ object Lowerer {
     case ErasedAst.Expr.TryCatch(exp, rules, tpe, purity, loc) =>
       val e = visitExpr(exp)
       val rs = rules.map {
-        case ErasedAst.CatchRule(sym, clazz, body) =>
+        case ErasedAst.CatchRule(sym, catchTpe, body) =>
           lctx.lparams.addOne(LoweredAst.LocalParam(sym, SimpleType.Object))
           val b = visitExpr(body)
-          LoweredAst.CatchRule(sym, clazz, b)
+          LoweredAst.CatchRule(sym, catchTpe, b)
       }
       LoweredAst.Expr.TryCatch(e, rs, tpe, purity, loc)
 

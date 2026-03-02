@@ -25,7 +25,7 @@ import ca.uwaterloo.flix.language.errors.EntryPointError
 import ca.uwaterloo.flix.language.phase.typer.{ConstraintSolver2, SubstitutionTree, TypeConstraint}
 import ca.uwaterloo.flix.runtime.shell.Shell
 import ca.uwaterloo.flix.util.collection.CofiniteSet
-import ca.uwaterloo.flix.util.{InternalCompilerException, ParOps, Result}
+import ca.uwaterloo.flix.util.{CompilationTarget, InternalCompilerException, ParOps, Result}
 
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
@@ -271,9 +271,15 @@ object EntryPoints {
       case None =>
         // Only run these on functions without type variables.
         // An exported function should have:
-        //  - Only valid Java types
-        //  - An effect set containing only primitive effects or effects that have default handlers
-        checkEffects(defn, Symbol.PrimitiveEffs ++ root.defaultHandlers.map(_.handledSym)).toList ++ checkJavaTypes(defn)
+        //  - Only exportable types (target-dependent; JVM exports are Java-compatible)
+        //  - An effect set containing only primitive effects or effects that have default handlers (JVM targets)
+        //
+        // For LLVM targets we allow unhandled effects in exports so they can suspend and be resumed by the host.
+        val effErrs = flix.options.target match {
+          case CompilationTarget.LlvmNative | CompilationTarget.LlvmWasm => Nil
+          case _ => checkEffects(defn, Symbol.PrimitiveEffs ++ root.defaultHandlers.map(_.handledSym)).toList
+        }
+        effErrs ++ checkExportTypes(defn)
     }) ++
       checkNonRootNamespace(defn) ++
       checkPub(defn) ++
@@ -437,8 +443,8 @@ object EntryPoints {
     else Some(EntryPointError.IllegalExportName(defn.sym.loc))
   }
 
-  /** Returns an error for each type in `defn` that is not valid in Java. */
-  private def checkJavaTypes(defn: TypedAst.Def)(implicit flix: Flix): List[EntryPointError] = {
+  /** Returns an error for each type in `defn` that is not exportable on the current compilation target. */
+  private def checkExportTypes(defn: TypedAst.Def)(implicit flix: Flix): List[EntryPointError] = {
     val types = defn.spec.retTpe :: defn.spec.fparams.map(_.tpe)
     types.flatMap(tpe => {
       isExportableType(tpe) match {
@@ -454,16 +460,35 @@ object EntryPoints {
   }
 
   /**
-    * Returns `true` if `tpe` is a valid Java type that can be exported.
+    * Returns `true` if `tpe` is exportable on the current compilation target.
     *
     *   - `isExportableType(Int32) = true`
     *   - `isExportableType(Bool) = true`
-    *   - `isExportableType(String) = true`
+    *   - `isExportableType(String) = true` (LLVM targets; JVM targets use Java-compatible types)
     *   - `isExportableType(List[String]) = false`
-    *   - `isExportableType(java.lang.Object) = true`
+    *   - `isExportableType(java.lang.Object) = true` (JVM only)
+    */
+  private def isExportableType(tpe: Type)(implicit flix: Flix): Result[Boolean, ErrorOrMalformed.type] = {
+    // TODO: Exportability should eventually be fully backend-specific (stable C ABI for LLVM targets, Java types for JVM).
+    flix.options.target match {
+      case CompilationTarget.Jvm =>
+        isExportableJavaType(tpe)
+      case CompilationTarget.LlvmNative | CompilationTarget.LlvmWasm =>
+        isExportableNativeType(tpe)
+    }
+  }
+
+  /**
+    * Returns `true` if `tpe` is a valid Java type that can be exported.
+    *
+    *   - `isExportableJavaType(Int32) = true`
+    *   - `isExportableJavaType(Bool) = true`
+    *   - `isExportableJavaType(String) = false` (Flix `String`)
+    *   - `isExportableJavaType(List[String]) = false`
+    *   - `isExportableJavaType(java.lang.Object) = true`
     */
   @tailrec
-  private def isExportableType(tpe: Type): Result[Boolean, ErrorOrMalformed.type] = {
+  private def isExportableJavaType(tpe: Type): Result[Boolean, ErrorOrMalformed.type] = {
     // TODO: Currently, because of eager erasure, we only allow primitive types and Object.
     tpe match {
       case Type.Cst(TypeConstructor.Bool, _) => Result.Ok(true)
@@ -477,13 +502,80 @@ object EntryPoints {
       case Type.Cst(TypeConstructor.Native(clazz), _) if clazz == classOf[java.lang.Object] => Result.Ok(true)
       case Type.Cst(_, _) => Result.Ok(false)
       case Type.Apply(_, _, _) => Result.Ok(false)
-      case Type.Alias(_, _, t, _) => isExportableType(t)
+      case Type.Alias(_, _, t, _) => isExportableJavaType(t)
       case Type.Var(_, _) => Result.Err(ErrorOrMalformed)
       case Type.AssocType(_, _, _, _) => Result.Err(ErrorOrMalformed)
       case Type.JvmToType(_, _) => Result.Err(ErrorOrMalformed)
       case Type.JvmToEff(_, _) => Result.Err(ErrorOrMalformed)
       case Type.UnresolvedJvmType(_, _) => Result.Err(ErrorOrMalformed)
     }
+  }
+
+  /**
+    * Returns `true` if `tpe` is a type supported by the LLVM-native C ABI for `@Export`.
+    *
+    * Bring-up policy: allow a small portable set of types and encode non-primitive values as opaque pointers.
+    */
+  @tailrec
+  private def isExportableNativeType(tpe: Type): Result[Boolean, ErrorOrMalformed.type] = tpe match {
+    case Type.Cst(TypeConstructor.Bool, _) => Result.Ok(true)
+    case Type.Cst(TypeConstructor.Char, _) => Result.Ok(true)
+    case Type.Cst(TypeConstructor.Float32, _) => Result.Ok(true)
+    case Type.Cst(TypeConstructor.Float64, _) => Result.Ok(true)
+    case Type.Cst(TypeConstructor.Int8, _) => Result.Ok(true)
+    case Type.Cst(TypeConstructor.Int16, _) => Result.Ok(true)
+    case Type.Cst(TypeConstructor.Int32, _) => Result.Ok(true)
+    case Type.Cst(TypeConstructor.Int64, _) => Result.Ok(true)
+    case Type.Cst(TypeConstructor.Str, _) => Result.Ok(true)
+
+    // Array[Int8, Static] (Static is aliased to IO in the stdlib).
+    case Type.Apply(Type.Apply(Type.Cst(TypeConstructor.Array, _), elm, _), reg, _) =>
+      (isInt8Type(elm), isStaticRegion(reg)) match {
+        case (Result.Ok(true), Result.Ok(true)) => Result.Ok(true)
+        case (Result.Ok(_), Result.Ok(_)) => Result.Ok(false)
+        case _ => Result.Err(ErrorOrMalformed)
+      }
+
+    case Type.Cst(_, _) => Result.Ok(false)
+    case Type.Apply(_, _, _) => Result.Ok(false)
+    case Type.Alias(_, _, t, _) => isExportableNativeType(t)
+    case Type.Var(_, _) => Result.Err(ErrorOrMalformed)
+    case Type.AssocType(_, _, _, _) => Result.Err(ErrorOrMalformed)
+    case Type.JvmToType(_, _) => Result.Err(ErrorOrMalformed)
+    case Type.JvmToEff(_, _) => Result.Err(ErrorOrMalformed)
+    case Type.UnresolvedJvmType(_, _) => Result.Err(ErrorOrMalformed)
+  }
+
+  /**
+    * Returns `true` if `tpe` represents the global-lifetime region (Static), which is aliased to `IO`.
+    */
+  @tailrec
+  private def isStaticRegion(tpe: Type): Result[Boolean, ErrorOrMalformed.type] = tpe match {
+    case Type.Cst(TypeConstructor.Effect(sym, _), _) if sym == Symbol.IO => Result.Ok(true)
+    case Type.Alias(_, _, t, _) => isStaticRegion(t)
+    case Type.Cst(_, _) => Result.Ok(false)
+    case Type.Apply(_, _, _) => Result.Ok(false)
+    case Type.Var(_, _) => Result.Err(ErrorOrMalformed)
+    case Type.AssocType(_, _, _, _) => Result.Err(ErrorOrMalformed)
+    case Type.JvmToType(_, _) => Result.Err(ErrorOrMalformed)
+    case Type.JvmToEff(_, _) => Result.Err(ErrorOrMalformed)
+    case Type.UnresolvedJvmType(_, _) => Result.Err(ErrorOrMalformed)
+  }
+
+  /**
+    * Returns `true` if `tpe` is equivalent to `Int8` (via type aliases).
+    */
+  @tailrec
+  private def isInt8Type(tpe: Type): Result[Boolean, ErrorOrMalformed.type] = tpe match {
+    case Type.Cst(TypeConstructor.Int8, _) => Result.Ok(true)
+    case Type.Alias(_, _, t, _) => isInt8Type(t)
+    case Type.Cst(_, _) => Result.Ok(false)
+    case Type.Apply(_, _, _) => Result.Ok(false)
+    case Type.Var(_, _) => Result.Err(ErrorOrMalformed)
+    case Type.AssocType(_, _, _, _) => Result.Err(ErrorOrMalformed)
+    case Type.JvmToType(_, _) => Result.Err(ErrorOrMalformed)
+    case Type.JvmToEff(_, _) => Result.Err(ErrorOrMalformed)
+    case Type.UnresolvedJvmType(_, _) => Result.Err(ErrorOrMalformed)
   }
 
   /**

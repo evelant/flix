@@ -211,9 +211,9 @@ object LambdaLift {
     case SimplifiedAst.Expr.TryCatch(exp, rules, tpe, purity, loc) =>
       val e = visitExp(exp)
       val rs = rules map {
-        case SimplifiedAst.CatchRule(sym, clazz, body) =>
+        case SimplifiedAst.CatchRule(sym, catchTpe, body) =>
           val b = visitExp(body)
-          LiftedAst.CatchRule(sym, clazz, b)
+          LiftedAst.CatchRule(sym, catchTpe, b)
       }
       LiftedAst.Expr.TryCatch(e, rs, tpe, purity, loc)
 

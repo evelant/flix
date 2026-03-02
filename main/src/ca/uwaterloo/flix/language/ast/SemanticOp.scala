@@ -1186,6 +1186,121 @@ object SemanticOp {
     case object NewId extends IoOp with UnaryOp
 
     /**
+      * Returns `true` if the file exists.
+      */
+    case object FileExists extends IoOp with UnaryOp
+
+    /**
+      * Returns `true` if the path is a directory.
+      */
+    case object FileIsDirectory extends IoOp with UnaryOp
+
+    /**
+      * Returns `true` if the path is a regular file.
+      */
+    case object FileIsRegularFile extends IoOp with UnaryOp
+
+    /**
+      * Returns `true` if the path is readable.
+      */
+    case object FileIsReadable extends IoOp with UnaryOp
+
+    /**
+      * Returns `true` if the path is a symbolic link.
+      */
+    case object FileIsSymbolicLink extends IoOp with UnaryOp
+
+    /**
+      * Returns `true` if the path is writable.
+      */
+    case object FileIsWritable extends IoOp with UnaryOp
+
+    /**
+      * Returns `true` if the path is executable.
+      */
+    case object FileIsExecutable extends IoOp with UnaryOp
+
+    /**
+      * Returns the last-access time in milliseconds since the epoch.
+      */
+    case object FileAccessTime extends IoOp with UnaryOp
+
+    /**
+      * Returns the creation time in milliseconds since the epoch.
+      */
+    case object FileCreationTime extends IoOp with UnaryOp
+
+    /**
+      * Returns the last-modified time in milliseconds since the epoch.
+      */
+    case object FileModificationTime extends IoOp with UnaryOp
+
+    /**
+      * Returns the file size in bytes.
+      */
+    case object FileSize extends IoOp with UnaryOp
+
+    /**
+      * Reads the entire file into a string (UTF-8, lossy).
+      */
+    case object FileRead extends IoOp with UnaryOp
+
+    /**
+      * Reads the file as an array of lines.
+      */
+    case object FileReadLines extends IoOp with UnaryOp
+
+    /**
+      * Reads the file as an array of bytes.
+      */
+    case object FileReadBytes extends IoOp with UnaryOp
+
+    /**
+      * Lists the contents of a directory.
+      */
+    case object FileList extends IoOp with UnaryOp
+
+    /**
+      * Writes a string to a file (overwrite/create).
+      */
+    case object FileWrite extends IoOp with UnaryOp
+
+    /**
+      * Writes bytes to a file (overwrite/create).
+      */
+    case object FileWriteBytes extends IoOp with UnaryOp
+
+    /**
+      * Appends a string to a file (append/create).
+      */
+    case object FileAppend extends IoOp with UnaryOp
+
+    /**
+      * Appends bytes to a file (append/create).
+      */
+    case object FileAppendBytes extends IoOp with UnaryOp
+
+    /**
+      * Truncates a file to length 0.
+      */
+    case object FileTruncate extends IoOp with UnaryOp
+
+    /**
+      * Creates a directory.
+      */
+    case object FileMkDir extends IoOp with UnaryOp
+
+    /**
+      * Creates a directory and any missing parent directories.
+      */
+    case object FileMkDirs extends IoOp with UnaryOp
+
+    /**
+      * Creates a temporary directory with the given prefix.
+      */
+    case object FileMkTempDir extends IoOp with UnaryOp
+
+    /**
       * Reads from a TCP socket.
       */
     case object TcpSocketRead extends IoOp with UnaryOp
@@ -1209,6 +1324,11 @@ object SemanticOp {
       * Binds a TCP server socket, returning a new server handle.
       */
     case object TcpServerBind extends IoOp with UnaryOp
+
+    /**
+      * Returns the local port that a TCP server socket is bound to.
+      */
+    case object TcpServerLocalPort extends IoOp with UnaryOp
 
     /**
       * Accepts a TCP server connection, returning a new socket handle.

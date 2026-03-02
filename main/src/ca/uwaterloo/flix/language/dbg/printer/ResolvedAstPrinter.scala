@@ -18,11 +18,17 @@ package ca.uwaterloo.flix.language.dbg.printer
 
 import ca.uwaterloo.flix.language.ast.ResolvedAst.{Expr, ExtPattern, ExtTagPattern, Pattern}
 import ca.uwaterloo.flix.language.ast.shared.SymUse.{DefSymUse, LocalDefSymUse, SigSymUse}
-import ca.uwaterloo.flix.language.ast.{ResolvedAst, Symbol}
+import ca.uwaterloo.flix.language.ast.{ResolvedAst, Symbol, TypeConstructor, UnkindedType}
 import ca.uwaterloo.flix.language.dbg.DocAst
 
 
 object ResolvedAstPrinter {
+
+  private def catchClassOf(tpe0: UnkindedType): Class[?] =
+    UnkindedType.eraseAliases(tpe0) match {
+      case UnkindedType.Cst(TypeConstructor.Native(clazz), _) => clazz
+      case _ => classOf[Object]
+    }
 
   /** Returns the [[DocAst.Program]] representation of `root`. */
   def print(root: ResolvedAst.Root): DocAst.Program = {
@@ -99,7 +105,7 @@ object ResolvedAstPrinter {
     case Expr.Unsafe(exp, runEff, asEff, _) => DocAst.Expr.Unsafe(print(exp), UnkindedTypePrinter.print(runEff), asEff.map(UnkindedTypePrinter.print))
     case Expr.Without(exp, symUse, _) => DocAst.Expr.Without(print(exp), symUse.sym)
     case Expr.TryCatch(exp, rules, _) => DocAst.Expr.TryCatch(print(exp), rules.map {
-      case ResolvedAst.CatchRule(sym, clazz, body, _) => (sym, clazz, print(body))
+      case ResolvedAst.CatchRule(sym, tpe, body, _) => (sym, catchClassOf(tpe), print(body))
     })
     case Expr.Throw(exp, _) => DocAst.Expr.Throw(print(exp))
     case Expr.Handler(symUse, rules, _) => DocAst.Expr.Handler(symUse.sym, rules.map {

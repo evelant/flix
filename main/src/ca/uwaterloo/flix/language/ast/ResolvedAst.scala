@@ -361,7 +361,7 @@ object ResolvedAst {
 
   case class JvmMethod(ident: Name.Ident, fparams: List[FormalParam], exp: Expr, tpe: UnkindedType, eff: Option[UnkindedType], loc: SourceLocation)
 
-  case class CatchRule(sym: Symbol.VarSym, clazz: java.lang.Class[?], exp: Expr, loc: SourceLocation)
+  case class CatchRule(sym: Symbol.VarSym, tpe: UnkindedType, exp: Expr, loc: SourceLocation)
 
   case class HandlerRule(symUse: OpSymUse, fparams: List[FormalParam], exp: Expr, loc: SourceLocation)
 

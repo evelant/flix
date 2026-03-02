@@ -17,11 +17,16 @@
 package ca.uwaterloo.flix.language.dbg.printer
 
 import ca.uwaterloo.flix.language.ast.LiftedAst.Expr.*
-import ca.uwaterloo.flix.language.ast.{LiftedAst, Symbol}
+import ca.uwaterloo.flix.language.ast.{LiftedAst, SimpleType, Symbol}
 import ca.uwaterloo.flix.language.dbg.DocAst
 import ca.uwaterloo.flix.util.collection.MapOps
 
 object LiftedAstPrinter {
+
+  private def catchClassOf(tpe: SimpleType): Class[?] = tpe match {
+    case SimpleType.Native(clazz) => clazz
+    case _ => classOf[Object]
+  }
 
   /**
     * Returns the [[DocAst.Program]] representation of `root`.
@@ -59,7 +64,7 @@ object LiftedAstPrinter {
     case Stm(exp1, exp2, _, _, _) => DocAst.Expr.Stm(print(exp1), print(exp2))
     case Region(sym, exp, _, _, _) => DocAst.Expr.Region(printVarSym(sym), print(exp))
     case TryCatch(exp, rules, _, _, _) => DocAst.Expr.TryCatch(print(exp), rules.map {
-      case LiftedAst.CatchRule(sym, clazz, rexp) => (sym, clazz, print(rexp))
+      case LiftedAst.CatchRule(sym, catchTpe, rexp) => (sym, catchClassOf(catchTpe), print(rexp))
     })
     case RunWith(exp, effUse, rules, _, _, _) => DocAst.Expr.RunWithHandler(print(exp), effUse.sym, rules.map {
       case LiftedAst.HandlerRule(symUse, fparams, body) =>

@@ -40,6 +40,20 @@ object LlvmPrinter {
     }
     if (m.decls.nonEmpty) sb.append("\n")
 
+    m.globals.foreach {
+      case GlobalDef.CString(name, bytes) =>
+        val arrTpe = Type.Array(bytes.length, Type.I8)
+        sb.append(s"@$name = private unnamed_addr constant ${arrTpe.render} c\"${renderCString(bytes)}\", align 1\n")
+
+      case GlobalDef.Constant(name, tpe, init, align, linkage) =>
+        val linkageText = linkage match {
+          case GlobalDef.Linkage.Private => "private "
+          case GlobalDef.Linkage.External => ""
+        }
+        sb.append(s"@$name = ${linkageText}constant ${tpe.render} ${init.render}, align $align\n")
+    }
+    if (m.globals.nonEmpty) sb.append("\n")
+
     m.functions.foreach { f =>
       printFunction(f, sb)
       sb.append("\n")
@@ -138,5 +152,21 @@ object LlvmPrinter {
 
   private def escape(s: String): String =
     s.replace("\\", "\\\\").replace("\"", "\\\"")
+
+  private def renderCString(bytes: Array[Byte]): String = {
+    val sb = new StringBuilder(bytes.length * 4)
+    bytes.foreach { b =>
+      val x = b & 0xff
+      x match {
+        case 34 => sb.append("\\22") // "
+        case 92 => sb.append("\\5C") // \
+        case c if c >= 32 && c <= 126 =>
+          sb.append(c.toChar)
+        case other =>
+          sb.append(f"\\$other%02X")
+      }
+    }
+    sb.toString()
+  }
 
 }

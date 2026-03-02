@@ -893,9 +893,10 @@ object Kinder {
     * Performs kinding on the given catch rule under the given kind environment.
     */
   private def visitCatchRule(rule0: ResolvedAst.CatchRule, kenv: KindEnv, root: ResolvedAst.Root)(implicit scope: Scope, renv: RootEnv, sctx: SharedContext, flix: Flix): KindedAst.CatchRule = rule0 match {
-    case ResolvedAst.CatchRule(sym, clazz, exp0, loc) =>
+    case ResolvedAst.CatchRule(sym, tpe0, exp0, loc) =>
+      val tpe = visitType(tpe0, Kind.Star, kenv, root)
       val exp = visitExp(exp0, kenv, root)
-      KindedAst.CatchRule(sym, clazz, exp, loc)
+      KindedAst.CatchRule(sym, tpe, exp, loc)
   }
 
   /**

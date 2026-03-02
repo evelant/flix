@@ -6,4 +6,9 @@ mod Test.Portable.Channel {
         Channel.send(42, tx);
         discard Channel.recv(rx)
 
+    pub def runAll(): Unit \ {Chan, NonDet} = {
+        let _ = basic01();
+        ()
+    }
+
 }

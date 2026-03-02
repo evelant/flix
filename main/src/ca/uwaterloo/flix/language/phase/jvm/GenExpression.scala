@@ -390,13 +390,29 @@ object GenExpression {
 
           case StringOp.ToLowerCase =>
             compileExpr(exp)
-            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.String.toInternalName, "toLowerCase",
-              mkDescriptor()(BackendType.String).toDescriptor, false)
+            if (flix.options.stdlibProfile == StdlibProfile.Portable) {
+              // Portable semantics: locale-insensitive (Locale.ROOT) casing.
+              mv.visitFieldInsn(GETSTATIC, JvmName.Locale.toInternalName, "ROOT", JvmName.Locale.toDescriptor)
+              mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.String.toInternalName, "toLowerCase",
+                s"(${JvmName.Locale.toDescriptor})${JvmName.String.toDescriptor}", false)
+            } else {
+              // JVM semantics: uses the default locale (Java's no-arg overload).
+              mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.String.toInternalName, "toLowerCase",
+                mkDescriptor()(BackendType.String).toDescriptor, false)
+            }
 
           case StringOp.ToUpperCase =>
             compileExpr(exp)
-            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.String.toInternalName, "toUpperCase",
-              mkDescriptor()(BackendType.String).toDescriptor, false)
+            if (flix.options.stdlibProfile == StdlibProfile.Portable) {
+              // Portable semantics: locale-insensitive (Locale.ROOT) casing.
+              mv.visitFieldInsn(GETSTATIC, JvmName.Locale.toInternalName, "ROOT", JvmName.Locale.toDescriptor)
+              mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.String.toInternalName, "toUpperCase",
+                s"(${JvmName.Locale.toDescriptor})${JvmName.String.toDescriptor}", false)
+            } else {
+              // JVM semantics: uses the default locale (Java's no-arg overload).
+              mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.String.toInternalName, "toUpperCase",
+                mkDescriptor()(BackendType.String).toDescriptor, false)
+            }
 
           case ParseOp.Int8FromString =>
             import BytecodeInstructions.*
@@ -1356,6 +1372,48 @@ object GenExpression {
             val jGlobal = JvmName(JvmName.DevFlixRuntime, "Global")
             INVOKESTATIC(jGlobal, "newId", mkDescriptor()(BackendType.Int64))
 
+          case op @ (IoOp.FileExists |
+            IoOp.FileIsDirectory |
+            IoOp.FileIsRegularFile |
+            IoOp.FileIsReadable |
+            IoOp.FileIsSymbolicLink |
+            IoOp.FileIsWritable |
+            IoOp.FileIsExecutable) =>
+            compileIoFilePredicate(op, exp, tpe, loc)
+
+          case op @ (IoOp.FileAccessTime |
+            IoOp.FileCreationTime |
+            IoOp.FileModificationTime |
+            IoOp.FileSize) =>
+            compileIoFileMetadata(op, exp, tpe, loc)
+
+          case IoOp.FileRead =>
+            compileIoFileRead(exp, tpe, loc)
+
+          case IoOp.FileReadLines =>
+            compileIoFileReadLines(exp, tpe, loc)
+
+          case IoOp.FileReadBytes =>
+            compileIoFileReadBytes(exp, tpe, loc)
+
+          case IoOp.FileList =>
+            compileIoFileList(exp, tpe, loc)
+
+          case op @ (IoOp.FileWrite | IoOp.FileAppend) =>
+            compileIoFileWriteString(op, exp, tpe, loc)
+
+          case op @ (IoOp.FileWriteBytes | IoOp.FileAppendBytes) =>
+            compileIoFileWriteBytes(op, exp, tpe, loc)
+
+          case IoOp.FileTruncate =>
+            compileIoFileTruncate(exp, tpe, loc)
+
+          case op @ (IoOp.FileMkDir | IoOp.FileMkDirs) =>
+            compileIoFileMkDir(op, exp, tpe, loc)
+
+          case IoOp.FileMkTempDir =>
+            compileIoFileMkTempDir(exp, tpe, loc)
+
           case IoOp.TcpSocketRead =>
             import BytecodeInstructions.*
             BytecodeInstructions.addLoc(loc)
@@ -1386,6 +1444,7 @@ object GenExpression {
             GETFIELD(argTupleType.IndexField(0)) // tuple, id
             mv.visitVarInsn(LSTORE, idSlot) // tuple
             GETFIELD(argTupleType.IndexField(1)) // buffer
+            mv.visitTypeInsn(org.objectweb.asm.Opcodes.CHECKCAST, BackendType.Array(BackendType.Int8).toDescriptor)
             ASTORE(bufSlot)
 
             // socket = Global.getTcpSocket(id)
@@ -1487,6 +1546,7 @@ object GenExpression {
             GETFIELD(argTupleType.IndexField(0)) // tuple, id
             mv.visitVarInsn(LSTORE, idSlot) // tuple
             GETFIELD(argTupleType.IndexField(1)) // buffer
+            mv.visitTypeInsn(org.objectweb.asm.Opcodes.CHECKCAST, BackendType.Array(BackendType.Int8).toDescriptor)
             ASTORE(bufSlot)
 
             // socket = Global.getTcpSocket(id)
@@ -1581,6 +1641,7 @@ object GenExpression {
             compileExpr(exp) // tuple
             DUP() // tuple, tuple
             GETFIELD(argTupleType.IndexField(0)) // tuple, bytes
+            mv.visitTypeInsn(org.objectweb.asm.Opcodes.CHECKCAST, BackendType.Array(BackendType.Int8).toDescriptor)
             ASTORE(bytesSlot) // tuple
             GETFIELD(argTupleType.IndexField(1)) // port
             mv.visitVarInsn(ISTORE, portSlot)
@@ -1758,6 +1819,7 @@ object GenExpression {
 	            compileExpr(exp) // tuple
 	            DUP() // tuple, tuple
 	            GETFIELD(argTupleType.IndexField(0)) // tuple, bytes
+	            mv.visitTypeInsn(org.objectweb.asm.Opcodes.CHECKCAST, BackendType.Array(BackendType.Int8).toDescriptor)
 	            ASTORE(bytesSlot) // tuple
 	            GETFIELD(argTupleType.IndexField(1)) // port
 	            mv.visitVarInsn(ISTORE, portSlot)
@@ -1938,6 +2000,63 @@ object GenExpression {
 	            pushInt(14)
 	            ALOAD(exSlot)
 	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(after)
+
+	          case IoOp.TcpServerLocalPort =>
+	            import BytecodeInstructions.*
+	            BytecodeInstructions.addLoc(loc)
+
+	            val SimpleType.Tuple(retElmTypes) = tpe
+	            val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+	            val jGlobal = BackendObjType.Global.jvmName
+	            val jServerSocket = JvmName.ofClass(classOf[java.net.ServerSocket])
+	            val serverSocketTpe = BackendType.Reference(BackendObjType.Native(jServerSocket))
+
+	            // Locals.
+	            val serverIdSlot = 2310
+	            val serverSlot = 2312
+	            val portSlot = 2313
+
+	            // Extract server id.
+	            compileExpr(exp)
+	            mv.visitVarInsn(LSTORE, serverIdSlot)
+
+	            // server = Global.getTcpServer(id)
+	            LLOAD(serverIdSlot)
+	            INVOKESTATIC(jGlobal, "getTcpServer", mkDescriptor(BackendType.Int64)(serverSocketTpe))
+	            ASTORE(serverSlot)
+
+	            val hasServer = new Label()
+	            val after = new Label()
+	            ALOAD(serverSlot)
+	            mv.visitJumpInsn(IFNONNULL, hasServer)
+
+	            // Return (false, 0, "invalid TCP server handle.")
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(false)
+	            pushInt(0)
+	            pushString("invalid TCP server handle.")
+	            INVOKESPECIAL(retTupleType.Constructor)
+	            mv.visitJumpInsn(GOTO, after)
+
+	            mv.visitLabel(hasServer)
+
+	            // port = server.getLocalPort()
+	            ALOAD(serverSlot)
+	            INVOKEVIRTUAL(jServerSocket, "getLocalPort", mkDescriptor()(BackendType.Int32))
+	            mv.visitVarInsn(ISTORE, portSlot)
+
+	            // Return (true, port, "")
+	            NEW(retTupleType.jvmName)
+	            DUP()
+	            pushBool(true)
+	            ILOAD(portSlot)
+	            pushString("")
 	            INVOKESPECIAL(retTupleType.Constructor)
 	            mv.visitJumpInsn(GOTO, after)
 
@@ -4521,8 +4640,19 @@ object GenExpression {
         val List(exp) = exps
         // Add source line number for debugging (can fail when handling exception).
         addLoc(loc)
-        compileExpr(exp)
-        ATHROW()
+        val isPortable = flix.options.stdlibProfile == StdlibProfile.Portable
+        if (isPortable) {
+          // Portable semantics: throw the designated Exn value via a single JVM wrapper type.
+          NEW(JvmName.FlixException)
+          DUP()
+          compileExpr(exp)
+          INVOKESPECIAL(ClassConstants.FlixException.Constructor)
+          ATHROW()
+        } else {
+          // JVM semantics: throw the actual Throwable instance.
+          compileExpr(exp)
+          ATHROW()
+        }
 
       case AtomicOp.Spawn =>
         import BytecodeInstructions.*
@@ -5027,6 +5157,12 @@ object GenExpression {
 
       // Compile the finally block which gets called if an exception is thrown
       mv.visitLabel(finallyBlock)
+      // Always exit the region, even on exceptional completion, to join children and run `onExit`.
+      // This ensures child exceptions are observed deterministically at region exit.
+      BytecodeInstructions.xLoad(BackendObjType.Region.toTpe, JvmOps.getIndex(offset, ctx.localOffset))
+      mv.visitTypeInsn(CHECKCAST, BackendObjType.Region.jvmName.toInternalName)
+      mv.visitMethodInsn(INVOKEVIRTUAL, BackendObjType.Region.jvmName.toInternalName, BackendObjType.Region.ExitMethod.name,
+        BackendObjType.Region.ExitMethod.d.toDescriptor, false)
       BytecodeInstructions.xLoad(BackendObjType.Region.toTpe, JvmOps.getIndex(offset, ctx.localOffset))
       mv.visitTypeInsn(CHECKCAST, BackendObjType.Region.jvmName.toInternalName)
       mv.visitMethodInsn(INVOKEVIRTUAL, BackendObjType.Region.jvmName.toInternalName, BackendObjType.Region.ReThrowChildExceptionMethod.name,
@@ -5038,47 +5174,147 @@ object GenExpression {
       // Add source line number for debugging.
       BytecodeInstructions.addLoc(loc)
 
-      // Introduce a label for before the try block.
-      val beforeTryBlock = new Label()
+      val isPortable = flix.options.stdlibProfile == StdlibProfile.Portable
 
-      // Introduce a label for after the try block.
-      val afterTryBlock = new Label()
+      if (!isPortable) {
+        // JVM semantics: compile directly to JVM try/catch blocks.
 
-      // Introduce a label after the try block and after all catch rules.
-      val afterTryAndCatch = new Label()
+        // Introduce a label for before the try block.
+        val beforeTryBlock = new Label()
 
-      // Introduce a label for each catch rule.
-      val rulesAndLabels = rules map {
-        rule => rule -> new Label()
-      }
+        // Introduce a label for after the try block.
+        val afterTryBlock = new Label()
 
-      // Emit code for the try block.
-      mv.visitLabel(beforeTryBlock)
-      compileExpr(exp)
-      mv.visitLabel(afterTryBlock)
-      mv.visitJumpInsn(GOTO, afterTryAndCatch)
+        // Introduce a label after the try block and after all catch rules.
+        val afterTryAndCatch = new Label()
 
-      // Emit code for each catch rule.
-      for ((CatchRule(_, offset, _, body), handlerLabel) <- rulesAndLabels) {
-        // Emit the label.
-        mv.visitLabel(handlerLabel)
+        // Introduce a label for each catch rule.
+        val rulesAndLabels = rules map {
+          rule => rule -> new Label()
+        }
 
-        // Store the exception in a local variable.
-        BytecodeInstructions.xStore(BackendType.Object, JvmOps.getIndex(offset, ctx.localOffset))
-
-        // Emit code for the handler body expression.
-        compileExpr(body)
+        // Emit code for the try block.
+        mv.visitLabel(beforeTryBlock)
+        compileExpr(exp)
+        mv.visitLabel(afterTryBlock)
         mv.visitJumpInsn(GOTO, afterTryAndCatch)
-      }
 
-      // Emit a try catch block for each catch rule. It's important to do this after compiling
-      // sub-expressions to ensure correct catch case ordering.
-      for ((CatchRule(_, _, clazz, _), handlerLabel) <- rulesAndLabels) {
-        mv.visitTryCatchBlock(beforeTryBlock, afterTryBlock, handlerLabel, asm.Type.getInternalName(clazz))
-      }
+        // Emit code for each catch rule.
+        for ((CatchRule(_, offset, _, body), handlerLabel) <- rulesAndLabels) {
+          // Emit the label.
+          mv.visitLabel(handlerLabel)
 
-      // Add the label after both the try and catch rules.
-      mv.visitLabel(afterTryAndCatch)
+          // Store the exception in a local variable.
+          BytecodeInstructions.xStore(BackendType.Object, JvmOps.getIndex(offset, ctx.localOffset))
+
+          // Emit code for the handler body expression.
+          compileExpr(body)
+          mv.visitJumpInsn(GOTO, afterTryAndCatch)
+        }
+
+        // Emit a try catch block for each catch rule. It's important to do this after compiling
+        // sub-expressions to ensure correct catch case ordering.
+        for ((CatchRule(_, _, catchTpe, _), handlerLabel) <- rulesAndLabels) {
+          val clazz = catchTpe match {
+            case SimpleType.Native(c) => c
+            case _ => classOf[Throwable]
+          }
+          mv.visitTryCatchBlock(beforeTryBlock, afterTryBlock, handlerLabel, asm.Type.getInternalName(clazz))
+        }
+
+        // Add the label after both the try and catch rules.
+        mv.visitLabel(afterTryAndCatch)
+      } else {
+        // Portable semantics: catch only FlixException and dispatch by Exn.kind_id (exact, ordered).
+        import BytecodeInstructions.*
+
+        // Introduce a label for before the try block.
+        val beforeTryBlock = new Label()
+
+        // Introduce a label for after the try block.
+        val afterTryBlock = new Label()
+
+        // Introduce a label after the try block and after all catch rules.
+        val afterTryAndCatch = new Label()
+
+        // Introduce a single handler for FlixException.
+        val handlerStart = new Label()
+
+        // Introduce a label for each catch rule body.
+        val rulesAndLabels = rules map {
+          rule => rule -> new Label()
+        }
+
+        // Emit code for the try block.
+        mv.visitLabel(beforeTryBlock)
+        compileExpr(exp)
+        mv.visitLabel(afterTryBlock)
+        mv.visitJumpInsn(GOTO, afterTryAndCatch)
+
+        // Emit code for the FlixException handler.
+        mv.visitLabel(handlerStart)
+
+        // Stack: [wrapper]
+        // Duplicate wrapper and extract exn payload: wrapper.getExn()
+        DUP()
+        INVOKEVIRTUAL(ClassConstants.FlixException.GetExnMethod)
+
+        // Stack: [wrapper, exn]
+        // Duplicate exn and extract kind id (first field of Exn tag).
+        DUP()
+        val exnTagType = BackendObjType.Tag(List(BackendType.Int32, BackendType.Object, BackendType.Object))
+        CHECKCAST(exnTagType.jvmName)
+        GETFIELD(exnTagType.IndexField(0))
+
+        // Stack: [wrapper, exn, kindId]
+
+        // Compile ordered dispatch.
+        val exnSymOpt = root.enums.keys.find(sym => sym.text == "Exn" && sym.namespace.isEmpty)
+        val exnTpeOpt = exnSymOpt.map(sym => SimpleType.Enum(sym, Nil))
+
+        def isCatchAll(tpe: SimpleType): Boolean =
+          exnTpeOpt.contains(tpe)
+
+        for ((CatchRule(_, _, catchTpe, _), ruleLabel) <- rulesAndLabels) {
+          if (isCatchAll(catchTpe)) {
+            // Catch-all: match immediately (first-match-wins).
+            mv.visitJumpInsn(GOTO, ruleLabel)
+          } else {
+            // Typed catch: compare kind id.
+            DUP()
+            pushInt(ExnKindId.of(catchTpe))
+            mv.visitJumpInsn(IF_ICMPEQ, ruleLabel)
+          }
+        }
+
+        // No rule matched: propagate by rethrowing the wrapper.
+        // Stack: [wrapper, exn, kindId]
+        POP() // kindId
+        POP() // exn
+        ATHROW()
+
+        // Emit code for each catch rule body.
+        for ((CatchRule(_, offset, _, body), ruleLabel) <- rulesAndLabels) {
+          mv.visitLabel(ruleLabel)
+
+          // Stack: [wrapper, exn, kindId]
+          // Store exn in local binder slot and clear the dispatch stack.
+          SWAP() // [wrapper, kindId, exn]
+          xStore(BackendType.Object, JvmOps.getIndex(offset, ctx.localOffset))
+          POP() // kindId
+          POP() // wrapper
+
+          // Emit handler body.
+          compileExpr(body)
+          mv.visitJumpInsn(GOTO, afterTryAndCatch)
+        }
+
+        // Catch only FlixException.
+        mv.visitTryCatchBlock(beforeTryBlock, afterTryBlock, handlerStart, JvmName.FlixException.toInternalName)
+
+        // Add the label after both the try and catch rules.
+        mv.visitLabel(afterTryAndCatch)
+      }
 
     case Expr.RunWith(exp, effUse, rules, ct, pcPointId, _, _, loc) =>
       import BytecodeInstructions.*
@@ -5144,6 +5380,1155 @@ object GenExpression {
         mv.visitFieldInsn(PUTFIELD, className, s"clo$i", JvmOps.getErasedClosureAbstractClassType(e.tpe).toDescriptor)
       }
 
+  }
+
+  private def compileIoFilePredicate(op: UnaryOp, exp: Expr, tpe: SimpleType, loc: SourceLocation)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    import BytecodeInstructions.*
+    BytecodeInstructions.addLoc(loc)
+
+    val SimpleType.Tuple(retElmTypes) = tpe
+    val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+    val jPaths = JvmName.ofClass(classOf[java.nio.file.Paths])
+    val jFiles = JvmName.ofClass(classOf[java.nio.file.Files])
+    val jPath = JvmName.ofClass(classOf[java.nio.file.Path])
+    val pathTpe = BackendType.Reference(BackendObjType.Native(jPath))
+    val jLinkOption = JvmName.ofClass(classOf[java.nio.file.LinkOption])
+    val linkOptionTpe = BackendType.Reference(BackendObjType.Native(jLinkOption))
+    val jInvalidPath = JvmName.ofClass(classOf[java.nio.file.InvalidPathException])
+
+    // Locals.
+    val filenameSlot = 2600
+    val boolSlot = 2601
+    val exSlot = 2602
+
+    compileExpr(exp)
+    ASTORE(filenameSlot)
+
+    val tryStart = new Label()
+    val tryEnd = new Label()
+    val handlerInvalid = new Label()
+    val after = new Label()
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerInvalid, jInvalidPath.toInternalName)
+
+    mv.visitLabel(tryStart)
+    // path = Paths.get(filename, new String[0])
+    ALOAD(filenameSlot)
+    ICONST_0()
+    ANEWARRAY(JvmName.String)
+    INVOKESTATIC(jPaths, "get", mkDescriptor(BackendType.String, BackendType.Array(BackendType.String))(pathTpe))
+
+    op match {
+      case IoOp.FileExists =>
+        ICONST_0()
+        ANEWARRAY(jLinkOption)
+        INVOKESTATIC(jFiles, "exists", mkDescriptor(pathTpe, BackendType.Array(linkOptionTpe))(BackendType.Bool))
+      case IoOp.FileIsDirectory =>
+        ICONST_0()
+        ANEWARRAY(jLinkOption)
+        INVOKESTATIC(jFiles, "isDirectory", mkDescriptor(pathTpe, BackendType.Array(linkOptionTpe))(BackendType.Bool))
+      case IoOp.FileIsRegularFile =>
+        ICONST_0()
+        ANEWARRAY(jLinkOption)
+        INVOKESTATIC(jFiles, "isRegularFile", mkDescriptor(pathTpe, BackendType.Array(linkOptionTpe))(BackendType.Bool))
+      case IoOp.FileIsReadable =>
+        INVOKESTATIC(jFiles, "isReadable", mkDescriptor(pathTpe)(BackendType.Bool))
+      case IoOp.FileIsSymbolicLink =>
+        INVOKESTATIC(jFiles, "isSymbolicLink", mkDescriptor(pathTpe)(BackendType.Bool))
+      case IoOp.FileIsWritable =>
+        INVOKESTATIC(jFiles, "isWritable", mkDescriptor(pathTpe)(BackendType.Bool))
+      case IoOp.FileIsExecutable =>
+        INVOKESTATIC(jFiles, "isExecutable", mkDescriptor(pathTpe)(BackendType.Bool))
+      case _ =>
+        ICONST_0()
+    }
+
+    mv.visitVarInsn(ISTORE, boolSlot)
+
+    // Return (true, value, Other, "")
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(true)
+    ILOAD(boolSlot)
+    pushInt(14)
+    pushString("")
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitLabel(tryEnd)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerInvalid)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    pushBool(false)
+    pushInt(3)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(after)
+  }
+
+  private def compileIoFileMetadata(op: UnaryOp, exp: Expr, tpe: SimpleType, loc: SourceLocation)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    import BytecodeInstructions.*
+    BytecodeInstructions.addLoc(loc)
+
+    val SimpleType.Tuple(retElmTypes) = tpe
+    val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+    val jPaths = JvmName.ofClass(classOf[java.nio.file.Paths])
+    val jFiles = JvmName.ofClass(classOf[java.nio.file.Files])
+    val jPath = JvmName.ofClass(classOf[java.nio.file.Path])
+    val pathTpe = BackendType.Reference(BackendObjType.Native(jPath))
+    val jLinkOption = JvmName.ofClass(classOf[java.nio.file.LinkOption])
+    val linkOptionTpe = BackendType.Reference(BackendObjType.Native(jLinkOption))
+    val jBasicAttrs = JvmName.ofClass(classOf[java.nio.file.attribute.BasicFileAttributes])
+    val basicAttrsTpe = BackendType.Reference(BackendObjType.Native(jBasicAttrs))
+    val jFileTime = JvmName.ofClass(classOf[java.nio.file.attribute.FileTime])
+    val fileTimeTpe = BackendType.Reference(BackendObjType.Native(jFileTime))
+    val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+    val jInvalidPath = JvmName.ofClass(classOf[java.nio.file.InvalidPathException])
+
+    // Locals.
+    val filenameSlot = 2610
+    val longSlot = 2611
+    val exSlot = 2613
+
+    compileExpr(exp)
+    ASTORE(filenameSlot)
+
+    val tryStart = new Label()
+    val tryEnd = new Label()
+    val handlerInvalid = new Label()
+    val handlerIo = new Label()
+    val after = new Label()
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerInvalid, jInvalidPath.toInternalName)
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerIo, jIOException.toInternalName)
+
+    mv.visitLabel(tryStart)
+    // path = Paths.get(filename, new String[0])
+    ALOAD(filenameSlot)
+    ICONST_0()
+    ANEWARRAY(JvmName.String)
+    INVOKESTATIC(jPaths, "get", mkDescriptor(BackendType.String, BackendType.Array(BackendType.String))(pathTpe))
+
+    op match {
+      case IoOp.FileSize =>
+        INVOKESTATIC(jFiles, "size", mkDescriptor(pathTpe)(BackendType.Int64))
+
+      case _ =>
+        // attrs = Files.readAttributes(path, BasicFileAttributes.class, new LinkOption[0])
+        mv.visitLdcInsn(asm.Type.getType(jBasicAttrs.toDescriptor))
+        ICONST_0()
+        ANEWARRAY(jLinkOption)
+        INVOKESTATIC(jFiles, "readAttributes", mkDescriptor(pathTpe, BackendType.Reference(BackendObjType.Native(JvmName.Class)), BackendType.Array(linkOptionTpe))(basicAttrsTpe))
+
+        // time = attrs.<...Time>().toMillis()
+        op match {
+          case IoOp.FileAccessTime =>
+            INVOKEINTERFACE(jBasicAttrs, "lastAccessTime", mkDescriptor()(fileTimeTpe))
+          case IoOp.FileCreationTime =>
+            INVOKEINTERFACE(jBasicAttrs, "creationTime", mkDescriptor()(fileTimeTpe))
+          case IoOp.FileModificationTime =>
+            INVOKEINTERFACE(jBasicAttrs, "lastModifiedTime", mkDescriptor()(fileTimeTpe))
+          case _ =>
+            LCONST_0()
+        }
+        INVOKEVIRTUAL(jFileTime, "toMillis", mkDescriptor()(BackendType.Int64))
+    }
+
+    mv.visitVarInsn(LSTORE, longSlot)
+
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(true)
+    LLOAD(longSlot)
+    pushInt(14)
+    pushString("")
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitLabel(tryEnd)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerInvalid)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    LCONST_0()
+    pushInt(3)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerIo)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    LCONST_0()
+    pushInt(14)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(after)
+  }
+
+  private def compileIoFileRead(exp: Expr, tpe: SimpleType, loc: SourceLocation)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    import BytecodeInstructions.*
+    BytecodeInstructions.addLoc(loc)
+
+    val SimpleType.Tuple(retElmTypes) = tpe
+    val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+    val jPaths = JvmName.ofClass(classOf[java.nio.file.Paths])
+    val jFiles = JvmName.ofClass(classOf[java.nio.file.Files])
+    val jPath = JvmName.ofClass(classOf[java.nio.file.Path])
+    val pathTpe = BackendType.Reference(BackendObjType.Native(jPath))
+    val jStandardCharsets = JvmName.ofClass(classOf[java.nio.charset.StandardCharsets])
+    val jCharset = JvmName.ofClass(classOf[java.nio.charset.Charset])
+    val charsetTpe = BackendType.Reference(BackendObjType.Native(jCharset))
+    val jInvalidPath = JvmName.ofClass(classOf[java.nio.file.InvalidPathException])
+    val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+
+    // Locals.
+    val filenameSlot = 2620
+    val bytesSlot = 2621
+    val exSlot = 2622
+
+    compileExpr(exp)
+    ASTORE(filenameSlot)
+
+    val tryStart = new Label()
+    val tryEnd = new Label()
+    val handlerInvalid = new Label()
+    val handlerIo = new Label()
+    val after = new Label()
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerInvalid, jInvalidPath.toInternalName)
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerIo, jIOException.toInternalName)
+
+    mv.visitLabel(tryStart)
+    // bytes = Files.readAllBytes(Paths.get(filename, new String[0]))
+    ALOAD(filenameSlot)
+    ICONST_0()
+    ANEWARRAY(JvmName.String)
+    INVOKESTATIC(jPaths, "get", mkDescriptor(BackendType.String, BackendType.Array(BackendType.String))(pathTpe))
+    INVOKESTATIC(jFiles, "readAllBytes", mkDescriptor(pathTpe)(BackendType.Array(BackendType.Int8)))
+    ASTORE(bytesSlot)
+
+    // str = new String(bytes, StandardCharsets.UTF_8)
+    NEW(JvmName.String)
+    DUP()
+    ALOAD(bytesSlot)
+    mv.visitFieldInsn(org.objectweb.asm.Opcodes.GETSTATIC, jStandardCharsets.toInternalName, "UTF_8", charsetTpe.toDescriptor)
+    INVOKESPECIAL(JvmName.String, JvmName.ConstructorMethod, mkDescriptor(BackendType.Array(BackendType.Int8), charsetTpe)(VoidableType.Void))
+
+    // Return (true, str, Other, "")
+    NEW(retTupleType.jvmName)
+    DUP_X1()
+    SWAP()
+    pushBool(true)
+    SWAP()
+    pushInt(14)
+    pushString("")
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitLabel(tryEnd)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerInvalid)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    pushString("")
+    pushInt(3)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerIo)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    pushString("")
+    pushInt(14)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(after)
+  }
+
+  private def compileIoFileReadLines(exp: Expr, tpe: SimpleType, loc: SourceLocation)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    import BytecodeInstructions.*
+    BytecodeInstructions.addLoc(loc)
+
+    val SimpleType.Tuple(retElmTypes) = tpe
+    val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+    val SimpleType.Tuple(argElmTypes) = exp.tpe
+    val argTupleType = BackendObjType.Tuple(argElmTypes.map(BackendType.toBackendType))
+
+    val jPaths = JvmName.ofClass(classOf[java.nio.file.Paths])
+    val jFiles = JvmName.ofClass(classOf[java.nio.file.Files])
+    val jPath = JvmName.ofClass(classOf[java.nio.file.Path])
+    val pathTpe = BackendType.Reference(BackendObjType.Native(jPath))
+    val jList = JvmName.ofClass(classOf[java.util.List[?]])
+    val listTpe = BackendType.Reference(BackendObjType.Native(jList))
+    val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+    val jInvalidPath = JvmName.ofClass(classOf[java.nio.file.InvalidPathException])
+
+    // Locals.
+    val filenameSlot = 2630
+    val arrSlot = 2631
+    val exSlot = 2632
+
+    // Extract (rc, filename) from tuple argument (ignore rc).
+    compileExpr(exp)
+    DUP()
+    GETFIELD(argTupleType.IndexField(0))
+    POP()
+    GETFIELD(argTupleType.IndexField(1))
+    CHECKCAST(JvmName.String)
+    ASTORE(filenameSlot)
+
+    val tryStart = new Label()
+    val tryEnd = new Label()
+    val handlerInvalid = new Label()
+    val handlerIo = new Label()
+    val after = new Label()
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerInvalid, jInvalidPath.toInternalName)
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerIo, jIOException.toInternalName)
+
+    mv.visitLabel(tryStart)
+    // lines = Files.readAllLines(Paths.get(filename, new String[0]))
+    ALOAD(filenameSlot)
+    ICONST_0()
+    ANEWARRAY(JvmName.String)
+    INVOKESTATIC(jPaths, "get", mkDescriptor(BackendType.String, BackendType.Array(BackendType.String))(pathTpe))
+    INVOKESTATIC(jFiles, "readAllLines", mkDescriptor(pathTpe)(listTpe))
+
+    // arr = lines.toArray(new String[0]) as String[]
+    ICONST_0()
+    ANEWARRAY(JvmName.String)
+    INVOKEINTERFACE(jList, "toArray", mkDescriptor(BackendType.Array(BackendType.Object))(BackendType.Array(BackendType.Object)))
+    mv.visitTypeInsn(org.objectweb.asm.Opcodes.CHECKCAST, BackendType.Array(BackendType.String).toDescriptor)
+    ASTORE(arrSlot)
+
+    // Return (true, arr, Other, "")
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(true)
+    ALOAD(arrSlot)
+    pushInt(14)
+    pushString("")
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitLabel(tryEnd)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerInvalid)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    ICONST_0()
+    ANEWARRAY(JvmName.String)
+    pushInt(3)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerIo)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    ICONST_0()
+    ANEWARRAY(JvmName.String)
+    pushInt(14)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(after)
+  }
+
+  private def compileIoFileReadBytes(exp: Expr, tpe: SimpleType, loc: SourceLocation)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    import BytecodeInstructions.*
+    BytecodeInstructions.addLoc(loc)
+
+    val SimpleType.Tuple(retElmTypes) = tpe
+    val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+    val SimpleType.Tuple(argElmTypes) = exp.tpe
+    val argTupleType = BackendObjType.Tuple(argElmTypes.map(BackendType.toBackendType))
+
+    val jPaths = JvmName.ofClass(classOf[java.nio.file.Paths])
+    val jFiles = JvmName.ofClass(classOf[java.nio.file.Files])
+    val jPath = JvmName.ofClass(classOf[java.nio.file.Path])
+    val pathTpe = BackendType.Reference(BackendObjType.Native(jPath))
+    val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+    val jInvalidPath = JvmName.ofClass(classOf[java.nio.file.InvalidPathException])
+
+    // Locals.
+    val filenameSlot = 2640
+    val bytesSlot = 2641
+    val exSlot = 2642
+
+    // Extract (rc, filename) from tuple argument (ignore rc).
+    compileExpr(exp)
+    DUP()
+    GETFIELD(argTupleType.IndexField(0))
+    POP()
+    GETFIELD(argTupleType.IndexField(1))
+    CHECKCAST(JvmName.String)
+    ASTORE(filenameSlot)
+
+    val tryStart = new Label()
+    val tryEnd = new Label()
+    val handlerInvalid = new Label()
+    val handlerIo = new Label()
+    val after = new Label()
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerInvalid, jInvalidPath.toInternalName)
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerIo, jIOException.toInternalName)
+
+    mv.visitLabel(tryStart)
+    // bytes = Files.readAllBytes(Paths.get(filename, new String[0]))
+    ALOAD(filenameSlot)
+    ICONST_0()
+    ANEWARRAY(JvmName.String)
+    INVOKESTATIC(jPaths, "get", mkDescriptor(BackendType.String, BackendType.Array(BackendType.String))(pathTpe))
+    INVOKESTATIC(jFiles, "readAllBytes", mkDescriptor(pathTpe)(BackendType.Array(BackendType.Int8)))
+    ASTORE(bytesSlot)
+
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(true)
+    ALOAD(bytesSlot)
+    pushInt(14)
+    pushString("")
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitLabel(tryEnd)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerInvalid)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    ICONST_0()
+    mv.visitIntInsn(NEWARRAY, T_BYTE)
+    pushInt(3)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerIo)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    ICONST_0()
+    mv.visitIntInsn(NEWARRAY, T_BYTE)
+    pushInt(14)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(after)
+  }
+
+  private def compileIoFileList(exp: Expr, tpe: SimpleType, loc: SourceLocation)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    import BytecodeInstructions.*
+    BytecodeInstructions.addLoc(loc)
+
+    val SimpleType.Tuple(retElmTypes) = tpe
+    val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+    val SimpleType.Tuple(argElmTypes) = exp.tpe
+    val argTupleType = BackendObjType.Tuple(argElmTypes.map(BackendType.toBackendType))
+
+    val jPaths = JvmName.ofClass(classOf[java.nio.file.Paths])
+    val jFiles = JvmName.ofClass(classOf[java.nio.file.Files])
+    val jPath = JvmName.ofClass(classOf[java.nio.file.Path])
+    val pathTpe = BackendType.Reference(BackendObjType.Native(jPath))
+    val jLinkOption = JvmName.ofClass(classOf[java.nio.file.LinkOption])
+    val linkOptionTpe = BackendType.Reference(BackendObjType.Native(jLinkOption))
+    val jFile = JvmName.ofClass(classOf[java.io.File])
+    val jInvalidPath = JvmName.ofClass(classOf[java.nio.file.InvalidPathException])
+
+    // Locals.
+    val filenameSlot = 2650
+    val arrSlot = 2651
+    val exSlot = 2652
+
+    // Extract (rc, filename) from tuple argument (ignore rc).
+    compileExpr(exp)
+    DUP()
+    GETFIELD(argTupleType.IndexField(0))
+    POP()
+    GETFIELD(argTupleType.IndexField(1))
+    CHECKCAST(JvmName.String)
+    ASTORE(filenameSlot)
+
+    val tryStart = new Label()
+    val tryEnd = new Label()
+    val handlerInvalid = new Label()
+    val after = new Label()
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerInvalid, jInvalidPath.toInternalName)
+
+    mv.visitLabel(tryStart)
+    // Validate path (may throw InvalidPathException).
+    ALOAD(filenameSlot)
+    ICONST_0()
+    ANEWARRAY(JvmName.String)
+    INVOKESTATIC(jPaths, "get", mkDescriptor(BackendType.String, BackendType.Array(BackendType.String))(pathTpe))
+
+    // If not a directory: return Err(NotDirectory).
+    DUP()
+    ICONST_0()
+    ANEWARRAY(jLinkOption)
+    INVOKESTATIC(jFiles, "isDirectory", mkDescriptor(pathTpe, BackendType.Array(linkOptionTpe))(BackendType.Bool))
+    val isDir = new Label()
+    val notDir = new Label()
+    mv.visitJumpInsn(IFNE, isDir)
+    mv.visitLabel(notDir)
+    POP()
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    ICONST_0()
+    ANEWARRAY(JvmName.String)
+    pushInt(8)
+    pushString("not a directory")
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(isDir)
+    POP()
+
+    // names = new File(filename).list()
+    NEW(jFile)
+    DUP()
+    ALOAD(filenameSlot)
+    INVOKESPECIAL(jFile, JvmName.ConstructorMethod, mkDescriptor(BackendType.String)(VoidableType.Void))
+    INVOKEVIRTUAL(jFile, "list", mkDescriptor()(BackendType.Array(BackendType.String)))
+    ASTORE(arrSlot)
+
+    // if (names == null) => Other
+    val hasNames = new Label()
+    ALOAD(arrSlot)
+    mv.visitJumpInsn(IFNONNULL, hasNames)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    ICONST_0()
+    ANEWARRAY(JvmName.String)
+    pushInt(14)
+    pushString("I/O error")
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(hasNames)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(true)
+    ALOAD(arrSlot)
+    pushInt(14)
+    pushString("")
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitLabel(tryEnd)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerInvalid)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    ICONST_0()
+    ANEWARRAY(JvmName.String)
+    pushInt(3)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(after)
+  }
+
+  private def compileIoFileWriteString(op: UnaryOp, exp: Expr, tpe: SimpleType, loc: SourceLocation)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    import BytecodeInstructions.*
+    BytecodeInstructions.addLoc(loc)
+
+    val SimpleType.Tuple(retElmTypes) = tpe
+    val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+    val SimpleType.Tuple(argElmTypes) = exp.tpe
+    val argTupleType = BackendObjType.Tuple(argElmTypes.map(BackendType.toBackendType))
+
+    val jPaths = JvmName.ofClass(classOf[java.nio.file.Paths])
+    val jFiles = JvmName.ofClass(classOf[java.nio.file.Files])
+    val jPath = JvmName.ofClass(classOf[java.nio.file.Path])
+    val pathTpe = BackendType.Reference(BackendObjType.Native(jPath))
+    val jOpenOption = JvmName.ofClass(classOf[java.nio.file.OpenOption])
+    val openOptionTpe = BackendType.Reference(BackendObjType.Native(jOpenOption))
+    val jStandardOpenOption = JvmName.ofClass(classOf[java.nio.file.StandardOpenOption])
+    val jStandardCharsets = JvmName.ofClass(classOf[java.nio.charset.StandardCharsets])
+    val jCharset = JvmName.ofClass(classOf[java.nio.charset.Charset])
+    val charsetTpe = BackendType.Reference(BackendObjType.Native(jCharset))
+    val jInvalidPath = JvmName.ofClass(classOf[java.nio.file.InvalidPathException])
+    val jUnsupported = JvmName.ofClass(classOf[java.lang.UnsupportedOperationException])
+    val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+
+    // Locals.
+    val dataSlot = 2660
+    val fileSlot = 2661
+    val bytesSlot = 2662
+    val exSlot = 2663
+
+    // Extract (data, file) from tuple argument.
+    compileExpr(exp)
+    DUP()
+    GETFIELD(argTupleType.IndexField(0))
+    CHECKCAST(JvmName.String)
+    ASTORE(dataSlot)
+    GETFIELD(argTupleType.IndexField(1))
+    CHECKCAST(JvmName.String)
+    ASTORE(fileSlot)
+
+    val tryStart = new Label()
+    val tryEnd = new Label()
+    val handlerInvalid = new Label()
+    val handlerUnsupported = new Label()
+    val handlerIo = new Label()
+    val after = new Label()
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerInvalid, jInvalidPath.toInternalName)
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerUnsupported, jUnsupported.toInternalName)
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerIo, jIOException.toInternalName)
+
+    mv.visitLabel(tryStart)
+    // bytes = data.getBytes(StandardCharsets.UTF_8)
+    ALOAD(dataSlot)
+    mv.visitFieldInsn(org.objectweb.asm.Opcodes.GETSTATIC, jStandardCharsets.toInternalName, "UTF_8", charsetTpe.toDescriptor)
+    INVOKEVIRTUAL(JvmName.String, "getBytes", mkDescriptor(charsetTpe)(BackendType.Array(BackendType.Int8)))
+    ASTORE(bytesSlot)
+
+    // Files.write(Paths.get(file), bytes, opts)
+    ALOAD(fileSlot)
+    ICONST_0()
+    ANEWARRAY(JvmName.String)
+    INVOKESTATIC(jPaths, "get", mkDescriptor(BackendType.String, BackendType.Array(BackendType.String))(pathTpe))
+    ALOAD(bytesSlot)
+
+    op match {
+      case IoOp.FileAppend =>
+        ICONST_2()
+        ANEWARRAY(jOpenOption)
+        DUP()
+        ICONST_0()
+        mv.visitFieldInsn(org.objectweb.asm.Opcodes.GETSTATIC, jStandardOpenOption.toInternalName, "APPEND", BackendType.Reference(BackendObjType.Native(jStandardOpenOption)).toDescriptor)
+        mv.visitInsn(AASTORE)
+        DUP()
+        ICONST_1()
+        mv.visitFieldInsn(org.objectweb.asm.Opcodes.GETSTATIC, jStandardOpenOption.toInternalName, "CREATE", BackendType.Reference(BackendObjType.Native(jStandardOpenOption)).toDescriptor)
+        mv.visitInsn(AASTORE)
+      case _ =>
+        ICONST_0()
+        ANEWARRAY(jOpenOption)
+    }
+
+    INVOKESTATIC(jFiles, "write", mkDescriptor(pathTpe, BackendType.Array(BackendType.Int8), BackendType.Array(openOptionTpe))(pathTpe))
+    POP()
+
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(true)
+    GETSTATIC(BackendObjType.Unit.SingletonField)
+    pushInt(14)
+    pushString("")
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitLabel(tryEnd)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerInvalid)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    GETSTATIC(BackendObjType.Unit.SingletonField)
+    pushInt(3)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerUnsupported)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    GETSTATIC(BackendObjType.Unit.SingletonField)
+    pushInt(12)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerIo)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    GETSTATIC(BackendObjType.Unit.SingletonField)
+    pushInt(14)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(after)
+  }
+
+  private def compileIoFileWriteBytes(op: UnaryOp, exp: Expr, tpe: SimpleType, loc: SourceLocation)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    import BytecodeInstructions.*
+    BytecodeInstructions.addLoc(loc)
+
+    val SimpleType.Tuple(retElmTypes) = tpe
+    val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+    val SimpleType.Tuple(argElmTypes) = exp.tpe
+    val argTupleType = BackendObjType.Tuple(argElmTypes.map(BackendType.toBackendType))
+
+    val jPaths = JvmName.ofClass(classOf[java.nio.file.Paths])
+    val jFiles = JvmName.ofClass(classOf[java.nio.file.Files])
+    val jPath = JvmName.ofClass(classOf[java.nio.file.Path])
+    val pathTpe = BackendType.Reference(BackendObjType.Native(jPath))
+    val jOpenOption = JvmName.ofClass(classOf[java.nio.file.OpenOption])
+    val openOptionTpe = BackendType.Reference(BackendObjType.Native(jOpenOption))
+    val jStandardOpenOption = JvmName.ofClass(classOf[java.nio.file.StandardOpenOption])
+    val jInvalidPath = JvmName.ofClass(classOf[java.nio.file.InvalidPathException])
+    val jUnsupported = JvmName.ofClass(classOf[java.lang.UnsupportedOperationException])
+    val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+
+    // Locals.
+    val bytesSlot = 2670
+    val fileSlot = 2671
+    val exSlot = 2672
+
+    // Extract (bytes, file) from tuple argument.
+    compileExpr(exp)
+    DUP()
+    GETFIELD(argTupleType.IndexField(0))
+    mv.visitTypeInsn(org.objectweb.asm.Opcodes.CHECKCAST, BackendType.Array(BackendType.Int8).toDescriptor)
+    ASTORE(bytesSlot)
+    GETFIELD(argTupleType.IndexField(1))
+    CHECKCAST(JvmName.String)
+    ASTORE(fileSlot)
+
+    val tryStart = new Label()
+    val tryEnd = new Label()
+    val handlerInvalid = new Label()
+    val handlerUnsupported = new Label()
+    val handlerIo = new Label()
+    val after = new Label()
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerInvalid, jInvalidPath.toInternalName)
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerUnsupported, jUnsupported.toInternalName)
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerIo, jIOException.toInternalName)
+
+    mv.visitLabel(tryStart)
+    ALOAD(fileSlot)
+    ICONST_0()
+    ANEWARRAY(JvmName.String)
+    INVOKESTATIC(jPaths, "get", mkDescriptor(BackendType.String, BackendType.Array(BackendType.String))(pathTpe))
+    ALOAD(bytesSlot)
+
+    op match {
+      case IoOp.FileAppendBytes =>
+        ICONST_2()
+        ANEWARRAY(jOpenOption)
+        DUP()
+        ICONST_0()
+        mv.visitFieldInsn(org.objectweb.asm.Opcodes.GETSTATIC, jStandardOpenOption.toInternalName, "APPEND", BackendType.Reference(BackendObjType.Native(jStandardOpenOption)).toDescriptor)
+        mv.visitInsn(AASTORE)
+        DUP()
+        ICONST_1()
+        mv.visitFieldInsn(org.objectweb.asm.Opcodes.GETSTATIC, jStandardOpenOption.toInternalName, "CREATE", BackendType.Reference(BackendObjType.Native(jStandardOpenOption)).toDescriptor)
+        mv.visitInsn(AASTORE)
+      case _ =>
+        ICONST_0()
+        ANEWARRAY(jOpenOption)
+    }
+
+    INVOKESTATIC(jFiles, "write", mkDescriptor(pathTpe, BackendType.Array(BackendType.Int8), BackendType.Array(openOptionTpe))(pathTpe))
+    POP()
+
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(true)
+    GETSTATIC(BackendObjType.Unit.SingletonField)
+    pushInt(14)
+    pushString("")
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitLabel(tryEnd)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerInvalid)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    GETSTATIC(BackendObjType.Unit.SingletonField)
+    pushInt(3)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerUnsupported)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    GETSTATIC(BackendObjType.Unit.SingletonField)
+    pushInt(12)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerIo)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    GETSTATIC(BackendObjType.Unit.SingletonField)
+    pushInt(14)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(after)
+  }
+
+  private def compileIoFileTruncate(exp: Expr, tpe: SimpleType, loc: SourceLocation)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    import BytecodeInstructions.*
+    BytecodeInstructions.addLoc(loc)
+
+    val SimpleType.Tuple(retElmTypes) = tpe
+    val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+    val jPaths = JvmName.ofClass(classOf[java.nio.file.Paths])
+    val jFiles = JvmName.ofClass(classOf[java.nio.file.Files])
+    val jPath = JvmName.ofClass(classOf[java.nio.file.Path])
+    val pathTpe = BackendType.Reference(BackendObjType.Native(jPath))
+    val jOpenOption = JvmName.ofClass(classOf[java.nio.file.OpenOption])
+    val openOptionTpe = BackendType.Reference(BackendObjType.Native(jOpenOption))
+    val jStandardOpenOption = JvmName.ofClass(classOf[java.nio.file.StandardOpenOption])
+    val jInvalidPath = JvmName.ofClass(classOf[java.nio.file.InvalidPathException])
+    val jUnsupported = JvmName.ofClass(classOf[java.lang.UnsupportedOperationException])
+    val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+
+    // Locals.
+    val fileSlot = 2680
+    val exSlot = 2681
+
+    compileExpr(exp)
+    ASTORE(fileSlot)
+
+    val tryStart = new Label()
+    val tryEnd = new Label()
+    val handlerInvalid = new Label()
+    val handlerUnsupported = new Label()
+    val handlerIo = new Label()
+    val after = new Label()
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerInvalid, jInvalidPath.toInternalName)
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerUnsupported, jUnsupported.toInternalName)
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerIo, jIOException.toInternalName)
+
+    mv.visitLabel(tryStart)
+    ALOAD(fileSlot)
+    ICONST_0()
+    ANEWARRAY(JvmName.String)
+    INVOKESTATIC(jPaths, "get", mkDescriptor(BackendType.String, BackendType.Array(BackendType.String))(pathTpe))
+
+    ICONST_0()
+    mv.visitIntInsn(NEWARRAY, T_BYTE)
+
+    ICONST_1()
+    ANEWARRAY(jOpenOption)
+    DUP()
+    ICONST_0()
+    mv.visitFieldInsn(org.objectweb.asm.Opcodes.GETSTATIC, jStandardOpenOption.toInternalName, "TRUNCATE_EXISTING", BackendType.Reference(BackendObjType.Native(jStandardOpenOption)).toDescriptor)
+    mv.visitInsn(AASTORE)
+
+    INVOKESTATIC(jFiles, "write", mkDescriptor(pathTpe, BackendType.Array(BackendType.Int8), BackendType.Array(openOptionTpe))(pathTpe))
+    POP()
+
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(true)
+    GETSTATIC(BackendObjType.Unit.SingletonField)
+    pushInt(14)
+    pushString("")
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitLabel(tryEnd)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerInvalid)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    GETSTATIC(BackendObjType.Unit.SingletonField)
+    pushInt(3)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerUnsupported)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    GETSTATIC(BackendObjType.Unit.SingletonField)
+    pushInt(12)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerIo)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    GETSTATIC(BackendObjType.Unit.SingletonField)
+    pushInt(14)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(after)
+  }
+
+  private def compileIoFileMkDir(op: UnaryOp, exp: Expr, tpe: SimpleType, loc: SourceLocation)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    import BytecodeInstructions.*
+    BytecodeInstructions.addLoc(loc)
+
+    val SimpleType.Tuple(retElmTypes) = tpe
+    val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+    val jPaths = JvmName.ofClass(classOf[java.nio.file.Paths])
+    val jFiles = JvmName.ofClass(classOf[java.nio.file.Files])
+    val jPath = JvmName.ofClass(classOf[java.nio.file.Path])
+    val pathTpe = BackendType.Reference(BackendObjType.Native(jPath))
+    val jFileAttr = JvmName.ofClass(classOf[java.nio.file.attribute.FileAttribute[?]])
+    val fileAttrTpe = BackendType.Reference(BackendObjType.Native(jFileAttr))
+    val jInvalidPath = JvmName.ofClass(classOf[java.nio.file.InvalidPathException])
+    val jUnsupported = JvmName.ofClass(classOf[java.lang.UnsupportedOperationException])
+    val jAlreadyExists = JvmName.ofClass(classOf[java.nio.file.FileAlreadyExistsException])
+    val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+
+    // Locals.
+    val dirSlot = 2690
+    val exSlot = 2691
+
+    compileExpr(exp)
+    ASTORE(dirSlot)
+
+    val tryStart = new Label()
+    val tryEnd = new Label()
+    val handlerInvalid = new Label()
+    val handlerUnsupported = new Label()
+    val handlerExists = new Label()
+    val handlerIo = new Label()
+    val after = new Label()
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerInvalid, jInvalidPath.toInternalName)
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerUnsupported, jUnsupported.toInternalName)
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerExists, jAlreadyExists.toInternalName)
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerIo, jIOException.toInternalName)
+
+    mv.visitLabel(tryStart)
+    ALOAD(dirSlot)
+    ICONST_0()
+    ANEWARRAY(JvmName.String)
+    INVOKESTATIC(jPaths, "get", mkDescriptor(BackendType.String, BackendType.Array(BackendType.String))(pathTpe))
+
+    ICONST_0()
+    ANEWARRAY(jFileAttr)
+
+    op match {
+      case IoOp.FileMkDirs =>
+        INVOKESTATIC(jFiles, "createDirectories", mkDescriptor(pathTpe, BackendType.Array(fileAttrTpe))(pathTpe))
+      case _ =>
+        INVOKESTATIC(jFiles, "createDirectory", mkDescriptor(pathTpe, BackendType.Array(fileAttrTpe))(pathTpe))
+    }
+    POP()
+
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(true)
+    GETSTATIC(BackendObjType.Unit.SingletonField)
+    pushInt(14)
+    pushString("")
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitLabel(tryEnd)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerInvalid)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    GETSTATIC(BackendObjType.Unit.SingletonField)
+    pushInt(3)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerUnsupported)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    GETSTATIC(BackendObjType.Unit.SingletonField)
+    pushInt(12)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerExists)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    GETSTATIC(BackendObjType.Unit.SingletonField)
+    pushInt(0)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerIo)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    GETSTATIC(BackendObjType.Unit.SingletonField)
+    pushInt(14)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(after)
+  }
+
+  private def compileIoFileMkTempDir(exp: Expr, tpe: SimpleType, loc: SourceLocation)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    import BytecodeInstructions.*
+    BytecodeInstructions.addLoc(loc)
+
+    val SimpleType.Tuple(retElmTypes) = tpe
+    val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+    val jFiles = JvmName.ofClass(classOf[java.nio.file.Files])
+    val jFileAttr = JvmName.ofClass(classOf[java.nio.file.attribute.FileAttribute[?]])
+    val fileAttrTpe = BackendType.Reference(BackendObjType.Native(jFileAttr))
+    val jPath = JvmName.ofClass(classOf[java.nio.file.Path])
+    val pathTpe = BackendType.Reference(BackendObjType.Native(jPath))
+    val jIllegalArg = JvmName.ofClass(classOf[java.lang.IllegalArgumentException])
+    val jUnsupported = JvmName.ofClass(classOf[java.lang.UnsupportedOperationException])
+    val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+
+    // Locals.
+    val prefixSlot = 2700
+    val pathSlot = 2701
+    val exSlot = 2702
+
+    compileExpr(exp)
+    ASTORE(prefixSlot)
+
+    val tryStart = new Label()
+    val tryEnd = new Label()
+    val handlerIllegalArg = new Label()
+    val handlerUnsupported = new Label()
+    val handlerIo = new Label()
+    val after = new Label()
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerIllegalArg, jIllegalArg.toInternalName)
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerUnsupported, jUnsupported.toInternalName)
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerIo, jIOException.toInternalName)
+
+    mv.visitLabel(tryStart)
+    ALOAD(prefixSlot)
+    ICONST_0()
+    ANEWARRAY(jFileAttr)
+    INVOKESTATIC(jFiles, "createTempDirectory", mkDescriptor(BackendType.String, BackendType.Array(fileAttrTpe))(pathTpe))
+    ASTORE(pathSlot)
+
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(true)
+    ALOAD(pathSlot)
+    INVOKEINTERFACE(jPath, "toString", mkDescriptor()(BackendType.String))
+    pushInt(14)
+    pushString("")
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitLabel(tryEnd)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerIllegalArg)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    pushString("")
+    pushInt(3)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerUnsupported)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    pushString("")
+    pushInt(12)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerIo)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    pushString("")
+    pushInt(14)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(after)
   }
 
   private def getStructType(struct: Struct)(implicit root: Root): BackendObjType.Struct = {

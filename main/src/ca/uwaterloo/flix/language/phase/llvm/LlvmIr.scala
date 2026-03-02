@@ -75,6 +75,10 @@ object LlvmIr {
     case class Struct(fields: List[Type]) extends Type {
       def render: String = s"{ ${fields.map(_.render).mkString(", ")} }"
     }
+
+    case class Array(length: Int, elemType: Type) extends Type {
+      def render: String = s"[$length x ${elemType.render}]"
+    }
   }
 
   //
@@ -128,6 +132,24 @@ object LlvmIr {
     case class Undef(tpe: Type) extends Value {
       def render: String = "undef"
     }
+
+    case class Zero(tpe: Type) extends Value {
+      def render: String = "zeroinitializer"
+    }
+
+    case class StructConst(elems: List[Value], tpe: Type) extends Value {
+      def render: String = {
+        val fields = elems.map(v => s"${v.tpe.render} ${v.render}").mkString(", ")
+        s"{ $fields }"
+      }
+    }
+
+    case class ArrayConst(elems: List[Value], tpe: Type) extends Value {
+      def render: String = {
+        val xs = elems.map(v => s"${v.tpe.render} ${v.render}").mkString(", ")
+        s"[ $xs ]"
+      }
+    }
   }
 
   //
@@ -154,9 +176,30 @@ object LlvmIr {
                    instrs: List[Instr],
                    term: Terminator)
 
+  sealed trait GlobalDef
+
+  object GlobalDef {
+    sealed trait Linkage
+
+    object Linkage {
+      case object Private extends Linkage
+      case object External extends Linkage
+    }
+
+    /**
+      * A null-terminated string constant.
+      *
+      * The byte array should include the trailing `0` terminator.
+      */
+    case class CString(name: String, bytes: Array[Byte]) extends GlobalDef
+
+    case class Constant(name: String, tpe: Type, init: Value, align: Int = 8, linkage: Linkage = Linkage.Private) extends GlobalDef
+  }
+
   case class Module(sourceFilename: String,
                     typeDefs: List[TypeDef],
                     decls: List[Decl],
+                    globals: List[GlobalDef],
                     functions: List[Function])
 
   //

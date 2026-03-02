@@ -18,7 +18,7 @@
 /// The effect used to bind a TCP server.
 ///
 eff TcpBind {
-    def bind(ip: IpAddr, port: Int16): TcpServer
+    def bind(ip: IpAddr, port: Int32): TcpServer
 }
 
 pub mod TcpBind {
@@ -35,7 +35,7 @@ pub mod TcpBind {
             Ok(f(x))
         } with handler TcpBind {
             def bind(ip, port, resume) = {
-                let (ok, id, kind, msg) = %%TCP_SERVER_BIND%%((IpAddr.toBytes(ip), Int16.toInt32(port)));
+                let (ok, id, kind, msg) = %%TCP_SERVER_BIND%%((IpAddr.toBytes(ip), port));
                 if (ok) {
                     resume(TcpServer.TcpServer(id))
                 } else {

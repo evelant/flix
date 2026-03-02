@@ -782,11 +782,12 @@ object Specialization {
     case Expr.TryCatch(exp, rules, tpe, eff, loc0) =>
       val e = specializeExp(exp, env0, subst)
       val rs = rules map {
-        case TypedAst.CatchRule(bnd, clazz, body, loc) =>
+        case TypedAst.CatchRule(bnd, catchTpe0, body, loc) =>
           val freshSym = Symbol.freshVarSym(bnd.sym)
           val env1 = env0 + (bnd.sym -> freshSym)
           val b = specializeExp(body, env1, subst)
-          TypedAst.CatchRule(Binder(freshSym, subst(bnd.tpe)), clazz, b, loc)
+          val catchTpe = subst(catchTpe0)
+          TypedAst.CatchRule(Binder(freshSym, subst(bnd.tpe)), catchTpe, b, loc)
       }
       Expr.TryCatch(e, rs, subst(tpe), subst(eff), loc0)
 

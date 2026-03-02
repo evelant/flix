@@ -169,6 +169,7 @@ object JvmName {
   val Iterator: JvmName = JvmName(JavaUtil, "Iterator")
   val LambdaMetafactory: JvmName = JvmName(JavaLangInvoke, "LambdaMetafactory")
   val LinkedList: JvmName = JvmName(JavaUtil, "LinkedList")
+  val Locale: JvmName = JvmName(JavaUtil, "Locale")
   val Long: JvmName = JvmName(JavaLang, "Long")
   val LongConsumer: JvmName = JvmName(JavaUtilFunction, "LongConsumer")
   val LongFunction: JvmName = JvmName(JavaUtilFunction, "LongFunction")
@@ -206,6 +207,8 @@ object JvmName {
   val DevFlixRuntime: List[String] = List("dev", "flix", "runtime")
 
   val FlixError: JvmName = JvmName(DevFlixRuntime, mkClassName("FlixError"))
+
+  val FlixException: JvmName = JvmName(DevFlixRuntime, mkClassName("FlixException"))
 
 }
 

@@ -6,7 +6,7 @@ import ca.uwaterloo.flix.language.ast.shared.SecurityContext
 import ca.uwaterloo.flix.language.ast.{SourceLocation, Symbol, Type, TypedAst}
 import ca.uwaterloo.flix.language.errors.Highlighter.highlight
 import ca.uwaterloo.flix.language.fmt.FormatType
-import ca.uwaterloo.flix.util.Formatter
+import ca.uwaterloo.flix.util.{Formatter, StdlibProfile}
 import ca.uwaterloo.flix.util.CompilationTarget
 
 /** A common super-type for safety errors. */
@@ -274,24 +274,40 @@ object SafetyError {
   }
 
   /**
-    * An error raised to indicate that the Java class in a catch clause is not a Throwable.
+    * An error raised to indicate that the catch type is invalid for the active stdlib profile.
     *
     * @param loc the location of the catch parameter.
     */
-  case class IllegalCatchType(clazz: java.lang.Class[?], loc: SourceLocation) extends SafetyError {
+  case class IllegalCatchType(tpe: Type, loc: SourceLocation)(implicit flix: Flix) extends SafetyError {
     def code: ErrorCode = ErrorCode.E4354
 
-    def summary: String = s"Unexpected catch type: '${clazz.getName}' is not a subclass of Throwable."
+    def summary: String = flix.options.stdlibProfile match {
+      case StdlibProfile.Portable =>
+        s"Unexpected catch type: '${FormatType.formatType(tpe)}' is not a valid portable exception matcher."
+      case _ =>
+        s"Unexpected catch type: '${FormatType.formatType(tpe)}' is not a subclass of Throwable."
+    }
 
     def message(fmt: Formatter)(implicit root: Option[TypedAst.Root]): String = {
       import fmt.*
-      s""">> Unexpected catch type: '${red(clazz.getName)}' is not a subclass of Throwable.
-         |
-         |${highlight(loc, "unexpected type", fmt)}
-         |
-         |${underline("Explanation:")} A catch clause can only catch subclasses of
-         |'java.lang.Throwable'.
-         |""".stripMargin
+      flix.options.stdlibProfile match {
+        case StdlibProfile.Portable =>
+          s""">> Unexpected catch type: '${red(FormatType.formatType(tpe))}' is not a valid portable exception matcher.
+             |
+             |${highlight(loc, "unexpected type", fmt)}
+             |
+             |${underline("Explanation:")} Under the portable stdlib profile, catch clauses participate in the
+             |portable exception system and match a payload type (kind) or `Exn` for catch-all.
+             |""".stripMargin
+        case _ =>
+          s""">> Unexpected catch type: '${red(FormatType.formatType(tpe))}' is not a subclass of Throwable.
+             |
+             |${highlight(loc, "unexpected type", fmt)}
+             |
+             |${underline("Explanation:")} A catch clause can only catch subclasses of
+             |'java.lang.Throwable'.
+             |""".stripMargin
+      }
     }
   }
 
@@ -303,17 +319,33 @@ object SafetyError {
   case class IllegalThrowType(tpe: Type, loc: SourceLocation)(implicit flix: Flix) extends SafetyError {
     def code: ErrorCode = ErrorCode.E4465
 
-    def summary: String = s"Unexpected throw type: '${FormatType.formatType(tpe)}' is not a subclass of Throwable."
+    def summary: String = flix.options.stdlibProfile match {
+      case StdlibProfile.Portable =>
+        s"Unexpected throw type: '${FormatType.formatType(tpe)}' is not a portable exception value."
+      case _ =>
+        s"Unexpected throw type: '${FormatType.formatType(tpe)}' is not a subclass of Throwable."
+    }
 
     def message(fmt: Formatter)(implicit root: Option[TypedAst.Root]): String = {
       import fmt.*
-      s""">> Unexpected throw type: '${red(FormatType.formatType(tpe))}' is not a subclass of Throwable.
-         |
-         |${highlight(loc, "unexpected type", fmt)}
-         |
-         |${underline("Explanation:")} A throw expression can only throw subclasses of
-         |'java.lang.Throwable'.
-         |""".stripMargin
+      flix.options.stdlibProfile match {
+        case StdlibProfile.Portable =>
+          s""">> Unexpected throw type: '${red(FormatType.formatType(tpe))}' is not a portable exception value.
+             |
+             |${highlight(loc, "unexpected type", fmt)}
+             |
+             |${underline("Explanation:")} Under the portable stdlib profile, a throw expression must throw the
+             |designated portable exception value type `Exn` (payload + trace).
+             |""".stripMargin
+        case _ =>
+          s""">> Unexpected throw type: '${red(FormatType.formatType(tpe))}' is not a subclass of Throwable.
+             |
+             |${highlight(loc, "unexpected type", fmt)}
+             |
+             |${underline("Explanation:")} A throw expression can only throw subclasses of
+             |'java.lang.Throwable'.
+             |""".stripMargin
+      }
     }
   }
 

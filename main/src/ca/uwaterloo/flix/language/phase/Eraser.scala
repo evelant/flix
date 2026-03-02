@@ -107,8 +107,8 @@ object Eraser {
   }
 
   private def visitCatchRule(rule: ReducedAst.CatchRule)(implicit ctx: SharedContext, flix: Flix): ErasedAst.CatchRule = rule match {
-    case ReducedAst.CatchRule(sym, clazz, exp) =>
-      ErasedAst.CatchRule(sym, clazz, visitExp(exp))
+    case ReducedAst.CatchRule(sym, catchTpe, exp) =>
+      ErasedAst.CatchRule(sym, catchTpe, visitExp(exp))
   }
 
   private def visitHandlerRule(rule: ReducedAst.HandlerRule)(implicit ctx: SharedContext, flix: Flix): ErasedAst.HandlerRule = rule match {
