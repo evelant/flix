@@ -1,11 +1,271 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
-const c = @cImport({
+const is_wasm: bool = builtin.target.cpu.arch.isWasm();
+
+// Allocator for runtime metadata and temporary buffers.
+// - On wasm32-freestanding we must not depend on libc.
+// - On native we prefer the C allocator for now.
+const rt_alloc: std.mem.Allocator = if (is_wasm) std.heap.page_allocator else std.heap.c_allocator;
+
+// ----------------------------------------------------------------------------
+// Target substrate abstractions.
+//
+// The runtime is compiled for both native and wasm32-freestanding. The wasm target is
+// single-threaded in v0 (no wasm-threads), so we provide no-op mutex/condvar and
+// non-atomic "atomics" to keep the core runtime code shared.
+// ----------------------------------------------------------------------------
+
+const RtMutex = if (is_wasm) struct {
+    pub fn lock(_: *@This()) void {}
+    pub fn unlock(_: *@This()) void {}
+} else std.Thread.Mutex;
+
+const RtCondition = if (is_wasm) struct {
+    pub fn wait(_: *@This(), _: *RtMutex) void {}
+    pub fn signal(_: *@This()) void {}
+    pub fn broadcast(_: *@This()) void {}
+} else std.Thread.Condition;
+
+const RtThread = if (is_wasm) struct {
+    pub fn join(_: @This()) void {}
+} else std.Thread;
+
+fn RtAtomic(comptime T: type) type {
+    if (is_wasm) {
+        return struct {
+            raw: T,
+
+            pub inline fn init(v: T) @This() {
+                return .{ .raw = v };
+            }
+
+            pub inline fn load(self: *const @This(), comptime _: std.builtin.AtomicOrder) T {
+                return self.raw;
+            }
+
+            pub inline fn store(self: *@This(), v: T, comptime _: std.builtin.AtomicOrder) void {
+                self.raw = v;
+            }
+
+            pub inline fn swap(self: *@This(), v: T, comptime _: std.builtin.AtomicOrder) T {
+                const prev = self.raw;
+                self.raw = v;
+                return prev;
+            }
+
+            pub inline fn fetchAdd(self: *@This(), operand: T, comptime _: std.builtin.AtomicOrder) T {
+                const prev = self.raw;
+                if (@typeInfo(T) != .int) @compileError("fetchAdd only supported for integer types");
+                self.raw = prev +% operand;
+                return prev;
+            }
+
+            pub inline fn fetchSub(self: *@This(), operand: T, comptime _: std.builtin.AtomicOrder) T {
+                const prev = self.raw;
+                if (@typeInfo(T) != .int) @compileError("fetchSub only supported for integer types");
+                self.raw = prev -% operand;
+                return prev;
+            }
+        };
+    }
+
+    return std.atomic.Value(T);
+}
+
+// ----------------------------------------------------------------------------
+// wasm32-freestanding support: minimal libc surface expected by `runtime/src/wit/flix.c`.
+//
+// The generated WIT C glue uses `free`, `memcpy`, `strlen`, and may use `realloc` via a weak
+// `cabi_realloc` definition. For browser-first bring-up (no WASI libc), we provide these symbols.
+//
+// Note: This is *not* the Flix GC heap; it is a small general-purpose allocator for canonical ABI
+// buffers (strings/lists) and for legacy runtime helper allocations.
+// ----------------------------------------------------------------------------
+
+const WasmCHeader = extern struct {
+    size: usize,
+    alignment: usize,
+    offset: usize,
+};
+
+fn wasmCAlloc(alignment_bytes: usize, size: usize) callconv(.c) ?*anyopaque {
+    if (size == 0) return @ptrFromInt(alignment_bytes);
+    const alignment = if (alignment_bytes == 0) 1 else alignment_bytes;
+    const pad = alignment - 1;
+    const total = size + @sizeOf(WasmCHeader) + pad;
+
+    const base = rt_alloc.rawAlloc(total, .@"8", @returnAddress()) orelse return null;
+    const base_addr: usize = @intFromPtr(base);
+    const after_header = base_addr + @sizeOf(WasmCHeader);
+    const aligned_addr = (after_header + pad) & ~pad;
+    const aligned_ptr: *anyopaque = @ptrFromInt(aligned_addr);
+
+    const hdr_addr = aligned_addr - @sizeOf(WasmCHeader);
+    const hdr: *WasmCHeader = @ptrFromInt(hdr_addr);
+    hdr.* = .{ .size = total, .alignment = 8, .offset = aligned_addr - base_addr };
+
+    return aligned_ptr;
+}
+
+fn wasmCFree(ptr: ?*anyopaque) callconv(.c) void {
+    const p = ptr orelse return;
+    const addr: usize = @intFromPtr(p);
+    const hdr_addr = addr - @sizeOf(WasmCHeader);
+    const hdr: *const WasmCHeader = @ptrFromInt(hdr_addr);
+    const base_addr = addr - hdr.offset;
+    const base: [*]u8 = @ptrFromInt(base_addr);
+    rt_alloc.rawFree(base[0..hdr.size], .@"8", @returnAddress());
+}
+
+fn wasmCRealloc(ptr: ?*anyopaque, new_size: usize) callconv(.c) ?*anyopaque {
+    if (ptr == null) return wasmCAlloc(16, new_size);
+    if (new_size == 0) return @ptrFromInt(16);
+
+    const p = ptr.?;
+    const addr: usize = @intFromPtr(p);
+    const hdr_addr = addr - @sizeOf(WasmCHeader);
+    const hdr: *const WasmCHeader = @ptrFromInt(hdr_addr);
+    const old_total = hdr.size;
+    const old_user = old_total - @sizeOf(WasmCHeader) - (hdr.offset - @sizeOf(WasmCHeader));
+    const copy_n: usize = if (new_size < old_user) new_size else old_user;
+
+    const new_ptr = wasmCAlloc(16, new_size) orelse return null;
+    const dst: [*]u8 = @ptrCast(new_ptr);
+    const src: [*]const u8 = @ptrCast(p);
+    std.mem.copyForwards(u8, dst[0..copy_n], src[0..copy_n]);
+    wasmCFree(p);
+    return new_ptr;
+}
+
+fn wasmMemcpy(dest: ?*anyopaque, src: ?*const anyopaque, n: usize) callconv(.c) ?*anyopaque {
+    const d = dest orelse return null;
+    const s = src orelse return dest;
+    const db: [*]u8 = @ptrCast(d);
+    const sb: [*]const u8 = @ptrCast(s);
+    std.mem.copyForwards(u8, db[0..n], sb[0..n]);
+    return dest;
+}
+
+fn wasmStrlen(s0: [*:0]const u8) callconv(.c) usize {
+    var i: usize = 0;
+    while (s0[i] != 0) : (i += 1) {}
+    return i;
+}
+
+fn wasmAbort() callconv(.c) noreturn {
+    @panic("abort");
+}
+
+fn wasmExit(code: i32) callconv(.c) noreturn {
+    _ = code;
+    @panic("exit");
+}
+
+fn wasmCabiRealloc(ptr: ?*anyopaque, old_size: usize, alignment: usize, new_size: usize) callconv(.c) ?*anyopaque {
+    // Match wit-bindgen's C ABI expectation: new_size==0 returns `alignment` as a sentinel.
+    if (new_size == 0) return @ptrFromInt(alignment);
+    if (ptr == null) return wasmCAlloc(alignment, new_size);
+
+    // Allocate+copy+free; correctness over performance (bring-up).
+    const p = ptr.?;
+    const new_ptr = wasmCAlloc(alignment, new_size) orelse return null;
+    const dst: [*]u8 = @ptrCast(new_ptr);
+    const src: [*]const u8 = @ptrCast(p);
+    const copy_n: usize = if (old_size < new_size) old_size else new_size;
+    std.mem.copyForwards(u8, dst[0..copy_n], src[0..copy_n]);
+    wasmCFree(p);
+    return new_ptr;
+}
+
+fn wasmPow(x: f64, y: f64) callconv(.c) f64 {
+    // Provide `pow` for LLVM wasm builds (libm is unavailable in wasm32-freestanding).
+    return std.math.pow(f64, x, y);
+}
+
+fn wasmPowf(x: f32, y: f32) callconv(.c) f32 {
+    // Provide `powf` for LLVM wasm builds (libm is unavailable in wasm32-freestanding).
+    return std.math.pow(f32, x, y);
+}
+
+comptime {
+    if (is_wasm) {
+        @export(&wasmCAlloc, .{ .name = "malloc" });
+        @export(&wasmCFree, .{ .name = "free" });
+        @export(&wasmCRealloc, .{ .name = "realloc" });
+        @export(&wasmMemcpy, .{ .name = "memcpy" });
+        @export(&wasmStrlen, .{ .name = "strlen" });
+        @export(&wasmAbort, .{ .name = "abort" });
+        @export(&wasmExit, .{ .name = "exit" });
+        @export(&wasmCabiRealloc, .{ .name = "cabi_realloc" });
+        @export(&wasmPow, .{ .name = "pow" });
+        @export(&wasmPowf, .{ .name = "powf" });
+    }
+}
+
+const c = if (is_wasm) struct {
+    // Minimal surface used by the runtime in wasm32-freestanding builds.
+    pub fn getenv(_: [*:0]const u8) ?[*:0]const u8 {
+        return null;
+    }
+    pub fn malloc(size: usize) ?*anyopaque {
+        return wasmCAlloc(16, size);
+    }
+    pub fn free(ptr: ?*anyopaque) void {
+        wasmCFree(ptr);
+    }
+    pub fn realloc(ptr: ?*anyopaque, size: usize) ?*anyopaque {
+        return wasmCRealloc(ptr, size);
+    }
+    pub fn abort() noreturn {
+        wasmAbort();
+    }
+    pub fn exit(code: i32) noreturn {
+        wasmExit(code);
+    }
+
+    // Regex is currently unsupported on wasm32-freestanding. We provide stub types and trap
+    // implementations so the runtime can still compile.
+    pub const regex_t = extern struct {
+        re_nsub: usize = 0,
+        _dummy: usize = 0,
+    };
+    pub const regmatch_t = extern struct { rm_so: i32 = 0, rm_eo: i32 = 0 };
+    pub const REG_EXTENDED: i32 = 0;
+    pub const REG_ICASE: i32 = 0;
+
+    pub fn regcomp(_: *regex_t, _: [*:0]const u8, _: i32) i32 {
+        @panic("regex unsupported on wasm");
+    }
+    pub fn regexec(_: *regex_t, _: [*:0]const u8, _: usize, _: [*]regmatch_t, _: i32) i32 {
+        @panic("regex unsupported on wasm");
+    }
+    pub fn regerror(_: i32, _: *regex_t, _: [*]u8, _: usize) usize {
+        @panic("regex unsupported on wasm");
+    }
+    pub fn regfree(_: *regex_t) void {
+        @panic("regex unsupported on wasm");
+    }
+} else @cImport({
     @cInclude("stdlib.h");
     @cInclude("regex.h");
 });
 
 const unicode_case = @import("unicode_case_tables.zig");
+
+// ----------------------------------------------------------------------------
+// WIT sys imports (wasm only).
+//
+// These are implemented by the generated glue `runtime/src/wit/flix.c` and map to host imports
+// from `flix:sys/sys@0.1.0`.
+// ----------------------------------------------------------------------------
+
+const WitString = extern struct {
+    ptr: [*]const u8,
+    len: usize,
+};
+
+extern fn flix_sys_sys_log(level: u8, msg: *WitString) void;
 
 // ============================================================================
 // GC Heap (bring-up): non-moving mark/sweep, STW at pollchecks.
@@ -26,13 +286,13 @@ const GcMeta = struct {
 };
 
 var g_gc_initialized: bool = false;
-var g_gc_mutex: std.Thread.Mutex = .{};
+var g_gc_mutex: RtMutex = .{};
 var g_gc_objects: std.AutoHashMap(usize, GcMeta) = undefined;
 var g_gc_bytes: usize = 0;
 var g_gc_threshold_bytes: usize = 64 * 1024 * 1024; // default: 64 MiB
 var g_gc_stress: bool = false;
-var g_gc_requested: std.atomic.Value(bool) = .init(false);
-var g_gc_collecting: std.atomic.Value(bool) = .init(false);
+var g_gc_requested: RtAtomic(bool) = .init(false);
+var g_gc_collecting: RtAtomic(bool) = .init(false);
 
 fn envTruthy(name: [*:0]const u8) bool {
     const v = c.getenv(name) orelse return false;
@@ -57,11 +317,11 @@ fn envParseUsize(name: [*:0]const u8) ?usize {
 
 var g_rt_debug_initialized: bool = false;
 var g_rt_debug: bool = false;
-var g_rt_debug_mutex: std.Thread.Mutex = .{};
+var g_rt_debug_mutex: RtMutex = .{};
 
 var g_gc_debug_initialized: bool = false;
 var g_gc_debug: bool = false;
-var g_gc_debug_mutex: std.Thread.Mutex = .{};
+var g_gc_debug_mutex: RtMutex = .{};
 
 fn ensureRtDebugInitialized() void {
     if (g_rt_debug_initialized) return;
@@ -84,13 +344,21 @@ fn ensureGcDebugInitialized() void {
 fn dbg(comptime fmt: []const u8, args: anytype) void {
     ensureRtDebugInitialized();
     if (!g_rt_debug) return;
-    std.debug.print(fmt, args);
+    if (is_wasm) {
+        return;
+    } else {
+        std.debug.print(fmt, args);
+    }
 }
 
 fn dbgGc(comptime fmt: []const u8, args: anytype) void {
     ensureGcDebugInitialized();
     if (!g_gc_debug) return;
-    std.debug.print(fmt, args);
+    if (is_wasm) {
+        return;
+    } else {
+        std.debug.print(fmt, args);
+    }
 }
 
 fn ensureGcInitialized() void {
@@ -99,7 +367,7 @@ fn ensureGcInitialized() void {
     defer g_gc_mutex.unlock();
     if (g_gc_initialized) return;
 
-    g_gc_objects = std.AutoHashMap(usize, GcMeta).init(std.heap.c_allocator);
+    g_gc_objects = std.AutoHashMap(usize, GcMeta).init(rt_alloc);
     g_gc_stress = envTruthy("FLIX_GC_STRESS");
     if (envParseUsize("FLIX_GC_HEAP_LIMIT_BYTES")) |n| g_gc_threshold_bytes = n;
     g_gc_initialized = true;
@@ -170,30 +438,30 @@ fn appendUtf16FromCodepoint(list: *std.ArrayList(u16), alloc: std.mem.Allocator,
 
 fn allocFlixStringFromUtf8Lossy(bytes: []const u8) *anyopaque {
     var code_units: std.ArrayList(u16) = .empty;
-    defer code_units.deinit(std.heap.c_allocator);
+    defer code_units.deinit(rt_alloc);
 
     var i: usize = 0;
     while (i < bytes.len) {
         const first = bytes[i];
         const seqlen = std.unicode.utf8ByteSequenceLength(first) catch {
-            appendUtf16FromCodepoint(&code_units, std.heap.c_allocator, 0xFFFD) catch @panic("oom");
+            appendUtf16FromCodepoint(&code_units, rt_alloc, 0xFFFD) catch @panic("oom");
             i += 1;
             continue;
         };
 
         if (i + seqlen > bytes.len) {
-            appendUtf16FromCodepoint(&code_units, std.heap.c_allocator, 0xFFFD) catch @panic("oom");
+            appendUtf16FromCodepoint(&code_units, rt_alloc, 0xFFFD) catch @panic("oom");
             break;
         }
 
         const slice = bytes[i .. i + seqlen];
         const cp = std.unicode.utf8Decode(slice) catch {
-            appendUtf16FromCodepoint(&code_units, std.heap.c_allocator, 0xFFFD) catch @panic("oom");
+            appendUtf16FromCodepoint(&code_units, rt_alloc, 0xFFFD) catch @panic("oom");
             i += 1;
             continue;
         };
 
-        appendUtf16FromCodepoint(&code_units, std.heap.c_allocator, cp) catch @panic("oom");
+        appendUtf16FromCodepoint(&code_units, rt_alloc, cp) catch @panic("oom");
         i += seqlen;
     }
 
@@ -216,7 +484,7 @@ fn allocFlixStringFromUtf8Lossy(bytes: []const u8) *anyopaque {
     return mem;
 }
 
-var g_tuple_typeinfo_mutex: std.Thread.Mutex = .{};
+var g_tuple_typeinfo_mutex: RtMutex = .{};
 var g_tuple_typeinfo_initialized: bool = false;
 var g_tuple_typeinfo_table: std.AutoHashMap(u128, *const FlixTypeInfo) = undefined;
 var g_tuple_typeinfo_next_id: u32 = 1;
@@ -226,7 +494,7 @@ fn ensureTupleTypeInfoInitialized() void {
     g_tuple_typeinfo_mutex.lock();
     defer g_tuple_typeinfo_mutex.unlock();
     if (g_tuple_typeinfo_initialized) return;
-    g_tuple_typeinfo_table = std.AutoHashMap(u128, *const FlixTypeInfo).init(std.heap.c_allocator);
+    g_tuple_typeinfo_table = std.AutoHashMap(u128, *const FlixTypeInfo).init(rt_alloc);
     g_tuple_typeinfo_initialized = true;
 }
 
@@ -253,7 +521,7 @@ fn getTupleTypeInfo(arity: usize, ptr_mask: u64) *const FlixTypeInfo {
 
     var ptr_offs_ptr: ?[*]const u32 = null;
     if (ptr_count > 0) {
-        const offs = std.heap.c_allocator.alloc(u32, ptr_count) catch @panic("oom");
+        const offs = rt_alloc.alloc(u32, ptr_count) catch @panic("oom");
         var j: usize = 0;
         i = 0;
         while (i < arity) : (i += 1) {
@@ -265,7 +533,7 @@ fn getTupleTypeInfo(arity: usize, ptr_mask: u64) *const FlixTypeInfo {
         ptr_offs_ptr = offs.ptr;
     }
 
-    const ti = std.heap.c_allocator.create(FlixTypeInfo) catch @panic("oom");
+    const ti = rt_alloc.create(FlixTypeInfo) catch @panic("oom");
     const size_bytes: u32 = @intCast(@sizeOf(FlixObj) + arity * @sizeOf(i64));
     const type_id: u32 = g_tuple_typeinfo_next_id;
     g_tuple_typeinfo_next_id += 1;
@@ -477,11 +745,11 @@ const FlixCtx = struct {
     //
     // Invariant: each OS thread that runs generated Flix code must have a distinct `FlixCtx`.
     // (Host embedding is expected to follow the same rule.)
-    seen_epoch: std.atomic.Value(u64),
-    blocked: std.atomic.Value(bool),
+    seen_epoch: RtAtomic(u64),
+    blocked: RtAtomic(bool),
     gc_marker: ?*GcMarker,
     next_handle: i64,
-    handles_mutex: std.Thread.Mutex,
+    handles_mutex: RtMutex,
     handles: std.AutoHashMap(i64, FlixHandleEntry),
     cancel_exn: ?*anyopaque,
     // Explicit roots (shadow stack): stack of registered root slots owned by this context.
@@ -504,30 +772,30 @@ const HandshakeCallbackId = enum(u8) {
     Park = 2,
 };
 
-var g_handshake_request_epoch: std.atomic.Value(u64) = .init(0);
-var g_handshake_release_epoch: std.atomic.Value(u64) = .init(0);
-var g_handshake_ack_count: std.atomic.Value(u32) = .init(0);
-var g_handshake_cb_id: std.atomic.Value(u8) = .init(@intFromEnum(HandshakeCallbackId.Nop));
-var g_handshake_stw: std.atomic.Value(bool) = .init(false);
+var g_handshake_request_epoch: RtAtomic(u64) = .init(0);
+var g_handshake_release_epoch: RtAtomic(u64) = .init(0);
+var g_handshake_ack_count: RtAtomic(u32) = .init(0);
+var g_handshake_cb_id: RtAtomic(u8) = .init(@intFromEnum(HandshakeCallbackId.Nop));
+var g_handshake_stw: RtAtomic(bool) = .init(false);
 
 // Pending spawn roots: closure pointers passed to new OS threads before the thread has a chance to
 // register a `FlixCtx` and publish its explicit roots. These pointers live on a foreign stack and
 // are otherwise invisible to the GC (we do not conservatively scan stacks).
 var g_spawn_roots_initialized: bool = false;
-var g_spawn_roots_mutex: std.Thread.Mutex = .{};
-var g_spawn_roots: std.AutoHashMap(usize, void) = undefined;
+var g_spawn_roots_mutex: RtMutex = .{};
+var g_spawn_roots: std.AutoHashMap(usize, u8) = undefined;
 
 // Registered thread contexts (best-effort bring-up registry; GC will use this later).
 var g_ctx_registry_initialized: bool = false;
-var g_ctx_registry_mutex: std.Thread.Mutex = .{};
-var g_ctx_registry: std.AutoHashMap(usize, void) = undefined;
+var g_ctx_registry_mutex: RtMutex = .{};
+var g_ctx_registry: std.AutoHashMap(usize, u8) = undefined;
 
 fn ensureSpawnRootsInitialized() void {
     if (g_spawn_roots_initialized) return;
     g_spawn_roots_mutex.lock();
     defer g_spawn_roots_mutex.unlock();
     if (g_spawn_roots_initialized) return;
-    g_spawn_roots = std.AutoHashMap(usize, void).init(std.heap.c_allocator);
+    g_spawn_roots = std.AutoHashMap(usize, u8).init(rt_alloc);
     g_spawn_roots_initialized = true;
 }
 
@@ -535,7 +803,7 @@ fn spawnRootsAdd(ptr: *anyopaque) void {
     ensureSpawnRootsInitialized();
     g_spawn_roots_mutex.lock();
     defer g_spawn_roots_mutex.unlock();
-    g_spawn_roots.put(@intFromPtr(ptr), {}) catch @panic("oom");
+    g_spawn_roots.put(@intFromPtr(ptr), 0) catch @panic("oom");
 }
 
 fn spawnRootsRemove(ptr: *anyopaque) void {
@@ -550,7 +818,7 @@ fn ensureCtxRegistryInitialized() void {
     g_ctx_registry_mutex.lock();
     defer g_ctx_registry_mutex.unlock();
     if (g_ctx_registry_initialized) return;
-    g_ctx_registry = std.AutoHashMap(usize, void).init(std.heap.c_allocator);
+    g_ctx_registry = std.AutoHashMap(usize, u8).init(rt_alloc);
     g_ctx_registry_initialized = true;
 }
 
@@ -558,7 +826,7 @@ fn registerCtx(ctx: *FlixCtx) void {
     ensureCtxRegistryInitialized();
     g_ctx_registry_mutex.lock();
     defer g_ctx_registry_mutex.unlock();
-    g_ctx_registry.put(@intFromPtr(ctx), {}) catch @panic("oom");
+    g_ctx_registry.put(@intFromPtr(ctx), 0) catch @panic("oom");
 }
 
 fn deregisterCtx(ctx: *FlixCtx) void {
@@ -573,7 +841,7 @@ fn gcMarkerMarkPtr(marker: *GcMarker, ptr: *anyopaque) void {
     if (g_gc_objects.getPtr(addr)) |meta| {
         if (!meta.marked) {
             meta.marked = true;
-            marker.worklist.append(std.heap.c_allocator, ptr) catch @panic("oom");
+            marker.worklist.append(rt_alloc, ptr) catch @panic("oom");
         }
     }
 }
@@ -680,8 +948,8 @@ fn gcMarkSweep(ctx: *FlixCtx) void {
     if (!g_gc_initialized) return;
 
     var marker: GcMarker = .{ .worklist = .{} };
-    defer marker.worklist.deinit(std.heap.c_allocator);
-    marker.worklist.ensureTotalCapacity(std.heap.c_allocator, 4096) catch @panic("oom");
+    defer marker.worklist.deinit(rt_alloc);
+    marker.worklist.ensureTotalCapacity(rt_alloc, 4096) catch @panic("oom");
 
     ctx.gc_marker = &marker;
     defer ctx.gc_marker = null;
@@ -697,14 +965,14 @@ fn gcMarkSweep(ctx: *FlixCtx) void {
 
     // Sweep.
     var to_free: std.ArrayListUnmanaged(usize) = .{};
-    defer to_free.deinit(std.heap.c_allocator);
+    defer to_free.deinit(rt_alloc);
 
     var it = g_gc_objects.iterator();
     while (it.next()) |entry| {
         if (entry.value_ptr.marked) {
             entry.value_ptr.marked = false;
         } else {
-            to_free.append(std.heap.c_allocator, entry.key_ptr.*) catch @panic("oom");
+            to_free.append(rt_alloc, entry.key_ptr.*) catch @panic("oom");
         }
     }
 
@@ -857,7 +1125,7 @@ export fn flix_gc_pollcheck(ctx_ptr: *anyopaque) void {
 }
 
 export fn flix_ctx_new() *anyopaque {
-    const ctx = std.heap.c_allocator.create(FlixCtx) catch @panic("oom");
+    const ctx = rt_alloc.create(FlixCtx) catch @panic("oom");
     const req = g_handshake_request_epoch.load(.acquire);
     const initial_seen = if (req > 0) req - 1 else 0;
     ctx.* = .{
@@ -866,12 +1134,12 @@ export fn flix_ctx_new() *anyopaque {
         .gc_marker = null,
         .next_handle = 1,
         .handles_mutex = .{},
-        .handles = std.AutoHashMap(i64, FlixHandleEntry).init(std.heap.c_allocator),
+        .handles = std.AutoHashMap(i64, FlixHandleEntry).init(rt_alloc),
         .cancel_exn = null,
         .roots = .{},
     };
     // Avoid allocations in the hot path of root push/pop.
-    ctx.roots.ensureTotalCapacity(std.heap.c_allocator, 2048) catch @panic("oom");
+    ctx.roots.ensureTotalCapacity(rt_alloc, 2048) catch @panic("oom");
     registerCtx(ctx);
     current_ctx = ctx;
     dbg("ctx_new: {x}\n", .{@intFromPtr(ctx)});
@@ -889,21 +1157,21 @@ export fn flix_ctx_free(ctx_ptr0: ?*anyopaque) void {
     ctx.handles_mutex.lock();
     ctx.handles.deinit();
     ctx.handles_mutex.unlock();
-    ctx.roots.deinit(std.heap.c_allocator);
-    std.heap.c_allocator.destroy(ctx);
+    ctx.roots.deinit(rt_alloc);
+    rt_alloc.destroy(ctx);
     dbg("ctx_free: {x} done\n", .{@intFromPtr(ctx_ptr)});
 }
 
 export fn flix_gc_push_root_value_i64(ctx_ptr: *anyopaque, slot_ptr0: ?*anyopaque) void {
     const slot_ptr = slot_ptr0 orelse @panic("flix_gc_push_root_value_i64: null slot");
     const ctx: *FlixCtx = requireCtx(ctx_ptr);
-    ctx.roots.append(std.heap.c_allocator, .{ .kind = .ValueI64, .slot_ptr = slot_ptr }) catch @panic("oom");
+    ctx.roots.append(rt_alloc, .{ .kind = .ValueI64, .slot_ptr = slot_ptr }) catch @panic("oom");
 }
 
 export fn flix_gc_push_root_ptr(ctx_ptr: *anyopaque, slot_ptr0: ?*anyopaque) void {
     const slot_ptr = slot_ptr0 orelse @panic("flix_gc_push_root_ptr: null slot");
     const ctx: *FlixCtx = requireCtx(ctx_ptr);
-    ctx.roots.append(std.heap.c_allocator, .{ .kind = .Ptr, .slot_ptr = slot_ptr }) catch @panic("oom");
+    ctx.roots.append(rt_alloc, .{ .kind = .Ptr, .slot_ptr = slot_ptr }) catch @panic("oom");
 }
 
 export fn flix_gc_pop_roots(ctx_ptr: *anyopaque, count0: i64) void {
@@ -1103,17 +1371,18 @@ export fn flix_string_from_utf8(ctx_ptr: *anyopaque, bytes_ptr: ?[*]const u8, le
 }
 
 export fn flix_string_to_utf8(ctx_ptr: *anyopaque, str_handle: i64, out_len: *i64) [*]u8 {
-    const alloc = std.heap.c_allocator;
     const str_ptr = flix_handle_get(ctx_ptr, str_handle);
 
-    const bytes = flixStringToUtf8Alloc(alloc, str_ptr);
-    defer alloc.free(bytes);
+    const bytes = flixStringToUtf8Alloc(rt_alloc, str_ptr);
+    defer rt_alloc.free(bytes);
 
-    const z = alloc.allocSentinel(u8, bytes.len, 0) catch @panic("oom");
-    std.mem.copyForwards(u8, z[0..bytes.len], bytes);
+    const mem = c.malloc(bytes.len + 1) orelse @panic("malloc failed");
+    const out: [*]u8 = @ptrCast(mem);
+    std.mem.copyForwards(u8, out[0..bytes.len], bytes);
+    out[bytes.len] = 0;
 
     out_len.* = @intCast(bytes.len);
-    return z.ptr;
+    return out;
 }
 
 export fn flix_i8_array_from_bytes(ctx_ptr: *anyopaque, bytes_ptr: ?[*]const u8, len: i64) i64 {
@@ -1127,9 +1396,12 @@ export fn flix_i8_array_from_bytes(ctx_ptr: *anyopaque, bytes_ptr: ?[*]const u8,
 
 export fn flix_i8_array_to_bytes(ctx_ptr: *anyopaque, arr_handle: i64, out_len: *i64) [*]u8 {
     const arr_ptr = flix_handle_get(ctx_ptr, arr_handle);
-    const bytes = flixInt8ArrayToBytes(std.heap.c_allocator, arr_ptr);
-    out_len.* = @intCast(bytes.len);
-    return bytes.ptr;
+    const src = flixInt8ArrayBytesView(arr_ptr);
+    const mem = c.malloc(src.len) orelse @panic("malloc failed");
+    const out: [*]u8 = @ptrCast(mem);
+    std.mem.copyForwards(u8, out[0..src.len], src);
+    out_len.* = @intCast(src.len);
+    return out;
 }
 
 fn parseSciExponent(exp_part: []const u8) i32 {
@@ -1745,8 +2017,8 @@ export fn flix_string_to_lower_case(ctx_ptr: *anyopaque, str_ptr: *anyopaque) *a
     const in_units: []const u16 = in_units_ptr[0..in_len];
 
     var out: std.ArrayList(u16) = .empty;
-    defer out.deinit(std.heap.c_allocator);
-    out.ensureTotalCapacity(std.heap.c_allocator, in_len) catch @panic("oom");
+    defer out.deinit(rt_alloc);
+    out.ensureTotalCapacity(rt_alloc, in_len) catch @panic("oom");
 
     var i: usize = 0;
     while (i < in_units.len) {
@@ -1755,7 +2027,7 @@ export fn flix_string_to_lower_case(ctx_ptr: *anyopaque, str_ptr: *anyopaque) *a
 
         // Full special casing (unconditional) from SpecialCasing.txt.
         if (lookupSpecialUnits(cp, unicode_case.lower_full_cases[0..], unicode_case.lower_full_values[0..])) |seq| {
-            out.appendSlice(std.heap.c_allocator, seq) catch @panic("oom");
+            out.appendSlice(rt_alloc, seq) catch @panic("oom");
             i += d.len;
             continue;
         }
@@ -1763,13 +2035,13 @@ export fn flix_string_to_lower_case(ctx_ptr: *anyopaque, str_ptr: *anyopaque) *a
         // Context-sensitive final sigma.
         if (cp == 0x03A3) { // Σ
             const mapped: u32 = if (isFinalSigma(in_units, i, d.len)) 0x03C2 else 0x03C3;
-            appendUtf16FromCodepointRaw(&out, std.heap.c_allocator, mapped) catch @panic("oom");
+            appendUtf16FromCodepointRaw(&out, rt_alloc, mapped) catch @panic("oom");
             i += d.len;
             continue;
         }
 
         const mapped: u32 = unicodeToLowerSimple(cp);
-        appendUtf16FromCodepointRaw(&out, std.heap.c_allocator, mapped) catch @panic("oom");
+        appendUtf16FromCodepointRaw(&out, rt_alloc, mapped) catch @panic("oom");
         i += d.len;
     }
 
@@ -1782,8 +2054,8 @@ export fn flix_string_to_upper_case(ctx_ptr: *anyopaque, str_ptr: *anyopaque) *a
     const in_units: []const u16 = in_units_ptr[0..in_len];
 
     var out: std.ArrayList(u16) = .empty;
-    defer out.deinit(std.heap.c_allocator);
-    out.ensureTotalCapacity(std.heap.c_allocator, in_len) catch @panic("oom");
+    defer out.deinit(rt_alloc);
+    out.ensureTotalCapacity(rt_alloc, in_len) catch @panic("oom");
 
     var i: usize = 0;
     while (i < in_units.len) {
@@ -1792,13 +2064,13 @@ export fn flix_string_to_upper_case(ctx_ptr: *anyopaque, str_ptr: *anyopaque) *a
 
         // Full special casing (unconditional) from SpecialCasing.txt.
         if (lookupSpecialUnits(cp, unicode_case.upper_full_cases[0..], unicode_case.upper_full_values[0..])) |seq| {
-            out.appendSlice(std.heap.c_allocator, seq) catch @panic("oom");
+            out.appendSlice(rt_alloc, seq) catch @panic("oom");
             i += d.len;
             continue;
         }
 
         const mapped: u32 = unicodeToUpperSimple(cp);
-        appendUtf16FromCodepointRaw(&out, std.heap.c_allocator, mapped) catch @panic("oom");
+        appendUtf16FromCodepointRaw(&out, rt_alloc, mapped) catch @panic("oom");
         i += d.len;
     }
 
@@ -1848,6 +2120,38 @@ fn flixInt8ArrayBytesViewMut(arr_ptr: *anyopaque) []u8 {
 fn flixInt8ArrayToBytes(allocator: std.mem.Allocator, arr_ptr: *anyopaque) []u8 {
     const src = flixInt8ArrayBytesView(arr_ptr);
     return allocator.dupe(u8, src) catch @panic("oom");
+}
+
+fn allocFlixInt8ArrayFromBytes(bytes: []const u8) *anyopaque {
+    const len: usize = bytes.len;
+    const size_bytes: usize = @sizeOf(FlixArrayHeader) + len;
+
+    const mem = gcAllocBytes(size_bytes, &flix_ti_array_prim);
+    const header: *FlixArrayHeader = @ptrCast(@alignCast(mem));
+    header.len = @intCast(len);
+    header.elem_size = 1;
+
+    const base: [*]u8 = @ptrCast(mem);
+    const dst_ptr: [*]u8 = base + @sizeOf(FlixArrayHeader);
+    std.mem.copyForwards(u8, dst_ptr[0..len], bytes);
+
+    return mem;
+}
+
+fn allocFlixInt8ArrayFromBytesInRegion(ctx: *anyopaque, region_ptr0: ?*anyopaque, bytes: []const u8) *anyopaque {
+    const len: usize = bytes.len;
+    const size_bytes_i64: i64 = @intCast(@sizeOf(FlixArrayHeader) + len);
+
+    const mem = flix_region_alloc_flex(ctx, region_ptr0, &flix_ti_array_prim, size_bytes_i64);
+    const header: *FlixArrayHeader = @ptrCast(@alignCast(mem));
+    header.len = @intCast(len);
+    header.elem_size = 1;
+
+    const base: [*]u8 = @ptrCast(mem);
+    const dst_ptr: [*]u8 = base + @sizeOf(FlixArrayHeader);
+    std.mem.copyForwards(u8, dst_ptr[0..len], bytes);
+
+    return mem;
 }
 
 fn flixWriteBytesToInt8Array(arr_ptr: *anyopaque, bytes: []const u8) void {
@@ -1915,14 +2219,14 @@ fn isRegexMeta(ch: u8) bool {
 
 fn quoteRegexAscii(bytes: []const u8) []u8 {
     var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(std.heap.c_allocator);
+    errdefer out.deinit(rt_alloc);
 
     for (bytes) |ch| {
-        if (isRegexMeta(ch)) out.append(std.heap.c_allocator, '\\') catch @panic("oom");
-        out.append(std.heap.c_allocator, ch) catch @panic("oom");
+        if (isRegexMeta(ch)) out.append(rt_alloc, '\\') catch @panic("oom");
+        out.append(rt_alloc, ch) catch @panic("oom");
     }
 
-    return out.toOwnedSlice(std.heap.c_allocator) catch @panic("oom");
+    return out.toOwnedSlice(rt_alloc) catch @panic("oom");
 }
 
 fn allocFlixArrayFromPtrPayloads(ptrs: []const *anyopaque) *anyopaque {
@@ -1992,7 +2296,7 @@ export fn flix_regex_compile_with_flags(flags: i32, pattern_ptr: *anyopaque) *an
 
     const literal = (flags & 16) != 0; // Pattern.LITERAL
     var quoted: []u8 = &.{};
-    defer if (quoted.len != 0) std.heap.c_allocator.free(quoted);
+    defer if (quoted.len != 0) rt_alloc.free(quoted);
 
     const pat_ptr: [*:0]const u8 = if (literal) blk: {
         quoted = quoteRegexAscii(pat_z[0..pat_z.len]);
@@ -2006,7 +2310,7 @@ export fn flix_regex_compile_with_flags(flags: i32, pattern_ptr: *anyopaque) *an
 
     defer if (literal) c.free(@ptrCast(@constCast(pat_ptr)));
 
-    const obj = std.heap.c_allocator.create(RegexObj) catch @panic("oom");
+    const obj = rt_alloc.create(RegexObj) catch @panic("oom");
     obj.pattern = pattern_ptr;
     obj.flags = flags;
 
@@ -2026,7 +2330,7 @@ export fn flix_regex_try_compile_with_flags(flags: i32, pattern_ptr: *anyopaque)
 
     const literal = (flags & 16) != 0; // Pattern.LITERAL
     var quoted: []u8 = &.{};
-    defer if (quoted.len != 0) std.heap.c_allocator.free(quoted);
+    defer if (quoted.len != 0) rt_alloc.free(quoted);
 
     const pat_ptr: [*:0]const u8 = if (literal) blk: {
         quoted = quoteRegexAscii(pat_z[0..pat_z.len]);
@@ -2055,7 +2359,7 @@ export fn flix_regex_try_compile_with_flags(flags: i32, pattern_ptr: *anyopaque)
         return allocFlixTupleFromPayloads(&payloads, 0b110);
     }
 
-    const obj = std.heap.c_allocator.create(RegexObj) catch @panic("oom");
+    const obj = rt_alloc.create(RegexObj) catch @panic("oom");
     obj.re = re;
     obj.pattern = pattern_ptr;
     obj.flags = flags;
@@ -2074,7 +2378,7 @@ export fn flix_regex_quote(input_ptr: *anyopaque) *anyopaque {
     defer c.free(@ptrCast(in_z.ptr));
 
     const quoted = quoteRegexAscii(in_z[0..in_z.len]);
-    defer std.heap.c_allocator.free(quoted);
+    defer rt_alloc.free(quoted);
     return allocFlixStringFromAscii(quoted);
 }
 
@@ -2186,7 +2490,7 @@ export fn flix_regex_matcher_replace_all(m_ptr: *anyopaque, replacement_ptr: *an
     const repl = repl_z[0..repl_z.len];
 
     var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(std.heap.c_allocator);
+    defer out.deinit(rt_alloc);
 
     var offset: usize = 0;
     var match: [1]c.regmatch_t = undefined;
@@ -2200,15 +2504,15 @@ export fn flix_regex_matcher_replace_all(m_ptr: *anyopaque, replacement_ptr: *an
         const start = offset + so;
         const end = offset + eo;
 
-        out.appendSlice(std.heap.c_allocator, m.input[offset..start]) catch @panic("oom");
-        out.appendSlice(std.heap.c_allocator, repl) catch @panic("oom");
+        out.appendSlice(rt_alloc, m.input[offset..start]) catch @panic("oom");
+        out.appendSlice(rt_alloc, repl) catch @panic("oom");
 
         offset = end;
         if (eo == so) offset += 1; // avoid infinite loop on empty matches.
     }
 
     if (offset <= m.input_len) {
-        out.appendSlice(std.heap.c_allocator, m.input[offset..m.input_len]) catch @panic("oom");
+        out.appendSlice(rt_alloc, m.input[offset..m.input_len]) catch @panic("oom");
     }
 
     return allocFlixStringFromAscii(out.items);
@@ -2221,7 +2525,7 @@ export fn flix_regex_matcher_replace_first(m_ptr: *anyopaque, replacement_ptr: *
     const repl = repl_z[0..repl_z.len];
 
     var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(std.heap.c_allocator);
+    defer out.deinit(rt_alloc);
 
     var match: [1]c.regmatch_t = undefined;
     const rc = c.regexec(&m.rgx.re, m.input.ptr, 1, &match, 0);
@@ -2232,9 +2536,9 @@ export fn flix_regex_matcher_replace_first(m_ptr: *anyopaque, replacement_ptr: *
     const so: usize = @intCast(match[0].rm_so);
     const eo: usize = @intCast(match[0].rm_eo);
 
-    out.appendSlice(std.heap.c_allocator, m.input[0..so]) catch @panic("oom");
-    out.appendSlice(std.heap.c_allocator, repl) catch @panic("oom");
-    out.appendSlice(std.heap.c_allocator, m.input[eo..m.input_len]) catch @panic("oom");
+    out.appendSlice(rt_alloc, m.input[0..so]) catch @panic("oom");
+    out.appendSlice(rt_alloc, repl) catch @panic("oom");
+    out.appendSlice(rt_alloc, m.input[eo..m.input_len]) catch @panic("oom");
 
     return allocFlixStringFromAscii(out.items);
 }
@@ -2298,7 +2602,7 @@ export fn flix_regex_split(ctx: *anyopaque, region_ptr0: ?*anyopaque, rgx_ptr: *
     const input = input_z[0..input_z.len];
 
     var parts: std.ArrayList(*anyopaque) = .empty;
-    defer parts.deinit(std.heap.c_allocator);
+    defer parts.deinit(rt_alloc);
 
     var offset: usize = 0;
     var match: [1]c.regmatch_t = undefined;
@@ -2313,14 +2617,14 @@ export fn flix_regex_split(ctx: *anyopaque, region_ptr0: ?*anyopaque, rgx_ptr: *
         const end = offset + eo;
 
         const part = allocFlixStringFromAscii(input[offset..start]);
-        parts.append(std.heap.c_allocator, part) catch @panic("oom");
+        parts.append(rt_alloc, part) catch @panic("oom");
 
         offset = end;
         if (eo == so) offset += 1; // avoid infinite loop on empty matches.
     }
 
     const tail = allocFlixStringFromAscii(input[offset..input.len]);
-    parts.append(std.heap.c_allocator, tail) catch @panic("oom");
+    parts.append(rt_alloc, tail) catch @panic("oom");
 
     return allocFlixArrayFromPtrPayloadsInRegion(ctx, region_ptr0, parts.items);
 }
@@ -2331,9 +2635,9 @@ export fn flix_regex_split(ctx: *anyopaque, region_ptr0: ?*anyopaque, rgx_ptr: *
 
 const ChannelObj = struct {
     capacity: usize,
-    mutex: std.Thread.Mutex = .{},
-    not_empty: std.Thread.Condition = .{},
-    not_full: std.Thread.Condition = .{},
+    mutex: RtMutex = .{},
+    not_empty: RtCondition = .{},
+    not_full: RtCondition = .{},
 
     // Buffered channel state (capacity > 0).
     buf: ?[]i64 = null,
@@ -2347,10 +2651,10 @@ const ChannelObj = struct {
 };
 
 fn channelInit(capacity: usize) *ChannelObj {
-    const obj = std.heap.c_allocator.create(ChannelObj) catch @panic("oom");
+    const obj = rt_alloc.create(ChannelObj) catch @panic("oom");
     obj.* = .{ .capacity = capacity };
     if (capacity > 0) {
-        obj.buf = std.heap.c_allocator.alloc(i64, capacity) catch @panic("oom");
+        obj.buf = rt_alloc.alloc(i64, capacity) catch @panic("oom");
     }
     return obj;
 }
@@ -2449,34 +2753,68 @@ export fn flix_channel_get(chan_ptr: *anyopaque) i64 {
 // IO + Spawn (bring-up)
 // ============================================================================
 
-var g_next_id: std.atomic.Value(i64) = .init(0);
+var g_next_id: RtAtomic(i64) = .init(0);
 var g_argc: i32 = 0;
 var g_argv: ?[*][*:0]u8 = null;
+var g_stdin_buf: [65536]u8 = undefined;
+var g_stdin_reader: std.fs.File.Reader = undefined;
+var g_stdin_reader_ready: bool = false;
 
 export fn flix_init(argc: i32, argv: *anyopaque) void {
     g_argc = argc;
     g_argv = @ptrCast(@alignCast(argv));
+    if (!is_wasm) {
+        // Keep a persistent buffered reader for stdin. Creating a fresh reader on each `readln`
+        // risks dropping any bytes that were buffered past the delimiter.
+        g_stdin_reader = std.fs.File.stdin().readerStreaming(g_stdin_buf[0..]);
+        g_stdin_reader_ready = true;
+    }
 }
 
 fn writeAscii(fd: enum { stdout, stderr }, s_ptr: *anyopaque, newline: bool) void {
-    const z = flixStringToAsciiZ(s_ptr);
-    defer c.free(@ptrCast(z.ptr));
+    if (is_wasm) {
+        // Browser/WASI: route to host logging via WIT (`flix:sys/sys@0.1.0#log`).
+        const level: u8 = switch (fd) {
+            .stdout => 2, // INFO
+            .stderr => 4, // ERROR
+        };
 
-    const slice = z[0..z.len];
-    const file = switch (fd) {
-        .stdout => std.fs.File.stdout(),
-        .stderr => std.fs.File.stderr(),
-    };
+        const bytes = flixStringToUtf8Alloc(rt_alloc, s_ptr);
+        defer rt_alloc.free(bytes);
 
-    {
-        var guard = BlockedGuard.enter(current_ctx);
-        defer guard.exitAndCooperate();
-        file.writeAll(slice) catch @panic("write failed");
-    }
-    if (newline) {
-        var guard = BlockedGuard.enter(current_ctx);
-        defer guard.exitAndCooperate();
-        file.writeAll("\n") catch @panic("write failed");
+        if (newline) {
+            const out = rt_alloc.alloc(u8, bytes.len + 1) catch @panic("oom");
+            defer rt_alloc.free(out);
+            std.mem.copyForwards(u8, out[0..bytes.len], bytes);
+            out[bytes.len] = '\n';
+            var s: WitString = .{ .ptr = out.ptr, .len = out.len };
+            flix_sys_sys_log(level, &s);
+        } else {
+            var s: WitString = .{ .ptr = bytes.ptr, .len = bytes.len };
+            flix_sys_sys_log(level, &s);
+        }
+        return;
+    } else {
+        // Native: write to stdout/stderr.
+        const z = flixStringToAsciiZ(s_ptr);
+        defer c.free(@ptrCast(z.ptr));
+
+        const slice = z[0..z.len];
+        const file = switch (fd) {
+            .stdout => std.fs.File.stdout(),
+            .stderr => std.fs.File.stderr(),
+        };
+
+        {
+            var guard = BlockedGuard.enter(current_ctx);
+            defer guard.exitAndCooperate();
+            file.writeAll(slice) catch @panic("write failed");
+        }
+        if (newline) {
+            var guard = BlockedGuard.enter(current_ctx);
+            defer guard.exitAndCooperate();
+            file.writeAll("\n") catch @panic("write failed");
+        }
     }
 }
 
@@ -2501,32 +2839,42 @@ export fn flix_eprintln(s_ptr: *anyopaque) i64 {
 }
 
 export fn flix_readln(_: i64) *anyopaque {
-    var buf: [65536]u8 = undefined;
-    var reader = std.fs.File.stdin().readerStreaming(buf[0..]);
-    const line_opt = (blk: {
-        var guard = BlockedGuard.enter(current_ctx);
-        defer guard.exitAndCooperate();
-        break :blk reader.interface.takeDelimiter('\n');
-    }) catch @panic("readln failed");
-    if (line_opt == null) return allocFlixStringFromAscii("");
+    if (is_wasm) {
+        @panic("flix_readln: unsupported on wasm");
+    } else {
+        if (!g_stdin_reader_ready) {
+            g_stdin_reader = std.fs.File.stdin().readerStreaming(g_stdin_buf[0..]);
+            g_stdin_reader_ready = true;
+        }
+        const line_opt = (blk: {
+            var guard = BlockedGuard.enter(current_ctx);
+            defer guard.exitAndCooperate();
+            break :blk g_stdin_reader.interface.takeDelimiter('\n');
+        }) catch @panic("readln failed");
+        if (line_opt == null) return allocFlixStringFromAscii("");
 
-    var bytes = line_opt.?;
-    if (bytes.len != 0 and bytes[bytes.len - 1] == '\r') {
-        bytes = bytes[0 .. bytes.len - 1];
+        var bytes = line_opt.?;
+        if (bytes.len != 0 and bytes[bytes.len - 1] == '\r') {
+            bytes = bytes[0 .. bytes.len - 1];
+        }
+        return allocFlixStringFromAscii(bytes);
     }
-    return allocFlixStringFromAscii(bytes);
 }
 
 export fn flix_sleep_millis(ms: i64) i64 {
-    if (ms <= 0) return 0;
-    const ms_u64: u64 = @intCast(ms);
-    const ns: u64 = ms_u64 * std.time.ns_per_ms;
-    {
-        var guard = BlockedGuard.enter(current_ctx);
-        defer guard.exitAndCooperate();
-        std.Thread.sleep(ns);
+    if (is_wasm) {
+        return 0;
+    } else {
+        if (ms <= 0) return 0;
+        const ms_u64: u64 = @intCast(ms);
+        const ns: u64 = ms_u64 * std.time.ns_per_ms;
+        {
+            var guard = BlockedGuard.enter(current_ctx);
+            defer guard.exitAndCooperate();
+            std.Thread.sleep(ns);
+        }
+        return 0;
     }
-    return 0;
 }
 
 export fn flix_exit(code: i32) void {
@@ -2576,40 +2924,45 @@ export fn flix_env_get_args(ctx: *anyopaque, region_ptr0: ?*anyopaque) *anyopaqu
 }
 
 export fn flix_env_get_env_pairs(ctx: *anyopaque, region_ptr0: ?*anyopaque) *anyopaque {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const alloc = gpa.allocator();
-
-    var env = std.process.getEnvMap(alloc) catch {
+    if (is_wasm) {
+        // No environment variables in wasm32-freestanding (browser-first bring-up).
         return allocFlixArrayFromPtrPayloadsInRegion(ctx, region_ptr0, &[_]*anyopaque{});
-    };
-    defer env.deinit();
+    } else {
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const alloc = gpa.allocator();
 
-    const pair_count: usize = env.count();
-    const len: usize = pair_count * 2;
-    const size_bytes_i64: i64 = @intCast(@sizeOf(FlixArrayHeader) + len * @sizeOf(i64));
+        var env = std.process.getEnvMap(alloc) catch {
+            return allocFlixArrayFromPtrPayloadsInRegion(ctx, region_ptr0, &[_]*anyopaque{});
+        };
+        defer env.deinit();
 
-    const mem = flix_region_alloc_flex(ctx, region_ptr0, &flix_ti_array_ptr, size_bytes_i64);
-    const header: *FlixArrayHeader = @ptrCast(@alignCast(mem));
-    header.len = @intCast(len);
-    header.elem_size = @intCast(@sizeOf(i64));
+        const pair_count: usize = env.count();
+        const len: usize = pair_count * 2;
+        const size_bytes_i64: i64 = @intCast(@sizeOf(FlixArrayHeader) + len * @sizeOf(i64));
 
-    const slots_ptr: [*]i64 = flixArraySlots(mem);
+        const mem = flix_region_alloc_flex(ctx, region_ptr0, &flix_ti_array_ptr, size_bytes_i64);
+        const header: *FlixArrayHeader = @ptrCast(@alignCast(mem));
+        header.len = @intCast(len);
+        header.elem_size = @intCast(@sizeOf(i64));
 
-    var idx: usize = 0;
-    var it = env.iterator();
-    while (it.next()) |entry| {
-        const k_bytes = entry.key_ptr.*;
-        const v_bytes = entry.value_ptr.*;
-        const k_ptr = allocFlixStringFromUtf8Lossy(k_bytes);
-        const v_ptr = allocFlixStringFromUtf8Lossy(v_bytes);
-        flix_store_ptr(ctx, @ptrCast(&slots_ptr[idx]), payloadFromPtr(k_ptr));
-        flix_store_ptr(ctx, @ptrCast(&slots_ptr[idx + 1]), payloadFromPtr(v_ptr));
-        idx += 2;
+        const slots_ptr: [*]i64 = flixArraySlots(mem);
+
+        var idx: usize = 0;
+        var it = env.iterator();
+        while (it.next()) |entry| {
+            const k_bytes = entry.key_ptr.*;
+            const v_bytes = entry.value_ptr.*;
+            const k_ptr = allocFlixStringFromUtf8Lossy(k_bytes);
+            const v_ptr = allocFlixStringFromUtf8Lossy(v_bytes);
+            flix_store_ptr(ctx, @ptrCast(&slots_ptr[idx]), payloadFromPtr(k_ptr));
+            flix_store_ptr(ctx, @ptrCast(&slots_ptr[idx + 1]), payloadFromPtr(v_ptr));
+            idx += 2;
+        }
+
+        flix_region_remember_ptr_array(ctx, region_ptr0, @ptrCast(&slots_ptr[0]), @intCast(len));
+        return mem;
     }
-
-    flix_region_remember_ptr_array(ctx, region_ptr0, @ptrCast(&slots_ptr[0]), @intCast(len));
-    return mem;
 }
 
 export fn flix_env_get_var(name_ptr: *anyopaque) ?*anyopaque {
@@ -2635,8 +2988,6 @@ export fn flix_env_get_prop(name_ptr: *anyopaque) ?*anyopaque {
     defer c.free(@ptrCast(name_z.ptr));
     const name = name_z[0..name_z.len];
 
-    const builtin = @import("builtin");
-
     if (std.mem.eql(u8, name, "os.name")) {
         const os_name: []const u8 = switch (builtin.os.tag) {
             .windows => "Windows",
@@ -2656,9 +3007,13 @@ export fn flix_env_get_prop(name_ptr: *anyopaque) ?*anyopaque {
     }
 
     if (std.mem.eql(u8, name, "user.dir")) {
-        const cwd = std.fs.cwd().realpathAlloc(std.heap.c_allocator, ".") catch return null;
-        defer std.heap.c_allocator.free(cwd);
-        return allocFlixStringFromUtf8Lossy(cwd);
+        if (is_wasm) {
+            return null;
+        } else {
+            const cwd = std.fs.cwd().realpathAlloc(rt_alloc, ".") catch return null;
+            defer rt_alloc.free(cwd);
+            return allocFlixStringFromUtf8Lossy(cwd);
+        }
     }
 
     if (std.mem.eql(u8, name, "java.io.tmpdir")) {
@@ -2682,12 +3037,17 @@ export fn flix_env_get_prop(name_ptr: *anyopaque) ?*anyopaque {
 }
 
 export fn flix_env_virtual_processors(_: i64) i32 {
-    const n = std.Thread.getCpuCount() catch 1;
-    if (n == 0) return 1;
-    if (n > std.math.maxInt(i32)) return std.math.maxInt(i32);
-    return @intCast(n);
+    if (is_wasm) {
+        return 1;
+    } else {
+        const n = std.Thread.getCpuCount() catch 1;
+        if (n == 0) return 1;
+        if (n > std.math.maxInt(i32)) return std.math.maxInt(i32);
+        return @intCast(n);
+    }
 }
 
+const NativeFsTcp = if (is_wasm) struct {} else struct {
 // ============================================================================
 // File System (bring-up)
 // ============================================================================
@@ -2756,38 +3116,6 @@ fn fileFailArray(ctx: *anyopaque, region_ptr0: ?*anyopaque, kind: i64, msg: []co
 
 fn fileFailUnit(kind: i64, msg: []const u8) *anyopaque {
     return allocFlixTupleFromPayloads(&.{ payloadFromBool(false), 0, kind, payloadFromPtr(allocFlixStringFromAscii(msg)) }, 0b1000);
-}
-
-fn allocFlixInt8ArrayFromBytes(bytes: []const u8) *anyopaque {
-    const len: usize = bytes.len;
-    const size_bytes: usize = @sizeOf(FlixArrayHeader) + len;
-
-    const mem = gcAllocBytes(size_bytes, &flix_ti_array_prim);
-    const header: *FlixArrayHeader = @ptrCast(@alignCast(mem));
-    header.len = @intCast(len);
-    header.elem_size = 1;
-
-    const base: [*]u8 = @ptrCast(mem);
-    const dst_ptr: [*]u8 = base + @sizeOf(FlixArrayHeader);
-    std.mem.copyForwards(u8, dst_ptr[0..len], bytes);
-
-    return mem;
-}
-
-fn allocFlixInt8ArrayFromBytesInRegion(ctx: *anyopaque, region_ptr0: ?*anyopaque, bytes: []const u8) *anyopaque {
-    const len: usize = bytes.len;
-    const size_bytes_i64: i64 = @intCast(@sizeOf(FlixArrayHeader) + len);
-
-    const mem = flix_region_alloc_flex(ctx, region_ptr0, &flix_ti_array_prim, size_bytes_i64);
-    const header: *FlixArrayHeader = @ptrCast(@alignCast(mem));
-    header.len = @intCast(len);
-    header.elem_size = 1;
-
-    const base: [*]u8 = @ptrCast(mem);
-    const dst_ptr: [*]u8 = base + @sizeOf(FlixArrayHeader);
-    std.mem.copyForwards(u8, dst_ptr[0..len], bytes);
-
-    return mem;
 }
 
 fn fileKindForErr(err: anyerror) i64 {
@@ -3283,7 +3611,7 @@ const TcpServerEntry = struct {
 };
 
 var g_tcp_initialized: bool = false;
-var g_tcp_mutex: std.Thread.Mutex = .{};
+var g_tcp_mutex: RtMutex = .{};
 var g_tcp_sockets: std.AutoHashMap(i64, TcpSocketEntry) = undefined;
 var g_tcp_servers: std.AutoHashMap(i64, TcpServerEntry) = undefined;
 
@@ -3527,6 +3855,8 @@ export fn flix_tcp_server_close(id: i64) *anyopaque {
     return allocFlixTupleFromPayloads(&.{ payloadFromBool(true), payloadFromPtr(allocFlixStringFromAscii("")) }, 0b10);
 }
 
+}; // NativeFsTcp
+
 fn flixStringToUtf16LeAlloc(allocator: std.mem.Allocator, ptr: *anyopaque) []u16 {
     const len: usize = flixStringLen(ptr);
     const units: [*]const u16 = flixStringCodeUnits(ptr);
@@ -3579,10 +3909,11 @@ fn flixStringToUtf8Alloc(allocator: std.mem.Allocator, ptr: *anyopaque) []u8 {
     return out.toOwnedSlice(allocator) catch @panic("oom");
 }
 
+const NativeProcHttp = if (is_wasm) struct {} else struct {
 const ProcessObj = struct {
-    ref_count: std.atomic.Value(u32) = .init(1),
-    mutex: std.Thread.Mutex = .{},
-    cv: std.Thread.Condition = .{},
+    ref_count: RtAtomic(u32) = .init(1),
+    mutex: RtMutex = .{},
+    cv: RtCondition = .{},
 
     // Stable process id (pid on POSIX, process id on Windows).
     os_pid: i64,
@@ -3598,7 +3929,7 @@ const ProcessObj = struct {
 };
 
 var g_proc_initialized: bool = false;
-var g_proc_mutex: std.Thread.Mutex = .{};
+var g_proc_mutex: RtMutex = .{};
 var g_procs: std.AutoHashMap(i64, *ProcessObj) = undefined;
 
 fn ensureProcInitialized() void {
@@ -3632,7 +3963,6 @@ fn procRelease(proc: *ProcessObj) void {
         proc.child.stderr = null;
     }
 
-    const builtin = @import("builtin");
     if (builtin.os.tag == .windows) {
         std.posix.close(proc.child.id);
         std.posix.close(proc.child.thread_handle);
@@ -3694,8 +4024,6 @@ fn termFromWaitStatus(status: u32) std.process.Child.Term {
 }
 
 fn processWaitThread(proc: *ProcessObj) void {
-    const builtin = @import("builtin");
-
     var term: ?std.process.Child.Term = null;
     var wait_err: ?[]const u8 = null;
 
@@ -3823,7 +4151,6 @@ export fn flix_process_exec(argv_ptr: *anyopaque, has_cwd: bool, cwd_ptr: *anyop
     };
 
     // Compute stable pid/process id.
-    const builtin = @import("builtin");
     proc.os_pid = switch (builtin.os.tag) {
         .windows => blk: {
             const windows = std.os.windows;
@@ -3924,7 +4251,6 @@ export fn flix_process_stop(id: i64) *anyopaque {
         return allocFlixTupleFromPayloads(&.{ payloadFromBool(true), 0, 14, payloadFromPtr(allocFlixStringFromAscii("")) }, 0b1000);
     }
 
-    const builtin = @import("builtin");
     if (builtin.os.tag == .windows) {
         const windows = std.os.windows;
         _ = windows.TerminateProcess(proc.child.id, 1) catch {};
@@ -4359,6 +4685,16 @@ export fn flix_http_request(ctx: *anyopaque, method_ptr: *anyopaque, url_ptr: *a
     }
 }
 
+}; // NativeProcHttp
+
+comptime {
+    // Force compilation of native-only portable primops, which are defined inside containers to
+    // avoid compiling unsupported code on wasm targets. Without a reference, Zig may not codegen
+    // exported decls inside such containers, causing unresolved symbols when linking LLVM-native.
+    _ = NativeFsTcp;
+    _ = NativeProcHttp;
+}
+
 const FlixResult = extern struct {
     tag: i64,
     payload: i64,
@@ -4385,9 +4721,9 @@ threadlocal var trace_stack: std.ArrayListUnmanaged(TraceName) = .{};
 
 export fn flix_trace_push(name: [*:0]const u8) void {
     if (trace_stack.capacity == 0) {
-        trace_stack.ensureTotalCapacity(std.heap.c_allocator, 256) catch {};
+        trace_stack.ensureTotalCapacity(rt_alloc, 256) catch {};
     }
-    trace_stack.append(std.heap.c_allocator, name) catch {};
+    trace_stack.append(rt_alloc, name) catch {};
 }
 
 export fn flix_trace_pop() void {
@@ -4397,14 +4733,14 @@ export fn flix_trace_pop() void {
 
 fn captureTrace() *anyopaque {
     var ptrs: std.ArrayList(*anyopaque) = .empty;
-    defer ptrs.deinit(std.heap.c_allocator);
+    defer ptrs.deinit(rt_alloc);
 
     var i: usize = trace_stack.items.len;
     while (i > 0) : (i -= 1) {
         const cstr = trace_stack.items[i - 1];
         const bytes = std.mem.span(cstr);
         const s_ptr = allocFlixStringFromAscii(bytes);
-        ptrs.append(std.heap.c_allocator, s_ptr) catch @panic("oom");
+        ptrs.append(rt_alloc, s_ptr) catch @panic("oom");
     }
 
     return allocFlixArrayFromPtrPayloads(ptrs.items);
@@ -4439,11 +4775,19 @@ export fn flix_exn_report_ptr(exn: *anyopaque) void {
 
     var buf: [128]u8 = undefined;
     const header = std.fmt.bufPrint(&buf, "Uncaught Flix exception (kind_id={}):\n", .{kind_id}) catch "Uncaught Flix exception:\n";
-    std.fs.File.stderr().writeAll(header) catch {};
+    if (is_wasm) {
+        writeAscii(.stderr, allocFlixStringFromAscii(header), false);
+    } else {
+        std.fs.File.stderr().writeAll(header) catch {};
+    }
 
     const trace_bits: i64 = slots[3];
     if (trace_bits == 0) {
-        std.fs.File.stderr().writeAll("  (no trace)\n") catch {};
+        if (is_wasm) {
+            writeAscii(.stderr, allocFlixStringFromAscii("  (no trace)"), true);
+        } else {
+            std.fs.File.stderr().writeAll("  (no trace)\n") catch {};
+        }
         return;
     }
 
@@ -4456,7 +4800,11 @@ export fn flix_exn_report_ptr(exn: *anyopaque) void {
         const frame_bits: i64 = trace_slots[i];
         if (frame_bits == 0) continue;
         const frame_ptr = ptrFromPayload(frame_bits);
-        std.fs.File.stderr().writeAll("  at ") catch {};
+        if (is_wasm) {
+            writeAscii(.stderr, allocFlixStringFromAscii("  at "), false);
+        } else {
+            std.fs.File.stderr().writeAll("  at ") catch {};
+        }
         writeAscii(.stderr, frame_ptr, true);
     }
 }
@@ -4473,19 +4821,35 @@ export fn flix_suspension_report_ptr(susp: *anyopaque) void {
     const eff_name = flix_effect_name(eff_sym_id);
     const op_name = flix_op_name(eff_sym_id, op_index);
 
-    std.fs.File.stderr().writeAll("Unhandled Flix suspension (") catch {};
-    if (eff_name) |eff_cstr| {
-        std.fs.File.stderr().writeAll(std.mem.span(eff_cstr)) catch {};
-        if (op_name) |op_cstr| {
-            std.fs.File.stderr().writeAll(".") catch {};
-            std.fs.File.stderr().writeAll(std.mem.span(op_cstr)) catch {};
+    if (is_wasm) {
+        writeAscii(.stderr, allocFlixStringFromAscii("Unhandled Flix suspension ("), false);
+        if (eff_name) |eff_cstr| {
+            writeAscii(.stderr, allocFlixStringFromAscii(std.mem.span(eff_cstr)), false);
+            if (op_name) |op_cstr| {
+                writeAscii(.stderr, allocFlixStringFromAscii("."), false);
+                writeAscii(.stderr, allocFlixStringFromAscii(std.mem.span(op_cstr)), false);
+            }
+            writeAscii(.stderr, allocFlixStringFromAscii(", "), false);
         }
-        std.fs.File.stderr().writeAll(", ") catch {};
-    }
 
-    var buf: [160]u8 = undefined;
-    const tail = std.fmt.bufPrint(&buf, "effSymId={}, opIndex={}, argc={}):\n", .{ eff_sym_id, op_index, arg_count }) catch "):\n";
-    std.fs.File.stderr().writeAll(tail) catch {};
+        var buf: [160]u8 = undefined;
+        const tail = std.fmt.bufPrint(&buf, "effSymId={}, opIndex={}, argc={}):\n", .{ eff_sym_id, op_index, arg_count }) catch "):\n";
+        writeAscii(.stderr, allocFlixStringFromAscii(tail), false);
+    } else {
+        std.fs.File.stderr().writeAll("Unhandled Flix suspension (") catch {};
+        if (eff_name) |eff_cstr| {
+            std.fs.File.stderr().writeAll(std.mem.span(eff_cstr)) catch {};
+            if (op_name) |op_cstr| {
+                std.fs.File.stderr().writeAll(".") catch {};
+                std.fs.File.stderr().writeAll(std.mem.span(op_cstr)) catch {};
+            }
+            std.fs.File.stderr().writeAll(", ") catch {};
+        }
+
+        var buf: [160]u8 = undefined;
+        const tail = std.fmt.bufPrint(&buf, "effSymId={}, opIndex={}, argc={}):\n", .{ eff_sym_id, op_index, arg_count }) catch "):\n";
+        std.fs.File.stderr().writeAll(tail) catch {};
+    }
 }
 
 export fn flix_exn_report(ctx_ptr: *anyopaque, exn_handle: i64) void {
@@ -4979,11 +5343,11 @@ const RememberedPtrArray = struct {
 const FlixRegion = struct {
     parent: ?*FlixRegion,
     state: FlixRegionState,
-    cancel_requested: std.atomic.Value(bool),
+    cancel_requested: RtAtomic(bool),
     cancel_cause: ?*anyopaque,
-    mutex: std.Thread.Mutex,
+    mutex: RtMutex,
     arena: std.heap.ArenaAllocator,
-    children: std.ArrayListUnmanaged(std.Thread),
+    children: std.ArrayListUnmanaged(RtThread),
     child_exn: ?*anyopaque,
     remembered_slots: std.ArrayListUnmanaged(*i64),
     remembered_ptr_arrays: std.ArrayListUnmanaged(RememberedPtrArray),
@@ -4993,15 +5357,15 @@ threadlocal var current_region: ?*FlixRegion = null;
 
 // Registered live regions (GC root source via remembered sets).
 var g_region_registry_initialized: bool = false;
-var g_region_registry_mutex: std.Thread.Mutex = .{};
-var g_region_registry: std.AutoHashMap(usize, void) = undefined;
+var g_region_registry_mutex: RtMutex = .{};
+var g_region_registry: std.AutoHashMap(usize, u8) = undefined;
 
 fn ensureRegionRegistryInitialized() void {
     if (g_region_registry_initialized) return;
     g_region_registry_mutex.lock();
     defer g_region_registry_mutex.unlock();
     if (g_region_registry_initialized) return;
-    g_region_registry = std.AutoHashMap(usize, void).init(std.heap.c_allocator);
+    g_region_registry = std.AutoHashMap(usize, u8).init(rt_alloc);
     g_region_registry_initialized = true;
 }
 
@@ -5009,7 +5373,7 @@ fn registerRegion(region: *FlixRegion) void {
     ensureRegionRegistryInitialized();
     g_region_registry_mutex.lock();
     defer g_region_registry_mutex.unlock();
-    g_region_registry.put(@intFromPtr(region), {}) catch @panic("oom");
+    g_region_registry.put(@intFromPtr(region), 0) catch @panic("oom");
 }
 
 fn deregisterRegion(region: *FlixRegion) void {
@@ -5023,14 +5387,14 @@ export fn flix_region_enter(ctx: *anyopaque) *anyopaque {
     _ = ctx;
 
     const parent = current_region;
-    const region = std.heap.c_allocator.create(FlixRegion) catch @panic("oom");
+    const region = rt_alloc.create(FlixRegion) catch @panic("oom");
     region.* = .{
         .parent = parent,
         .state = .Open,
         .cancel_requested = .init(false),
         .cancel_cause = null,
         .mutex = .{},
-        .arena = std.heap.ArenaAllocator.init(std.heap.c_allocator),
+        .arena = std.heap.ArenaAllocator.init(rt_alloc),
         .children = .{},
         .child_exn = null,
         .remembered_slots = .{},
@@ -5044,15 +5408,16 @@ export fn flix_region_enter(ctx: *anyopaque) *anyopaque {
     return region;
 }
 
-export fn flix_region_exit(ctx: *anyopaque, region_ptr0: ?*anyopaque, body_outcome: FlixResult) FlixResult {
+export fn flix_region_exit(ctx: *anyopaque, region_ptr0: ?*anyopaque, body_tag: i64, body_payload: i64) FlixResult {
     const fctx: *FlixCtx = requireCtx(ctx);
+    const body_outcome: FlixResult = .{ .tag = body_tag, .payload = body_payload };
 
     // `body_outcome` may carry a pointer payload that is not otherwise present in the explicit root
     // stack (it is passed by value across the region delimiter). Since `region_exit` may block while
     // joining children, we root it explicitly for the duration of this function.
     const roots_len0 = fctx.roots.items.len;
     var outcome_payload_slot: i64 = body_outcome.payload;
-    fctx.roots.append(std.heap.c_allocator, .{ .kind = .ValueI64, .slot_ptr = @ptrCast(&outcome_payload_slot) }) catch @panic("oom");
+    fctx.roots.append(rt_alloc, .{ .kind = .ValueI64, .slot_ptr = @ptrCast(&outcome_payload_slot) }) catch @panic("oom");
     defer fctx.roots.items.len = roots_len0;
 
     const region_ptr = region_ptr0 orelse return body_outcome;
@@ -5098,7 +5463,7 @@ export fn flix_region_exit(ctx: *anyopaque, region_ptr0: ?*anyopaque, body_outco
     }
     pollcheckCooperate(fctx);
     fctx.blocked.store(false, .release);
-    children.deinit(std.heap.c_allocator);
+    children.deinit(rt_alloc);
     dbg("region_exit: {x} joined\n", .{@intFromPtr(region)});
 
     // Child exception takes precedence over parent outcome at region exit.
@@ -5113,12 +5478,12 @@ export fn flix_region_exit(ctx: *anyopaque, region_ptr0: ?*anyopaque, body_outco
         body_outcome;
 
     // Region remembered-set metadata.
-    region.remembered_slots.deinit(std.heap.c_allocator);
-    region.remembered_ptr_arrays.deinit(std.heap.c_allocator);
+    region.remembered_slots.deinit(rt_alloc);
+    region.remembered_ptr_arrays.deinit(rt_alloc);
 
     region.arena.deinit();
     deregisterRegion(region);
-    std.heap.c_allocator.destroy(region);
+    rt_alloc.destroy(region);
     dbg("region_exit: {x} done\n", .{@intFromPtr(region)});
     return out;
 }
@@ -5181,7 +5546,7 @@ export fn flix_region_remember_slot(ctx: *anyopaque, region_ptr0: ?*anyopaque, s
     }
 
     const slot: *i64 = @ptrCast(@alignCast(slot_ptr));
-    region.remembered_slots.append(std.heap.c_allocator, slot) catch @panic("oom");
+    region.remembered_slots.append(rt_alloc, slot) catch @panic("oom");
 }
 
 export fn flix_region_remember_ptr_array(ctx: *anyopaque, region_ptr0: ?*anyopaque, base_ptr: *anyopaque, count_i64: i64) void {
@@ -5200,7 +5565,7 @@ export fn flix_region_remember_ptr_array(ctx: *anyopaque, region_ptr0: ?*anyopaq
     }
 
     const base_slots: [*]i64 = @ptrCast(@alignCast(base_ptr));
-    region.remembered_ptr_arrays.append(std.heap.c_allocator, .{ .base = base_slots, .count = count }) catch @panic("oom");
+    region.remembered_ptr_arrays.append(rt_alloc, .{ .base = base_slots, .count = count }) catch @panic("oom");
 }
 
 export fn flix_store_ptr(ctx: *anyopaque, slot_ptr: *anyopaque, value: i64) void {
@@ -5210,27 +5575,1835 @@ export fn flix_store_ptr(ctx: *anyopaque, slot_ptr: *anyopaque, value: i64) void
 }
 
 export fn flix_spawn(ctx: *anyopaque, region_ptr0: ?*anyopaque, clo: *anyopaque) i64 {
-    _ = ctx;
-    // Publish the closure pointer as a temporary GC root until the new thread has a chance to
-    // register its context and root the closure explicitly.
-    spawnRootsAdd(clo);
-    if (region_ptr0) |region_ptr| {
-        const region: *FlixRegion = @ptrCast(@alignCast(region_ptr));
+    if (is_wasm) {
+        @panic("flix_spawn: unsupported on wasm in this build (no wasm threads yet)");
+    } else {
+        _ = ctx;
+        // Publish the closure pointer as a temporary GC root until the new thread has a chance to
+        // register its context and root the closure explicitly.
+        spawnRootsAdd(clo);
+        if (region_ptr0) |region_ptr| {
+            const region: *FlixRegion = @ptrCast(@alignCast(region_ptr));
 
-        region.mutex.lock();
-        defer region.mutex.unlock();
+            region.mutex.lock();
+            defer region.mutex.unlock();
 
-        if (region.state != .Open) {
-            @panic("flix_spawn: spawn into closing/closed region");
+            if (region.state != .Open) {
+                @panic("flix_spawn: spawn into closing/closed region");
+            }
+
+            const t = std.Thread.spawn(.{}, spawnThreadMain, .{SpawnArgs{ .clo = clo, .region = region }}) catch @panic("spawn failed");
+            region.children.append(rt_alloc, t) catch @panic("oom");
+            return 0;
         }
 
-        const t = std.Thread.spawn(.{}, spawnThreadMain, .{SpawnArgs{ .clo = clo, .region = region }}) catch @panic("spawn failed");
-        region.children.append(std.heap.c_allocator, t) catch @panic("oom");
+        // Detached spawn in the Static region (represented as null).
+        const t = std.Thread.spawn(.{}, spawnThreadMain, .{SpawnArgs{ .clo = clo, .region = null }}) catch @panic("spawn failed");
+        t.detach();
         return 0;
     }
+}
 
-    // Detached spawn in the Static region (represented as null).
-    const t = std.Thread.spawn(.{}, spawnThreadMain, .{SpawnArgs{ .clo = clo, .region = null }}) catch @panic("spawn failed");
-    t.detach();
-    return 0;
+// ----------------------------------------------------------------------------
+// Wasm Component Model (WIT) Runtime Exports (bring-up)
+//
+// These exports implement `flix:runtime/runtime@0.1.0` as generated by
+// `wit-bindgen` (C) in `runtime/src/wit/flix.c`.
+//
+// Important:
+// - These symbols must exist for the wasm component build.
+// - For native LLVM builds, these are unused and compiled out via `is_wasm`.
+// - The cooperative scheduler is single-threaded (no wasm threads yet).
+// ----------------------------------------------------------------------------
+
+// `wit-bindgen` emits a link anchor for a separate `*_component_type.o` object.
+// We do not use that object (we embed WIT via `wasm-tools component embed`), so provide a stub.
+export fn __component_type_object_force_link_flix() void {}
+
+// WIT canonical ABI string/list shapes.
+const flix_string_t = extern struct {
+    ptr: [*]u8,
+    len: usize,
+};
+
+const flix_list_u8_t = extern struct {
+    ptr: [*]u8,
+    len: usize,
+};
+
+const flix_list_string_t = extern struct {
+    ptr: [*]flix_string_t,
+    len: usize,
+};
+
+const flix_option_string_t = extern struct {
+    is_some: bool,
+    val: flix_string_t,
+};
+
+// Resource handles (`own<T>`).
+const exports_flix_runtime_runtime_own_ctx_t = extern struct {
+    __handle: i32,
+};
+
+const exports_flix_runtime_runtime_own_value_t = extern struct {
+    __handle: i32,
+};
+
+const exports_flix_runtime_runtime_own_suspension_t = extern struct {
+    __handle: i32,
+};
+
+// Opaque resource reps (we define them here).
+const exports_flix_runtime_runtime_ctx_t = struct {
+    flix_ctx: *anyopaque,
+    next_task_id: u64,
+    tasks: std.AutoHashMap(u64, Task).Unmanaged,
+    ready: std.ArrayListUnmanaged(u64),
+    ready_head: usize,
+};
+
+const exports_flix_runtime_runtime_value_t = struct {
+    flix_ctx: *anyopaque,
+    handle: i64,
+};
+
+const exports_flix_runtime_runtime_suspension_t = struct {
+    flix_ctx: *anyopaque,
+    task_id: u64,
+    susp_handle: i64,
+};
+
+// Borrow types (`borrow<T>`) are passed as rep pointers by the canonical ABI.
+const exports_flix_runtime_runtime_borrow_ctx_t = *exports_flix_runtime_runtime_ctx_t;
+const exports_flix_runtime_runtime_borrow_value_t = *exports_flix_runtime_runtime_value_t;
+const exports_flix_runtime_runtime_borrow_suspension_t = *exports_flix_runtime_runtime_suspension_t;
+
+// Stable symbol id (effect ids, op ids, def ids, etc).
+const exports_flix_runtime_runtime_sym_t = u64;
+
+// Stable exported definition id.
+const exports_flix_runtime_runtime_def_id_t = u64;
+
+// Host-visible id for a scheduled task (opaque to the host).
+const exports_flix_runtime_runtime_task_id_t = u64;
+
+// Suspension result produced by `invoke`.
+const exports_flix_runtime_runtime_suspended_exec_t = extern struct {
+    task: exports_flix_runtime_runtime_task_id_t,
+    suspension: exports_flix_runtime_runtime_own_suspension_t,
+};
+
+// Execution outcome.
+const exports_flix_runtime_runtime_exec_t = extern struct {
+    tag: u8,
+    val: extern union {
+        ok: exports_flix_runtime_runtime_own_value_t,
+        thrown: exports_flix_runtime_runtime_own_value_t,
+        suspended: exports_flix_runtime_runtime_suspended_exec_t,
+    },
+};
+
+const exports_flix_runtime_runtime_task_outcome_t = extern struct {
+    tag: u8,
+    val: extern union {
+        ok: exports_flix_runtime_runtime_own_value_t,
+        thrown: exports_flix_runtime_runtime_own_value_t,
+    },
+};
+
+// Minimal suspension metadata.
+const exports_flix_runtime_runtime_suspension_info_t = extern struct {
+    eff_id: exports_flix_runtime_runtime_sym_t,
+    op_id: exports_flix_runtime_runtime_sym_t,
+};
+
+const exports_flix_runtime_runtime_list_borrow_value_t = extern struct {
+    ptr: [*]exports_flix_runtime_runtime_borrow_value_t,
+    len: usize,
+};
+
+const exports_flix_runtime_runtime_list_own_suspension_t = extern struct {
+    ptr: [*]exports_flix_runtime_runtime_own_suspension_t,
+    len: usize,
+};
+
+// WIT request/response record types.
+const exports_flix_runtime_runtime_timer_sleep_req_t = extern struct {
+    ms: u64,
+};
+
+const exports_flix_runtime_runtime_http_header_t = extern struct {
+    name: flix_string_t,
+    value: flix_string_t,
+};
+
+const exports_flix_runtime_runtime_list_http_header_t = extern struct {
+    ptr: [*]exports_flix_runtime_runtime_http_header_t,
+    len: usize,
+};
+
+const exports_flix_runtime_runtime_http_request_req_t = extern struct {
+    method: flix_string_t,
+    url: flix_string_t,
+    headers: exports_flix_runtime_runtime_list_http_header_t,
+    body: flix_option_string_t,
+};
+
+const exports_flix_runtime_runtime_http_response_t = extern struct {
+    status: u16,
+    headers: exports_flix_runtime_runtime_list_http_header_t,
+    body: flix_string_t,
+};
+
+const exports_flix_runtime_runtime_io_error_t = extern struct {
+    kind_code: i32,
+    msg: flix_string_t,
+};
+
+const exports_flix_runtime_runtime_file_exists_req_t = extern struct { path: flix_string_t };
+const exports_flix_runtime_runtime_file_is_directory_req_t = extern struct { path: flix_string_t };
+const exports_flix_runtime_runtime_file_is_regular_file_req_t = extern struct { path: flix_string_t };
+const exports_flix_runtime_runtime_file_is_readable_req_t = extern struct { path: flix_string_t };
+const exports_flix_runtime_runtime_file_is_symbolic_link_req_t = extern struct { path: flix_string_t };
+const exports_flix_runtime_runtime_file_is_writable_req_t = extern struct { path: flix_string_t };
+const exports_flix_runtime_runtime_file_is_executable_req_t = extern struct { path: flix_string_t };
+const exports_flix_runtime_runtime_file_access_time_req_t = extern struct { path: flix_string_t };
+const exports_flix_runtime_runtime_file_creation_time_req_t = extern struct { path: flix_string_t };
+const exports_flix_runtime_runtime_file_modification_time_req_t = extern struct { path: flix_string_t };
+const exports_flix_runtime_runtime_file_size_req_t = extern struct { path: flix_string_t };
+const exports_flix_runtime_runtime_file_read_req_t = extern struct { path: flix_string_t };
+const exports_flix_runtime_runtime_file_read_lines_req_t = extern struct { path: flix_string_t };
+const exports_flix_runtime_runtime_file_read_bytes_req_t = extern struct { path: flix_string_t };
+const exports_flix_runtime_runtime_file_list_req_t = extern struct { path: flix_string_t };
+
+const exports_flix_runtime_runtime_file_write_req_t = extern struct {
+    path: flix_string_t,
+    data: flix_string_t,
+};
+
+const exports_flix_runtime_runtime_file_write_bytes_req_t = extern struct {
+    path: flix_string_t,
+    bytes: flix_list_u8_t,
+};
+
+const exports_flix_runtime_runtime_file_append_req_t = extern struct {
+    path: flix_string_t,
+    data: flix_string_t,
+};
+
+const exports_flix_runtime_runtime_file_append_bytes_req_t = extern struct {
+    path: flix_string_t,
+    bytes: flix_list_u8_t,
+};
+
+const exports_flix_runtime_runtime_file_truncate_req_t = extern struct { path: flix_string_t };
+const exports_flix_runtime_runtime_file_mkdir_req_t = extern struct { path: flix_string_t };
+const exports_flix_runtime_runtime_file_mkdirs_req_t = extern struct { path: flix_string_t };
+const exports_flix_runtime_runtime_file_mk_temp_dir_req_t = extern struct { prefix: flix_string_t };
+
+const exports_flix_runtime_runtime_process_env_var_t = extern struct {
+    key: flix_string_t,
+    value: flix_string_t,
+};
+
+const exports_flix_runtime_runtime_list_process_env_var_t = extern struct {
+    ptr: [*]exports_flix_runtime_runtime_process_env_var_t,
+    len: usize,
+};
+
+const exports_flix_runtime_runtime_process_exec_req_t = extern struct {
+    argv: flix_list_string_t,
+    cwd: flix_option_string_t,
+    env: exports_flix_runtime_runtime_list_process_env_var_t,
+};
+
+const exports_flix_runtime_runtime_process_exit_value_req_t = extern struct { process_id: u64 };
+const exports_flix_runtime_runtime_process_is_alive_req_t = extern struct { process_id: u64 };
+const exports_flix_runtime_runtime_process_pid_req_t = extern struct { process_id: u64 };
+const exports_flix_runtime_runtime_process_stop_req_t = extern struct { process_id: u64 };
+const exports_flix_runtime_runtime_process_wait_for_req_t = extern struct { process_id: u64 };
+const exports_flix_runtime_runtime_process_wait_for_timeout_req_t = extern struct {
+    process_id: u64,
+    timeout_ms: i64,
+};
+
+const exports_flix_runtime_runtime_process_stdin_write_req_t = extern struct {
+    process_id: u64,
+    bytes: flix_list_u8_t,
+};
+
+const exports_flix_runtime_runtime_process_stdout_read_req_t = extern struct {
+    process_id: u64,
+    max_bytes: u32,
+};
+
+const exports_flix_runtime_runtime_process_stderr_read_req_t = extern struct {
+    process_id: u64,
+    max_bytes: u32,
+};
+
+const exports_flix_runtime_runtime_process_release_req_t = extern struct { process_id: u64 };
+
+const exports_flix_runtime_runtime_tcp_socket_connect_req_t = extern struct {
+    ip: flix_list_u8_t,
+    port: u16,
+};
+
+const exports_flix_runtime_runtime_tcp_socket_read_req_t = extern struct {
+    socket_id: u64,
+    max_bytes: u32,
+};
+
+const exports_flix_runtime_runtime_tcp_socket_write_req_t = extern struct {
+    socket_id: u64,
+    bytes: flix_list_u8_t,
+};
+
+const exports_flix_runtime_runtime_tcp_socket_close_req_t = extern struct {
+    socket_id: u64,
+};
+
+const exports_flix_runtime_runtime_tcp_server_bind_req_t = extern struct {
+    ip: flix_list_u8_t,
+    port: u16,
+};
+
+const exports_flix_runtime_runtime_tcp_server_accept_req_t = extern struct { server_id: u64 };
+const exports_flix_runtime_runtime_tcp_server_local_port_req_t = extern struct { server_id: u64 };
+const exports_flix_runtime_runtime_tcp_server_close_req_t = extern struct { server_id: u64 };
+
+const exports_flix_runtime_runtime_unknown_req_t = extern struct {
+    eff_id: exports_flix_runtime_runtime_sym_t,
+    op_id: exports_flix_runtime_runtime_sym_t,
+};
+
+const exports_flix_runtime_runtime_op_request_t = extern struct {
+    tag: u8,
+    val: extern union {
+        timer_sleep: exports_flix_runtime_runtime_timer_sleep_req_t,
+        http_request: exports_flix_runtime_runtime_http_request_req_t,
+        file_exists: exports_flix_runtime_runtime_file_exists_req_t,
+        file_is_directory: exports_flix_runtime_runtime_file_is_directory_req_t,
+        file_is_regular_file: exports_flix_runtime_runtime_file_is_regular_file_req_t,
+        file_is_readable: exports_flix_runtime_runtime_file_is_readable_req_t,
+        file_is_symbolic_link: exports_flix_runtime_runtime_file_is_symbolic_link_req_t,
+        file_is_writable: exports_flix_runtime_runtime_file_is_writable_req_t,
+        file_is_executable: exports_flix_runtime_runtime_file_is_executable_req_t,
+        file_access_time: exports_flix_runtime_runtime_file_access_time_req_t,
+        file_creation_time: exports_flix_runtime_runtime_file_creation_time_req_t,
+        file_modification_time: exports_flix_runtime_runtime_file_modification_time_req_t,
+        file_size: exports_flix_runtime_runtime_file_size_req_t,
+        file_read: exports_flix_runtime_runtime_file_read_req_t,
+        file_read_lines: exports_flix_runtime_runtime_file_read_lines_req_t,
+        file_read_bytes: exports_flix_runtime_runtime_file_read_bytes_req_t,
+        file_list: exports_flix_runtime_runtime_file_list_req_t,
+        file_write: exports_flix_runtime_runtime_file_write_req_t,
+        file_write_bytes: exports_flix_runtime_runtime_file_write_bytes_req_t,
+        file_append: exports_flix_runtime_runtime_file_append_req_t,
+        file_append_bytes: exports_flix_runtime_runtime_file_append_bytes_req_t,
+        file_truncate: exports_flix_runtime_runtime_file_truncate_req_t,
+        file_mkdir: exports_flix_runtime_runtime_file_mkdir_req_t,
+        file_mkdirs: exports_flix_runtime_runtime_file_mkdirs_req_t,
+        file_mk_temp_dir: exports_flix_runtime_runtime_file_mk_temp_dir_req_t,
+        process_exec: exports_flix_runtime_runtime_process_exec_req_t,
+        process_exit_value: exports_flix_runtime_runtime_process_exit_value_req_t,
+        process_is_alive: exports_flix_runtime_runtime_process_is_alive_req_t,
+        process_pid: exports_flix_runtime_runtime_process_pid_req_t,
+        process_stop: exports_flix_runtime_runtime_process_stop_req_t,
+        process_wait_for: exports_flix_runtime_runtime_process_wait_for_req_t,
+        process_wait_for_timeout: exports_flix_runtime_runtime_process_wait_for_timeout_req_t,
+        process_stdin_write: exports_flix_runtime_runtime_process_stdin_write_req_t,
+        process_stdout_read: exports_flix_runtime_runtime_process_stdout_read_req_t,
+        process_stderr_read: exports_flix_runtime_runtime_process_stderr_read_req_t,
+        process_release: exports_flix_runtime_runtime_process_release_req_t,
+        tcp_socket_connect: exports_flix_runtime_runtime_tcp_socket_connect_req_t,
+        tcp_socket_read: exports_flix_runtime_runtime_tcp_socket_read_req_t,
+        tcp_socket_write: exports_flix_runtime_runtime_tcp_socket_write_req_t,
+        tcp_socket_close: exports_flix_runtime_runtime_tcp_socket_close_req_t,
+        tcp_server_bind: exports_flix_runtime_runtime_tcp_server_bind_req_t,
+        tcp_server_accept: exports_flix_runtime_runtime_tcp_server_accept_req_t,
+        tcp_server_local_port: exports_flix_runtime_runtime_tcp_server_local_port_req_t,
+        tcp_server_close: exports_flix_runtime_runtime_tcp_server_close_req_t,
+        unknown: exports_flix_runtime_runtime_unknown_req_t,
+    },
+};
+
+// Helper functions from `wit-bindgen` C glue (defined in `runtime/src/wit/flix.c`).
+//
+// Note: The LLVM-native backend links `flix_rt_llvm.zig` without the WIT C glue. To keep the native
+// runtime linkable we provide **weak** stub definitions for these helpers.
+//
+// When building wasm components, the real (strong) implementations from `runtime/src/wit/flix.c`
+// override these stubs.
+
+fn exports_flix_runtime_runtime_ctx_new(rep: *exports_flix_runtime_runtime_ctx_t) callconv(.c) exports_flix_runtime_runtime_own_ctx_t {
+    _ = rep;
+    @panic("exports_flix_runtime_runtime_ctx_new: WIT glue unavailable (native build)");
+}
+
+fn exports_flix_runtime_runtime_ctx_rep(handle: exports_flix_runtime_runtime_own_ctx_t) callconv(.c) *exports_flix_runtime_runtime_ctx_t {
+    _ = handle;
+    @panic("exports_flix_runtime_runtime_ctx_rep: WIT glue unavailable (native build)");
+}
+
+fn exports_flix_runtime_runtime_ctx_drop_own(handle: exports_flix_runtime_runtime_own_ctx_t) callconv(.c) void {
+    _ = handle;
+}
+
+fn exports_flix_runtime_runtime_value_new(rep: *exports_flix_runtime_runtime_value_t) callconv(.c) exports_flix_runtime_runtime_own_value_t {
+    _ = rep;
+    @panic("exports_flix_runtime_runtime_value_new: WIT glue unavailable (native build)");
+}
+
+fn exports_flix_runtime_runtime_value_rep(handle: exports_flix_runtime_runtime_own_value_t) callconv(.c) *exports_flix_runtime_runtime_value_t {
+    _ = handle;
+    @panic("exports_flix_runtime_runtime_value_rep: WIT glue unavailable (native build)");
+}
+
+fn exports_flix_runtime_runtime_value_drop_own(handle: exports_flix_runtime_runtime_own_value_t) callconv(.c) void {
+    _ = handle;
+}
+
+fn exports_flix_runtime_runtime_suspension_new(rep: *exports_flix_runtime_runtime_suspension_t) callconv(.c) exports_flix_runtime_runtime_own_suspension_t {
+    _ = rep;
+    @panic("exports_flix_runtime_runtime_suspension_new: WIT glue unavailable (native build)");
+}
+
+fn exports_flix_runtime_runtime_suspension_rep(handle: exports_flix_runtime_runtime_own_suspension_t) callconv(.c) *exports_flix_runtime_runtime_suspension_t {
+    _ = handle;
+    @panic("exports_flix_runtime_runtime_suspension_rep: WIT glue unavailable (native build)");
+}
+
+fn exports_flix_runtime_runtime_suspension_drop_own(handle: exports_flix_runtime_runtime_own_suspension_t) callconv(.c) void {
+    _ = handle;
+}
+
+comptime {
+    // Export the stubs with weak linkage so wasm builds can override them with the real glue.
+    @export(&exports_flix_runtime_runtime_ctx_new, .{ .name = "exports_flix_runtime_runtime_ctx_new", .linkage = .weak });
+    @export(&exports_flix_runtime_runtime_ctx_rep, .{ .name = "exports_flix_runtime_runtime_ctx_rep", .linkage = .weak });
+    @export(&exports_flix_runtime_runtime_ctx_drop_own, .{ .name = "exports_flix_runtime_runtime_ctx_drop_own", .linkage = .weak });
+
+    @export(&exports_flix_runtime_runtime_value_new, .{ .name = "exports_flix_runtime_runtime_value_new", .linkage = .weak });
+    @export(&exports_flix_runtime_runtime_value_rep, .{ .name = "exports_flix_runtime_runtime_value_rep", .linkage = .weak });
+    @export(&exports_flix_runtime_runtime_value_drop_own, .{ .name = "exports_flix_runtime_runtime_value_drop_own", .linkage = .weak });
+
+    @export(&exports_flix_runtime_runtime_suspension_new, .{ .name = "exports_flix_runtime_runtime_suspension_new", .linkage = .weak });
+    @export(&exports_flix_runtime_runtime_suspension_rep, .{ .name = "exports_flix_runtime_runtime_suspension_rep", .linkage = .weak });
+    @export(&exports_flix_runtime_runtime_suspension_drop_own, .{ .name = "exports_flix_runtime_runtime_suspension_drop_own", .linkage = .weak });
+}
+
+// Module functions emitted by the LLVM backend for the wasm target.
+extern fn flix_wasm_invoke_def(ctx: *anyopaque, def_id: i64, args: [*]i64, argc: i32) callconv(.c) FlixResult;
+extern fn flix_wasm_resume_ok_def(ctx: *anyopaque, def_id: i64, susp_handle: i64, resume_handle: i64) callconv(.c) FlixResult;
+extern fn flix_wasm_resume_throw_def(ctx: *anyopaque, def_id: i64, susp_handle: i64, exn_handle: i64) callconv(.c) FlixResult;
+
+const WasmIoEffSymId: i64 = 0;
+
+const Task = struct {
+    def_id: i64,
+    args: std.ArrayListUnmanaged(i64),
+    state: TaskState,
+    region: ?*FlixRegion,
+};
+
+const TaskState = union(enum) {
+    ReadyStart: void,
+    ReadyResumeOk: struct { susp_handle: i64, resume_handle: i64 },
+    ReadyResumeThrow: struct { susp_handle: i64, exn_handle: i64 },
+    Blocked: struct { susp_handle: i64 },
+    Completed: struct { tag: u8, handle: i64, consumed: bool },
+};
+
+fn witSetCurrentCtx(ctx_rep: *exports_flix_runtime_runtime_ctx_t) void {
+    // Ensure threadlocals used by the runtime point at the correct context for this call.
+    current_ctx = @ptrCast(@alignCast(ctx_rep.flix_ctx));
+}
+
+fn witBytesToOwned(buf: []const u8) flix_list_u8_t {
+    // Canonical ABI post-return frees only if `len > 0`, but Zig's `[*]T` pointers are non-null.
+    // For empty lists we can return any non-null, non-dereferenced pointer.
+    if (buf.len == 0) return .{ .ptr = @ptrFromInt(1), .len = 0 };
+    const mem = c.malloc(buf.len) orelse @panic("malloc failed");
+    const out: [*]u8 = @ptrCast(mem);
+    std.mem.copyForwards(u8, out[0..buf.len], buf);
+    return .{ .ptr = out, .len = buf.len };
+}
+
+fn witStringClone(bytes: []const u8) flix_string_t {
+    // Canonical ABI post-return frees only if `len > 0`, but Zig's `[*]T` pointers are non-null.
+    // For empty strings we can return any non-null, non-dereferenced pointer.
+    if (bytes.len == 0) return .{ .ptr = @ptrFromInt(1), .len = 0 };
+    const mem = c.malloc(bytes.len) orelse @panic("malloc failed");
+    const out: [*]u8 = @ptrCast(mem);
+    std.mem.copyForwards(u8, out[0..bytes.len], bytes);
+    return .{ .ptr = out, .len = bytes.len };
+}
+
+fn witStringFromFlixString(str_ptr: *anyopaque) flix_string_t {
+    const bytes = flixStringToUtf8Alloc(rt_alloc, str_ptr);
+    defer rt_alloc.free(bytes);
+    return witStringClone(bytes);
+}
+
+fn flixStringFromWit(s: *const flix_string_t) *anyopaque {
+    const n: usize = s.len;
+    if (n == 0) return allocFlixStringFromAscii("");
+    const slice = s.ptr[0..n];
+    return allocFlixStringFromUtf8Lossy(slice);
+}
+
+fn witEmptyString() flix_string_t {
+    // See `witStringClone` for why we use a non-null dummy pointer for empty strings.
+    return .{ .ptr = @ptrFromInt(1), .len = 0 };
+}
+
+fn witOptionStringNone() flix_option_string_t {
+    return .{ .is_some = false, .val = witEmptyString() };
+}
+
+fn witOptionStringSomeFromFlixString(str_ptr: *anyopaque) flix_option_string_t {
+    return .{ .is_some = true, .val = witStringFromFlixString(str_ptr) };
+}
+
+fn witAllocArray(comptime T: type, n: usize) [*]T {
+    // Canonical ABI post-return frees only if `len > 0`, but Zig's `[*]T` pointers are non-null.
+    // For empty lists we can return any non-null pointer (never dereferenced nor freed).
+    if (n == 0) return @ptrFromInt(@as(usize, @alignOf(T)));
+    const mem = c.malloc(n * @sizeOf(T)) orelse @panic("malloc failed");
+    return @ptrCast(@alignCast(mem));
+}
+
+fn witBuildHeadersFromPairs(req_pairs_ptr: *anyopaque) exports_flix_runtime_runtime_list_http_header_t {
+    // Flix headers are `Array[String]` with alternating key/value entries.
+    const len: usize = flixArrayLen(req_pairs_ptr);
+    const slots: [*]i64 = flixArraySlots(req_pairs_ptr);
+    const n_pairs: usize = len / 2;
+
+    const arr_ptr = witAllocArray(exports_flix_runtime_runtime_http_header_t, n_pairs);
+    var i: usize = 0;
+    while (i < n_pairs) : (i += 1) {
+        const k_ptr = ptrFromPayload(slots[i * 2]);
+        const v_ptr = ptrFromPayload(slots[i * 2 + 1]);
+        arr_ptr[i] = .{
+            .name = witStringFromFlixString(k_ptr),
+            .value = witStringFromFlixString(v_ptr),
+        };
+    }
+    return .{ .ptr = arr_ptr, .len = n_pairs };
+}
+
+fn witBuildStringListFromFlixStringArray(arr_ptr0: *anyopaque) flix_list_string_t {
+    const len: usize = flixArrayLen(arr_ptr0);
+    const slots: [*]i64 = flixArraySlots(arr_ptr0);
+    const out_ptr = witAllocArray(flix_string_t, len);
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        const s_ptr = ptrFromPayload(slots[i]);
+        out_ptr[i] = witStringFromFlixString(s_ptr);
+    }
+    return .{ .ptr = out_ptr, .len = len };
+}
+
+fn witBuildEnvListFromPairs(pairs_ptr: *anyopaque) exports_flix_runtime_runtime_list_process_env_var_t {
+    const len: usize = flixArrayLen(pairs_ptr);
+    const slots: [*]i64 = flixArraySlots(pairs_ptr);
+    const n_pairs: usize = len / 2;
+
+    const out_ptr = witAllocArray(exports_flix_runtime_runtime_process_env_var_t, n_pairs);
+    var i: usize = 0;
+    while (i < n_pairs) : (i += 1) {
+        const k_ptr = ptrFromPayload(slots[i * 2]);
+        const v_ptr = ptrFromPayload(slots[i * 2 + 1]);
+        out_ptr[i] = .{
+            .key = witStringFromFlixString(k_ptr),
+            .value = witStringFromFlixString(v_ptr),
+        };
+    }
+    return .{ .ptr = out_ptr, .len = n_pairs };
+}
+
+fn witReqUnknown(eff_id: i64, op_id: i64) exports_flix_runtime_runtime_op_request_t {
+    return .{
+        .tag = 44, // `unknown`
+        .val = .{ .unknown = .{ .eff_id = @intCast(eff_id), .op_id = @intCast(op_id) } },
+    };
+}
+
+fn taskQueuePush(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64) void {
+    ctx_rep.ready.append(rt_alloc, task_id) catch @panic("oom");
+}
+
+fn taskQueuePop(ctx_rep: *exports_flix_runtime_runtime_ctx_t) ?u64 {
+    if (ctx_rep.ready_head >= ctx_rep.ready.items.len) return null;
+    const id = ctx_rep.ready.items[ctx_rep.ready_head];
+    ctx_rep.ready_head += 1;
+
+    // Occasional compaction.
+    if (ctx_rep.ready_head > 1024 and ctx_rep.ready_head * 2 > ctx_rep.ready.items.len) {
+        const rem = ctx_rep.ready.items.len - ctx_rep.ready_head;
+        std.mem.copyForwards(u64, ctx_rep.ready.items[0..rem], ctx_rep.ready.items[ctx_rep.ready_head..]);
+        ctx_rep.ready.items.len = rem;
+        ctx_rep.ready_head = 0;
+    }
+
+    return id;
+}
+
+fn taskReleaseArgs(ctx_ptr: *anyopaque, t: *Task) void {
+    for (t.args.items) |h| flix_handle_release(ctx_ptr, h);
+    t.args.deinit(rt_alloc);
+    t.args = .{};
+}
+
+fn taskMarkCompleted(ctx_rep: *exports_flix_runtime_runtime_ctx_t, t: *Task, tag: u8, handle: i64) void {
+    // Task no longer needs its original arguments.
+    taskReleaseArgs(ctx_rep.flix_ctx, t);
+    t.state = .{ .Completed = .{ .tag = tag, .handle = handle, .consumed = false } };
+}
+
+fn taskMakeSuspensionForHost(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, susp_handle: i64) exports_flix_runtime_runtime_own_suspension_t {
+    // Retain for the host resource; the task keeps its own reference.
+    flix_handle_retain(ctx_rep.flix_ctx, susp_handle);
+    const rep = rt_alloc.create(exports_flix_runtime_runtime_suspension_t) catch @panic("oom");
+    rep.* = .{ .flix_ctx = ctx_rep.flix_ctx, .task_id = task_id, .susp_handle = susp_handle };
+    return exports_flix_runtime_runtime_suspension_new(rep);
+}
+
+fn withTaskRegion(task: *Task, f: fn () void) void {
+    const saved = current_region;
+    current_region = task.region;
+    defer current_region = saved;
+    f();
+    task.region = current_region;
+}
+
+fn runTaskOnce(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, t: *Task) ?exports_flix_runtime_runtime_own_suspension_t {
+    witSetCurrentCtx(ctx_rep);
+
+    const saved_region = current_region;
+    current_region = t.region;
+    defer {
+        t.region = current_region;
+        current_region = saved_region;
+    }
+
+    switch (t.state) {
+        .ReadyStart => {
+            // Prepare argv bits for the def dispatcher.
+            const argc: usize = t.args.items.len;
+            const arg_bits = rt_alloc.alloc(i64, argc) catch @panic("oom");
+            defer rt_alloc.free(arg_bits);
+            var i: usize = 0;
+            while (i < argc) : (i += 1) {
+                arg_bits[i] = flix_handle_payload(ctx_rep.flix_ctx, t.args.items[i]);
+            }
+
+            const r = flix_wasm_invoke_def(ctx_rep.flix_ctx, t.def_id, arg_bits.ptr, @intCast(argc));
+            switch (r.tag) {
+                RESULT_TAG_VALUE => {
+                    taskMarkCompleted(ctx_rep, t, 0, r.payload);
+                    return null;
+                },
+                RESULT_TAG_EXCEPTION => {
+                    taskMarkCompleted(ctx_rep, t, 1, r.payload);
+                    return null;
+                },
+                RESULT_TAG_SUSPENSION => {
+                    // Task owns this suspension handle.
+                    taskReleaseArgs(ctx_rep.flix_ctx, t);
+                    t.state = .{ .Blocked = .{ .susp_handle = r.payload } };
+                    const own = taskMakeSuspensionForHost(ctx_rep, task_id, r.payload);
+                    return own;
+                },
+                else => @panic("unexpected result tag from flix_wasm_invoke_def"),
+            }
+        },
+
+        .ReadyResumeOk => |st| {
+            const r = flix_wasm_resume_ok_def(ctx_rep.flix_ctx, t.def_id, st.susp_handle, st.resume_handle);
+            flix_handle_release(ctx_rep.flix_ctx, st.susp_handle);
+            flix_handle_release(ctx_rep.flix_ctx, st.resume_handle);
+
+            switch (r.tag) {
+                RESULT_TAG_VALUE => {
+                    taskMarkCompleted(ctx_rep, t, 0, r.payload);
+                    return null;
+                },
+                RESULT_TAG_EXCEPTION => {
+                    taskMarkCompleted(ctx_rep, t, 1, r.payload);
+                    return null;
+                },
+                RESULT_TAG_SUSPENSION => {
+                    t.state = .{ .Blocked = .{ .susp_handle = r.payload } };
+                    const own = taskMakeSuspensionForHost(ctx_rep, task_id, r.payload);
+                    return own;
+                },
+                else => @panic("unexpected result tag from flix_wasm_resume_ok_def"),
+            }
+        },
+
+        .ReadyResumeThrow => |st| {
+            const r = flix_wasm_resume_throw_def(ctx_rep.flix_ctx, t.def_id, st.susp_handle, st.exn_handle);
+            flix_handle_release(ctx_rep.flix_ctx, st.susp_handle);
+            flix_handle_release(ctx_rep.flix_ctx, st.exn_handle);
+
+            switch (r.tag) {
+                RESULT_TAG_VALUE => {
+                    taskMarkCompleted(ctx_rep, t, 0, r.payload);
+                    return null;
+                },
+                RESULT_TAG_EXCEPTION => {
+                    taskMarkCompleted(ctx_rep, t, 1, r.payload);
+                    return null;
+                },
+                RESULT_TAG_SUSPENSION => {
+                    t.state = .{ .Blocked = .{ .susp_handle = r.payload } };
+                    const own = taskMakeSuspensionForHost(ctx_rep, task_id, r.payload);
+                    return own;
+                },
+                else => @panic("unexpected result tag from flix_wasm_resume_throw_def"),
+            }
+        },
+
+        else => return null,
+    }
+}
+
+fn resumeTaskWithHandle(ctx_rep: *exports_flix_runtime_runtime_ctx_t, susp: exports_flix_runtime_runtime_own_suspension_t, resume_handle: i64, is_throw: bool) void {
+    witSetCurrentCtx(ctx_rep);
+
+    const srep = exports_flix_runtime_runtime_suspension_rep(susp);
+    const task_id = srep.task_id;
+    const susp_handle = srep.susp_handle;
+
+    const task_ptr = ctx_rep.tasks.getPtr(task_id) orelse @panic("resume on unknown task-id");
+
+    // Ensure task is blocked (best-effort sanity).
+    switch (task_ptr.state) {
+        .Blocked => |st| {
+            if (st.susp_handle != susp_handle) @panic("resume suspension mismatch");
+        },
+        else => @panic("resume on non-blocked task"),
+    }
+
+    // Move to ready state and enqueue.
+    if (is_throw) {
+        task_ptr.state = .{ .ReadyResumeThrow = .{ .susp_handle = susp_handle, .exn_handle = resume_handle } };
+    } else {
+        task_ptr.state = .{ .ReadyResumeOk = .{ .susp_handle = susp_handle, .resume_handle = resume_handle } };
+    }
+    taskQueuePush(ctx_rep, task_id);
+
+    // Consume the WIT resource handle; destructor releases the host retain.
+    exports_flix_runtime_runtime_suspension_drop_own(susp);
+}
+
+fn makeIoTuple2(ok: bool, msg: *anyopaque) *anyopaque {
+    return allocFlixTupleFromPayloads(&.{ payloadFromBool(ok), payloadFromPtr(msg) }, 0b10);
+}
+
+fn makeIoTuple3Bool(ok: bool, x: i64, msg: *anyopaque) *anyopaque {
+    return allocFlixTupleFromPayloads(&.{ payloadFromBool(ok), x, payloadFromPtr(msg) }, 0b100);
+}
+
+fn makeIoTuple4Bool(ok: bool, x: i64, kind: i64, msg: *anyopaque) *anyopaque {
+    return allocFlixTupleFromPayloads(&.{ payloadFromBool(ok), x, kind, payloadFromPtr(msg) }, 0b1000);
+}
+
+fn makeIoTuple4Ptr(ok: bool, x_ptr: *anyopaque, kind: i64, msg: *anyopaque) *anyopaque {
+    return allocFlixTupleFromPayloads(&.{ payloadFromBool(ok), payloadFromPtr(x_ptr), kind, payloadFromPtr(msg) }, 0b1010);
+}
+
+fn makeHttpTuple(ok: bool, status: i64, resp_pairs_ptr: *anyopaque, resp_body_ptr: *anyopaque, kind: i64, msg_ptr: *anyopaque) *anyopaque {
+    return allocFlixTupleFromPayloads(&.{
+        payloadFromBool(ok),
+        status,
+        payloadFromPtr(resp_pairs_ptr),
+        payloadFromPtr(resp_body_ptr),
+        kind,
+        payloadFromPtr(msg_ptr),
+    }, 0b101100);
+}
+
+fn makeHandleForPtr(ctx_ptr: *anyopaque, ptr: *anyopaque) i64 {
+    return flix_handle_new(ctx_ptr, ptr);
+}
+
+fn makeHandleForI64(ctx_ptr: *anyopaque, payload: i64) i64 {
+    return flix_handle_new_i64(ctx_ptr, payload);
+}
+
+// Exported Functions from `flix:runtime/runtime@0.1.0`
+export fn exports_flix_runtime_runtime_new_ctx() exports_flix_runtime_runtime_own_ctx_t {
+    if (!is_wasm) @panic("exports_flix_runtime_runtime_new_ctx: wasm-only");
+
+    const rep = rt_alloc.create(exports_flix_runtime_runtime_ctx_t) catch @panic("oom");
+    const flix_ctx_ptr = flix_ctx_new();
+
+    rep.* = .{
+        .flix_ctx = flix_ctx_ptr,
+        .next_task_id = 1,
+        .tasks = .{},
+        .ready = .{},
+        .ready_head = 0,
+    };
+    // Avoid reallocations in the ready queue for typical use.
+    rep.ready.ensureTotalCapacity(rt_alloc, 1024) catch @panic("oom");
+
+    witSetCurrentCtx(rep);
+    return exports_flix_runtime_runtime_ctx_new(rep);
+}
+
+export fn exports_flix_runtime_runtime_ctx_destructor(rep: *exports_flix_runtime_runtime_ctx_t) void {
+    if (!is_wasm) return;
+
+    witSetCurrentCtx(rep);
+
+    // Best-effort: release all task-owned handles.
+    var it = rep.tasks.iterator();
+    while (it.next()) |e| {
+        var t = e.value_ptr.*;
+        taskReleaseArgs(rep.flix_ctx, &t);
+        switch (t.state) {
+            .Blocked => |st| flix_handle_release(rep.flix_ctx, st.susp_handle),
+            .ReadyResumeOk => |st| {
+                flix_handle_release(rep.flix_ctx, st.susp_handle);
+                flix_handle_release(rep.flix_ctx, st.resume_handle);
+            },
+            .ReadyResumeThrow => |st| {
+                flix_handle_release(rep.flix_ctx, st.susp_handle);
+                flix_handle_release(rep.flix_ctx, st.exn_handle);
+            },
+            .Completed => |st| if (!st.consumed) flix_handle_release(rep.flix_ctx, st.handle),
+            else => {},
+        }
+    }
+    rep.tasks.deinit(rt_alloc);
+    rep.ready.deinit(rt_alloc);
+
+    flix_ctx_free(rep.flix_ctx);
+    rt_alloc.destroy(rep);
+}
+
+export fn exports_flix_runtime_runtime_value_destructor(rep: *exports_flix_runtime_runtime_value_t) void {
+    if (!is_wasm) return;
+    flix_handle_release(rep.flix_ctx, rep.handle);
+    rt_alloc.destroy(rep);
+}
+
+export fn exports_flix_runtime_runtime_suspension_destructor(rep: *exports_flix_runtime_runtime_suspension_t) void {
+    if (!is_wasm) return;
+    flix_handle_release(rep.flix_ctx, rep.susp_handle);
+    rt_alloc.destroy(rep);
+}
+
+export fn exports_flix_runtime_runtime_box_i32(ctx: exports_flix_runtime_runtime_borrow_ctx_t, x: i32) exports_flix_runtime_runtime_own_value_t {
+    if (!is_wasm) @panic("box-i32: wasm-only");
+    witSetCurrentCtx(ctx);
+
+    const h = makeHandleForI64(ctx.flix_ctx, @as(i64, x));
+    const rep = rt_alloc.create(exports_flix_runtime_runtime_value_t) catch @panic("oom");
+    rep.* = .{ .flix_ctx = ctx.flix_ctx, .handle = h };
+    return exports_flix_runtime_runtime_value_new(rep);
+}
+
+export fn exports_flix_runtime_runtime_unbox_i32(ctx: exports_flix_runtime_runtime_borrow_ctx_t, v: exports_flix_runtime_runtime_borrow_value_t) i32 {
+    _ = ctx;
+    const bits = flix_handle_payload(v.flix_ctx, v.handle);
+    return @intCast(@as(i32, @truncate(bits)));
+}
+
+export fn exports_flix_runtime_runtime_box_bool(ctx: exports_flix_runtime_runtime_borrow_ctx_t, b: bool) exports_flix_runtime_runtime_own_value_t {
+    if (!is_wasm) @panic("box-bool: wasm-only");
+    witSetCurrentCtx(ctx);
+
+    const h = makeHandleForI64(ctx.flix_ctx, if (b) 1 else 0);
+    const rep = rt_alloc.create(exports_flix_runtime_runtime_value_t) catch @panic("oom");
+    rep.* = .{ .flix_ctx = ctx.flix_ctx, .handle = h };
+    return exports_flix_runtime_runtime_value_new(rep);
+}
+
+export fn exports_flix_runtime_runtime_unbox_bool(ctx: exports_flix_runtime_runtime_borrow_ctx_t, v: exports_flix_runtime_runtime_borrow_value_t) bool {
+    _ = ctx;
+    const bits = flix_handle_payload(v.flix_ctx, v.handle);
+    return bits != 0;
+}
+
+export fn exports_flix_runtime_runtime_box_string(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: *flix_string_t) exports_flix_runtime_runtime_own_value_t {
+    if (!is_wasm) @panic("box-string: wasm-only");
+    witSetCurrentCtx(ctx);
+
+    const str_ptr = flixStringFromWit(s);
+    const h = makeHandleForPtr(ctx.flix_ctx, str_ptr);
+    const rep = rt_alloc.create(exports_flix_runtime_runtime_value_t) catch @panic("oom");
+    rep.* = .{ .flix_ctx = ctx.flix_ctx, .handle = h };
+    return exports_flix_runtime_runtime_value_new(rep);
+}
+
+export fn exports_flix_runtime_runtime_unbox_string(ctx: exports_flix_runtime_runtime_borrow_ctx_t, v: exports_flix_runtime_runtime_borrow_value_t, ret: *flix_string_t) void {
+    _ = ctx;
+    const bits = flix_handle_payload(v.flix_ctx, v.handle);
+    const str_ptr = ptrFromPayload(bits);
+    ret.* = witStringFromFlixString(str_ptr);
+}
+
+export fn exports_flix_runtime_runtime_start_task(ctx: exports_flix_runtime_runtime_borrow_ctx_t, def_id: exports_flix_runtime_runtime_def_id_t, args: *exports_flix_runtime_runtime_list_borrow_value_t) exports_flix_runtime_runtime_task_id_t {
+    if (!is_wasm) @panic("start-task: wasm-only");
+    witSetCurrentCtx(ctx);
+
+    const task_id = ctx.next_task_id;
+    ctx.next_task_id +%= 1;
+
+    var t: Task = .{
+        .def_id = @intCast(def_id),
+        .args = .{},
+        .state = .ReadyStart,
+        .region = current_region,
+    };
+    // Capture args (retain handles so they survive until task runs).
+    t.args.ensureTotalCapacity(rt_alloc, args.len) catch @panic("oom");
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const vrep = args.ptr[i];
+        flix_handle_retain(ctx.flix_ctx, vrep.handle);
+        t.args.appendAssumeCapacity(vrep.handle);
+    }
+
+    ctx.tasks.put(rt_alloc, task_id, t) catch @panic("oom");
+    taskQueuePush(ctx, task_id);
+    return task_id;
+}
+
+export fn exports_flix_runtime_runtime_sched_step(ctx: exports_flix_runtime_runtime_borrow_ctx_t, budget: u32, ret: *exports_flix_runtime_runtime_list_own_suspension_t) void {
+    if (!is_wasm) @panic("sched-step: wasm-only");
+    witSetCurrentCtx(ctx);
+
+    var out = std.ArrayListUnmanaged(exports_flix_runtime_runtime_own_suspension_t){};
+    defer out.deinit(rt_alloc);
+
+    var steps: u32 = 0;
+    while (steps < budget) : (steps += 1) {
+        const task_id = taskQueuePop(ctx) orelse break;
+        const tptr = ctx.tasks.getPtr(task_id) orelse continue;
+
+        // Skip tasks that are no longer runnable.
+        switch (tptr.state) {
+            .ReadyStart, .ReadyResumeOk, .ReadyResumeThrow => {},
+            else => continue,
+        }
+
+        if (runTaskOnce(ctx, task_id, tptr)) |s| {
+            out.append(rt_alloc, s) catch @panic("oom");
+        }
+    }
+
+    // Return as a malloc-owned array (freed by `cabi_post_*`).
+    const n: usize = out.items.len;
+    const mem_ptr = witAllocArray(exports_flix_runtime_runtime_own_suspension_t, n);
+    if (n > 0) {
+        std.mem.copyForwards(exports_flix_runtime_runtime_own_suspension_t, mem_ptr[0..n], out.items[0..n]);
+    }
+    ret.* = .{ .ptr = mem_ptr, .len = n };
+}
+
+export fn exports_flix_runtime_runtime_poll_task(ctx: exports_flix_runtime_runtime_borrow_ctx_t, task_id: exports_flix_runtime_runtime_task_id_t, ret: *exports_flix_runtime_runtime_task_outcome_t) bool {
+    if (!is_wasm) @panic("poll-task: wasm-only");
+    witSetCurrentCtx(ctx);
+
+    const tptr = ctx.tasks.getPtr(task_id) orelse return false;
+    switch (tptr.state) {
+        .Completed => |st| {
+            if (st.consumed) return false;
+
+            // Transfer ownership of the result handle into a value resource.
+            const vrep = rt_alloc.create(exports_flix_runtime_runtime_value_t) catch @panic("oom");
+            vrep.* = .{ .flix_ctx = ctx.flix_ctx, .handle = st.handle };
+            const own_v = exports_flix_runtime_runtime_value_new(vrep);
+
+            if (st.tag == 0) {
+                ret.* = .{ .tag = 0, .val = .{ .ok = own_v } };
+            } else {
+                ret.* = .{ .tag = 1, .val = .{ .thrown = own_v } };
+            }
+
+            // Remove task without releasing the transferred handle.
+            _ = ctx.tasks.remove(task_id);
+            return true;
+        },
+        else => return false,
+    }
+}
+
+export fn exports_flix_runtime_runtime_invoke(ctx: exports_flix_runtime_runtime_borrow_ctx_t, def_id: exports_flix_runtime_runtime_def_id_t, args: *exports_flix_runtime_runtime_list_borrow_value_t, ret: *exports_flix_runtime_runtime_exec_t) void {
+    if (!is_wasm) @panic("invoke: wasm-only");
+    witSetCurrentCtx(ctx);
+
+    // Run a single task step inline. If it suspends, materialize a pollable task-id.
+    const task_id = ctx.next_task_id;
+    ctx.next_task_id +%= 1;
+
+    var t: Task = .{
+        .def_id = @intCast(def_id),
+        .args = .{},
+        .state = .ReadyStart,
+        .region = current_region,
+    };
+    t.args.ensureTotalCapacity(rt_alloc, args.len) catch @panic("oom");
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const vrep = args.ptr[i];
+        flix_handle_retain(ctx.flix_ctx, vrep.handle);
+        t.args.appendAssumeCapacity(vrep.handle);
+    }
+
+    // Insert into task table only if we suspend.
+    if (runTaskOnce(ctx, task_id, &t)) |own_susp| {
+        ctx.tasks.put(rt_alloc, task_id, t) catch @panic("oom");
+        ret.* = .{
+            .tag = 2,
+            .val = .{ .suspended = .{ .task = task_id, .suspension = own_susp } },
+        };
+        return;
+    }
+
+    // Completed inline; return ok/thrown and drop the ephemeral task.
+    switch (t.state) {
+        .Completed => |st| {
+            const vrep = rt_alloc.create(exports_flix_runtime_runtime_value_t) catch @panic("oom");
+            vrep.* = .{ .flix_ctx = ctx.flix_ctx, .handle = st.handle };
+            const own_v = exports_flix_runtime_runtime_value_new(vrep);
+
+            if (st.tag == 0) {
+                ret.* = .{ .tag = 0, .val = .{ .ok = own_v } };
+            } else {
+                ret.* = .{ .tag = 1, .val = .{ .thrown = own_v } };
+            }
+        },
+        else => @panic("invoke: unexpected task state"),
+    }
+}
+
+export fn exports_flix_runtime_runtime_suspension_peek(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_borrow_suspension_t, ret: *exports_flix_runtime_runtime_suspension_info_t) void {
+    _ = ctx;
+    const susp_ptr = flix_handle_get(s.flix_ctx, s.susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    ret.* = .{ .eff_id = @intCast(slots[0]), .op_id = @intCast(slots[1]) };
+}
+
+export fn exports_flix_runtime_runtime_suspension_request(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_borrow_suspension_t, ret: *exports_flix_runtime_runtime_op_request_t) void {
+    _ = ctx;
+    const susp_ptr = flix_handle_get(s.flix_ctx, s.susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    const eff_sym: i64 = slots[0];
+    const op_index: i64 = slots[1];
+
+    if (eff_sym != WasmIoEffSymId or op_index <= 0) {
+        ret.* = witReqUnknown(eff_sym, op_index);
+        return;
+    }
+
+    const op: usize = @intCast(op_index);
+    const arg_count: usize = @intCast(slots[4]);
+    const args_ptr: [*]const i64 = slots + 5;
+
+    switch (op) {
+        1 => { // timer-sleep
+            const ms: u64 = @intCast(args_ptr[0]);
+            ret.* = .{ .tag = 0, .val = .{ .timer_sleep = .{ .ms = ms } } };
+        },
+        2 => { // http-request
+            if (arg_count != 5) {
+                ret.* = witReqUnknown(eff_sym, op_index);
+                return;
+            }
+            const method_ptr = ptrFromPayload(args_ptr[0]);
+            const url_ptr = ptrFromPayload(args_ptr[1]);
+            const headers_arr_ptr = ptrFromPayload(args_ptr[2]);
+            const has_body = args_ptr[3] != 0;
+            const body_ptr = ptrFromPayload(args_ptr[4]);
+
+            const headers = witBuildHeadersFromPairs(headers_arr_ptr);
+            const body_opt = if (has_body) witOptionStringSomeFromFlixString(body_ptr) else witOptionStringNone();
+
+            ret.* = .{
+                .tag = 1,
+                .val = .{
+                    .http_request = .{
+                        .method = witStringFromFlixString(method_ptr),
+                        .url = witStringFromFlixString(url_ptr),
+                        .headers = headers,
+                        .body = body_opt,
+                    },
+                },
+            };
+        },
+
+        3, 4, 5, 6, 7, 8, 9, // file predicates
+        10, 11, 12, 13, // file time/size
+        14, // file-read
+        22, 23, 24, // truncate/mkdir/mkdirs
+        => {
+            if (arg_count != 1) {
+                ret.* = witReqUnknown(eff_sym, op_index);
+                return;
+            }
+            const path_ptr = ptrFromPayload(args_ptr[0]);
+            const path = witStringFromFlixString(path_ptr);
+
+            const tag: u8 = @intCast(op - 1);
+            // Map to the corresponding request record.
+            switch (tag) {
+                2 => ret.* = .{ .tag = tag, .val = .{ .file_exists = .{ .path = path } } },
+                3 => ret.* = .{ .tag = tag, .val = .{ .file_is_directory = .{ .path = path } } },
+                4 => ret.* = .{ .tag = tag, .val = .{ .file_is_regular_file = .{ .path = path } } },
+                5 => ret.* = .{ .tag = tag, .val = .{ .file_is_readable = .{ .path = path } } },
+                6 => ret.* = .{ .tag = tag, .val = .{ .file_is_symbolic_link = .{ .path = path } } },
+                7 => ret.* = .{ .tag = tag, .val = .{ .file_is_writable = .{ .path = path } } },
+                8 => ret.* = .{ .tag = tag, .val = .{ .file_is_executable = .{ .path = path } } },
+                9 => ret.* = .{ .tag = tag, .val = .{ .file_access_time = .{ .path = path } } },
+                10 => ret.* = .{ .tag = tag, .val = .{ .file_creation_time = .{ .path = path } } },
+                11 => ret.* = .{ .tag = tag, .val = .{ .file_modification_time = .{ .path = path } } },
+                12 => ret.* = .{ .tag = tag, .val = .{ .file_size = .{ .path = path } } },
+                13 => ret.* = .{ .tag = tag, .val = .{ .file_read = .{ .path = path } } },
+                21 => ret.* = .{ .tag = tag, .val = .{ .file_truncate = .{ .path = path } } },
+                22 => ret.* = .{ .tag = tag, .val = .{ .file_mkdir = .{ .path = path } } },
+                23 => ret.* = .{ .tag = tag, .val = .{ .file_mkdirs = .{ .path = path } } },
+                else => ret.* = witReqUnknown(eff_sym, op_index),
+            }
+        },
+
+        15, 16, 17 => { // file-read-lines, file-read-bytes, file-list
+            if (arg_count != 2) {
+                ret.* = witReqUnknown(eff_sym, op_index);
+                return;
+            }
+            const path_ptr = ptrFromPayload(args_ptr[1]);
+            const path = witStringFromFlixString(path_ptr);
+            const tag: u8 = @intCast(op - 1);
+            switch (tag) {
+                14 => ret.* = .{ .tag = tag, .val = .{ .file_read_lines = .{ .path = path } } },
+                15 => ret.* = .{ .tag = tag, .val = .{ .file_read_bytes = .{ .path = path } } },
+                16 => ret.* = .{ .tag = tag, .val = .{ .file_list = .{ .path = path } } },
+                else => ret.* = witReqUnknown(eff_sym, op_index),
+            }
+        },
+
+        18, 20 => { // file-write, file-append
+            if (arg_count != 2) {
+                ret.* = witReqUnknown(eff_sym, op_index);
+                return;
+            }
+            const data_ptr = ptrFromPayload(args_ptr[0]);
+            const path_ptr = ptrFromPayload(args_ptr[1]);
+            const tag: u8 = @intCast(op - 1);
+            if (tag == 17) {
+                ret.* = .{ .tag = tag, .val = .{ .file_write = .{ .path = witStringFromFlixString(path_ptr), .data = witStringFromFlixString(data_ptr) } } };
+            } else {
+                ret.* = .{ .tag = tag, .val = .{ .file_append = .{ .path = witStringFromFlixString(path_ptr), .data = witStringFromFlixString(data_ptr) } } };
+            }
+        },
+
+        19, 21 => { // file-write-bytes, file-append-bytes
+            if (arg_count != 2) {
+                ret.* = witReqUnknown(eff_sym, op_index);
+                return;
+            }
+            const bytes_arr_ptr = ptrFromPayload(args_ptr[0]);
+            const path_ptr = ptrFromPayload(args_ptr[1]);
+            const bytes = flixInt8ArrayBytesView(bytes_arr_ptr);
+            const list_bytes = witBytesToOwned(bytes);
+            const tag: u8 = @intCast(op - 1);
+            if (tag == 18) {
+                ret.* = .{ .tag = tag, .val = .{ .file_write_bytes = .{ .path = witStringFromFlixString(path_ptr), .bytes = list_bytes } } };
+            } else {
+                ret.* = .{ .tag = tag, .val = .{ .file_append_bytes = .{ .path = witStringFromFlixString(path_ptr), .bytes = list_bytes } } };
+            }
+        },
+
+        25 => { // file-mk-temp-dir
+            if (arg_count != 1) {
+                ret.* = witReqUnknown(eff_sym, op_index);
+                return;
+            }
+            const prefix_ptr = ptrFromPayload(args_ptr[0]);
+            ret.* = .{ .tag = 24, .val = .{ .file_mk_temp_dir = .{ .prefix = witStringFromFlixString(prefix_ptr) } } };
+        },
+
+        26 => { // process-exec
+            if (arg_count != 4) {
+                ret.* = witReqUnknown(eff_sym, op_index);
+                return;
+            }
+
+            const argv_ptr = ptrFromPayload(args_ptr[0]);
+            const has_cwd = args_ptr[1] != 0;
+            const cwd_ptr = ptrFromPayload(args_ptr[2]);
+            const env_pairs_ptr = ptrFromPayload(args_ptr[3]);
+
+            const argv = witBuildStringListFromFlixStringArray(argv_ptr);
+            const cwd = if (has_cwd) witOptionStringSomeFromFlixString(cwd_ptr) else witOptionStringNone();
+            const env = witBuildEnvListFromPairs(env_pairs_ptr);
+
+            ret.* = .{ .tag = 25, .val = .{ .process_exec = .{ .argv = argv, .cwd = cwd, .env = env } } };
+        },
+
+        27, 28, 29, 30, 31, 36 => { // process-id unary ops (exit/is-alive/pid/stop/wait-for/release)
+            if (arg_count != 1) {
+                ret.* = witReqUnknown(eff_sym, op_index);
+                return;
+            }
+            const pid: u64 = @intCast(args_ptr[0]);
+            const tag: u8 = @intCast(op - 1);
+            switch (tag) {
+                26 => ret.* = .{ .tag = tag, .val = .{ .process_exit_value = .{ .process_id = pid } } },
+                27 => ret.* = .{ .tag = tag, .val = .{ .process_is_alive = .{ .process_id = pid } } },
+                28 => ret.* = .{ .tag = tag, .val = .{ .process_pid = .{ .process_id = pid } } },
+                29 => ret.* = .{ .tag = tag, .val = .{ .process_stop = .{ .process_id = pid } } },
+                30 => ret.* = .{ .tag = tag, .val = .{ .process_wait_for = .{ .process_id = pid } } },
+                35 => ret.* = .{ .tag = tag, .val = .{ .process_release = .{ .process_id = pid } } },
+                else => ret.* = witReqUnknown(eff_sym, op_index),
+            }
+        },
+
+        32 => { // process-wait-for-timeout
+            if (arg_count != 2) {
+                ret.* = witReqUnknown(eff_sym, op_index);
+                return;
+            }
+            const pid: u64 = @intCast(args_ptr[0]);
+            const timeout_ms: i64 = args_ptr[1];
+            ret.* = .{ .tag = 31, .val = .{ .process_wait_for_timeout = .{ .process_id = pid, .timeout_ms = timeout_ms } } };
+        },
+
+        33 => { // process-stdin-write
+            if (arg_count != 2) {
+                ret.* = witReqUnknown(eff_sym, op_index);
+                return;
+            }
+            const pid: u64 = @intCast(args_ptr[0]);
+            const buf_ptr = ptrFromPayload(args_ptr[1]);
+            const bytes = flixInt8ArrayBytesView(buf_ptr);
+            ret.* = .{ .tag = 32, .val = .{ .process_stdin_write = .{ .process_id = pid, .bytes = witBytesToOwned(bytes) } } };
+        },
+
+        34, 35 => { // stdout-read / stderr-read
+            if (arg_count != 2) {
+                ret.* = witReqUnknown(eff_sym, op_index);
+                return;
+            }
+            const pid: u64 = @intCast(args_ptr[0]);
+            const buf_ptr = ptrFromPayload(args_ptr[1]);
+            const cap: usize = flixArrayLen(buf_ptr);
+            const max_bytes: u32 = if (cap > std.math.maxInt(u32)) std.math.maxInt(u32) else @intCast(cap);
+            const tag: u8 = @intCast(op - 1);
+            if (tag == 33) {
+                ret.* = .{ .tag = tag, .val = .{ .process_stdout_read = .{ .process_id = pid, .max_bytes = max_bytes } } };
+            } else {
+                ret.* = .{ .tag = tag, .val = .{ .process_stderr_read = .{ .process_id = pid, .max_bytes = max_bytes } } };
+            }
+        },
+
+        37, 41 => { // tcp-socket-connect / tcp-server-bind
+            if (arg_count != 2) {
+                ret.* = witReqUnknown(eff_sym, op_index);
+                return;
+            }
+            const ip_arr_ptr = ptrFromPayload(args_ptr[0]);
+            const port_i32: i32 = @intCast(@as(i32, @truncate(args_ptr[1])));
+            const port_u16 = parsePortOrInvalid(port_i32) orelse 0;
+            const ip_bytes = flixInt8ArrayBytesView(ip_arr_ptr);
+            const ip_list = witBytesToOwned(ip_bytes);
+            const tag: u8 = @intCast(op - 1);
+            if (tag == 36) {
+                ret.* = .{ .tag = tag, .val = .{ .tcp_socket_connect = .{ .ip = ip_list, .port = port_u16 } } };
+            } else {
+                ret.* = .{ .tag = tag, .val = .{ .tcp_server_bind = .{ .ip = ip_list, .port = port_u16 } } };
+            }
+        },
+
+        38 => { // tcp-socket-read
+            if (arg_count != 2) {
+                ret.* = witReqUnknown(eff_sym, op_index);
+                return;
+            }
+            const sock_id: u64 = @intCast(args_ptr[0]);
+            const buf_ptr = ptrFromPayload(args_ptr[1]);
+            const cap: usize = flixArrayLen(buf_ptr);
+            const max_bytes: u32 = if (cap > std.math.maxInt(u32)) std.math.maxInt(u32) else @intCast(cap);
+            ret.* = .{ .tag = 37, .val = .{ .tcp_socket_read = .{ .socket_id = sock_id, .max_bytes = max_bytes } } };
+        },
+
+        39 => { // tcp-socket-write
+            if (arg_count != 2) {
+                ret.* = witReqUnknown(eff_sym, op_index);
+                return;
+            }
+            const sock_id: u64 = @intCast(args_ptr[0]);
+            const buf_ptr = ptrFromPayload(args_ptr[1]);
+            const bytes = flixInt8ArrayBytesView(buf_ptr);
+            ret.* = .{ .tag = 38, .val = .{ .tcp_socket_write = .{ .socket_id = sock_id, .bytes = witBytesToOwned(bytes) } } };
+        },
+
+        40 => { // tcp-socket-close
+            if (arg_count != 1) {
+                ret.* = witReqUnknown(eff_sym, op_index);
+                return;
+            }
+            const sock_id: u64 = @intCast(args_ptr[0]);
+            ret.* = .{ .tag = 39, .val = .{ .tcp_socket_close = .{ .socket_id = sock_id } } };
+        },
+
+        42, 43, 44 => { // tcp-server-accept / local-port / close
+            if (arg_count != 1) {
+                ret.* = witReqUnknown(eff_sym, op_index);
+                return;
+            }
+            const server_id: u64 = @intCast(args_ptr[0]);
+            const tag: u8 = @intCast(op - 1);
+            switch (tag) {
+                41 => ret.* = .{ .tag = tag, .val = .{ .tcp_server_accept = .{ .server_id = server_id } } },
+                42 => ret.* = .{ .tag = tag, .val = .{ .tcp_server_local_port = .{ .server_id = server_id } } },
+                43 => ret.* = .{ .tag = tag, .val = .{ .tcp_server_close = .{ .server_id = server_id } } },
+                else => ret.* = witReqUnknown(eff_sym, op_index),
+            }
+        },
+
+        else => ret.* = witReqUnknown(eff_sym, op_index),
+    }
+}
+
+export fn exports_flix_runtime_runtime_resume_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, v: exports_flix_runtime_runtime_borrow_value_t) void {
+    if (!is_wasm) @panic("resume-ok: wasm-only");
+    // Resume payload is the *Flix value bits* stored in the handle.
+    const bits = flix_handle_payload(v.flix_ctx, v.handle);
+    const resume_handle = makeHandleForI64(ctx.flix_ctx, bits);
+    resumeTaskWithHandle(ctx, s, resume_handle, false);
+}
+
+export fn exports_flix_runtime_runtime_resume_throw(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, e: exports_flix_runtime_runtime_borrow_value_t) void {
+    if (!is_wasm) @panic("resume-throw: wasm-only");
+    // Throw payload is expected to be an exception value handle; pass the handle through.
+    flix_handle_retain(ctx.flix_ctx, e.handle);
+    resumeTaskWithHandle(ctx, s, e.handle, true);
+}
+
+export fn exports_flix_runtime_runtime_resume_timer_sleep(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t) void {
+    if (!is_wasm) @panic("resume-timer-sleep: wasm-only");
+    const h = makeHandleForI64(ctx.flix_ctx, 0); // Unit
+    resumeTaskWithHandle(ctx, s, h, false);
+}
+
+// --- typed resumers (portable IO primops) ---
+
+fn resumeIoOkTuple4Bool(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, ok: bool, x: i64, kind: i64, msg: *anyopaque) void {
+    const tup_ptr = makeIoTuple4Bool(ok, x, kind, msg);
+    const h = makeHandleForPtr(ctx.flix_ctx, tup_ptr);
+    resumeTaskWithHandle(ctx, s, h, false);
+}
+
+fn resumeIoOkTuple4Ptr(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, ok: bool, x_ptr: *anyopaque, kind: i64, msg: *anyopaque) void {
+    const tup_ptr = makeIoTuple4Ptr(ok, x_ptr, kind, msg);
+    const h = makeHandleForPtr(ctx.flix_ctx, tup_ptr);
+    resumeTaskWithHandle(ctx, s, h, false);
+}
+
+fn resumeIoOkTuple3(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, ok: bool, x: i64, msg: *anyopaque) void {
+    const tup_ptr = makeIoTuple3Bool(ok, x, msg);
+    const h = makeHandleForPtr(ctx.flix_ctx, tup_ptr);
+    resumeTaskWithHandle(ctx, s, h, false);
+}
+
+fn resumeIoOkTuple2(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, ok: bool, msg: *anyopaque) void {
+    const tup_ptr = makeIoTuple2(ok, msg);
+    const h = makeHandleForPtr(ctx.flix_ctx, tup_ptr);
+    resumeTaskWithHandle(ctx, s, h, false);
+}
+
+fn ioMsgFromWit(err: *const exports_flix_runtime_runtime_io_error_t) *anyopaque {
+    return flixStringFromWit(&err.msg);
+}
+
+export fn exports_flix_runtime_runtime_resume_http_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, resp: *exports_flix_runtime_runtime_http_response_t) void {
+    if (!is_wasm) @panic("resume-http-ok: wasm-only");
+
+    // Allocate in the task's current region (if any).
+    const srep = exports_flix_runtime_runtime_suspension_rep(s);
+    const task_ptr = ctx.tasks.getPtr(srep.task_id) orelse @panic("unknown task");
+    const saved = current_region;
+    current_region = task_ptr.region;
+    defer current_region = saved;
+
+    const region_ptr0: ?*anyopaque = if (current_region) |r| @ptrCast(r) else null;
+
+    // Flatten headers into alternating key/value strings.
+    const n: usize = resp.headers.len;
+    const kv_count: usize = n * 2;
+    var kv = std.ArrayListUnmanaged(*anyopaque){};
+    defer kv.deinit(rt_alloc);
+    kv.ensureTotalCapacity(rt_alloc, kv_count) catch @panic("oom");
+
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const h = resp.headers.ptr[i];
+        kv.appendAssumeCapacity(flixStringFromWit(&h.name));
+        kv.appendAssumeCapacity(flixStringFromWit(&h.value));
+    }
+
+    const resp_pairs_ptr = allocFlixArrayFromPtrPayloadsInRegion(ctx.flix_ctx, region_ptr0, kv.items);
+    const resp_body_ptr = flixStringFromWit(&resp.body);
+    const msg_ptr = allocFlixStringFromAscii("");
+    const tup_ptr = makeHttpTuple(true, @intCast(resp.status), resp_pairs_ptr, resp_body_ptr, 14, msg_ptr);
+
+    const h = makeHandleForPtr(ctx.flix_ctx, tup_ptr);
+    resumeTaskWithHandle(ctx, s, h, false);
+}
+
+export fn exports_flix_runtime_runtime_resume_http_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    if (!is_wasm) @panic("resume-http-err: wasm-only");
+
+    const srep = exports_flix_runtime_runtime_suspension_rep(s);
+    const task_ptr = ctx.tasks.getPtr(srep.task_id) orelse @panic("unknown task");
+    const saved = current_region;
+    current_region = task_ptr.region;
+    defer current_region = saved;
+
+    const region_ptr0: ?*anyopaque = if (current_region) |r| @ptrCast(r) else null;
+    const empty_pairs = allocFlixArrayFromPtrPayloadsInRegion(ctx.flix_ctx, region_ptr0, &[_]*anyopaque{});
+    const empty_body = allocFlixStringFromAscii("");
+    const msg_ptr = ioMsgFromWit(err_);
+    const tup_ptr = makeHttpTuple(false, 0, empty_pairs, empty_body, err_.kind_code, msg_ptr);
+
+    const h = makeHandleForPtr(ctx.flix_ctx, tup_ptr);
+    resumeTaskWithHandle(ctx, s, h, false);
+}
+
+export fn exports_flix_runtime_runtime_resume_file_exists_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, exists: bool) void {
+    resumeIoOkTuple4Bool(ctx, s, true, payloadFromBool(exists), 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_exists_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, payloadFromBool(false), err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_is_directory_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, is_directory: bool) void {
+    resumeIoOkTuple4Bool(ctx, s, true, payloadFromBool(is_directory), 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_is_directory_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, payloadFromBool(false), err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_is_regular_file_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, is_regular_file: bool) void {
+    resumeIoOkTuple4Bool(ctx, s, true, payloadFromBool(is_regular_file), 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_is_regular_file_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, payloadFromBool(false), err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_is_readable_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, is_readable: bool) void {
+    resumeIoOkTuple4Bool(ctx, s, true, payloadFromBool(is_readable), 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_is_readable_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, payloadFromBool(false), err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_is_symbolic_link_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, is_symbolic_link: bool) void {
+    resumeIoOkTuple4Bool(ctx, s, true, payloadFromBool(is_symbolic_link), 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_is_symbolic_link_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, payloadFromBool(false), err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_is_writable_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, is_writable: bool) void {
+    resumeIoOkTuple4Bool(ctx, s, true, payloadFromBool(is_writable), 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_is_writable_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, payloadFromBool(false), err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_is_executable_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, is_executable: bool) void {
+    resumeIoOkTuple4Bool(ctx, s, true, payloadFromBool(is_executable), 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_is_executable_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, payloadFromBool(false), err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_access_time_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, ms: i64) void {
+    resumeIoOkTuple4Bool(ctx, s, true, ms, 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_access_time_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, 0, err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_creation_time_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, ms: i64) void {
+    resumeIoOkTuple4Bool(ctx, s, true, ms, 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_creation_time_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, 0, err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_modification_time_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, ms: i64) void {
+    resumeIoOkTuple4Bool(ctx, s, true, ms, 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_modification_time_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, 0, err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_size_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, bytes: i64) void {
+    resumeIoOkTuple4Bool(ctx, s, true, bytes, 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_size_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, 0, err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_read_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, data: *flix_string_t) void {
+    const str_ptr = flixStringFromWit(data);
+    resumeIoOkTuple4Ptr(ctx, s, true, str_ptr, 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_read_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    const empty = allocFlixStringFromAscii("");
+    resumeIoOkTuple4Ptr(ctx, s, false, empty, err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_read_lines_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, lines: *flix_list_string_t) void {
+    if (!is_wasm) @panic("resume-file-read-lines-ok: wasm-only");
+    const srep = exports_flix_runtime_runtime_suspension_rep(s);
+    const susp_ptr = flix_handle_get(ctx.flix_ctx, srep.susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    const region_ptr0 = ptrFromPayload(slots[5]); // arg0 = region
+
+    var ptrs = std.ArrayListUnmanaged(*anyopaque){};
+    defer ptrs.deinit(rt_alloc);
+    ptrs.ensureTotalCapacity(rt_alloc, lines.len) catch @panic("oom");
+
+    var i: usize = 0;
+    while (i < lines.len) : (i += 1) {
+        ptrs.appendAssumeCapacity(flixStringFromWit(&lines.ptr[i]));
+    }
+
+    const arr_ptr = allocFlixArrayFromPtrPayloadsInRegion(ctx.flix_ctx, region_ptr0, ptrs.items);
+    resumeIoOkTuple4Ptr(ctx, s, true, arr_ptr, 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_read_lines_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    // Use the region argument to allocate an empty array.
+    const srep = exports_flix_runtime_runtime_suspension_rep(s);
+    const susp_ptr = flix_handle_get(ctx.flix_ctx, srep.susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    const region_ptr0 = ptrFromPayload(slots[5]);
+    const empty = allocFlixArrayFromPtrPayloadsInRegion(ctx.flix_ctx, region_ptr0, &[_]*anyopaque{});
+    resumeIoOkTuple4Ptr(ctx, s, false, empty, err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_read_bytes_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, bytes: *flix_list_u8_t) void {
+    const srep = exports_flix_runtime_runtime_suspension_rep(s);
+    const susp_ptr = flix_handle_get(ctx.flix_ctx, srep.susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    const region_ptr0 = ptrFromPayload(slots[5]);
+
+    const slice = bytes.ptr[0..bytes.len];
+    const arr_ptr = allocFlixInt8ArrayFromBytesInRegion(ctx.flix_ctx, region_ptr0, slice);
+    resumeIoOkTuple4Ptr(ctx, s, true, arr_ptr, 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_read_bytes_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    const srep = exports_flix_runtime_runtime_suspension_rep(s);
+    const susp_ptr = flix_handle_get(ctx.flix_ctx, srep.susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    const region_ptr0 = ptrFromPayload(slots[5]);
+    const empty = allocFlixInt8ArrayFromBytesInRegion(ctx.flix_ctx, region_ptr0, &.{});
+    resumeIoOkTuple4Ptr(ctx, s, false, empty, err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_list_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, names: *flix_list_string_t) void {
+    const srep = exports_flix_runtime_runtime_suspension_rep(s);
+    const susp_ptr = flix_handle_get(ctx.flix_ctx, srep.susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    const region_ptr0 = ptrFromPayload(slots[5]);
+
+    var ptrs = std.ArrayListUnmanaged(*anyopaque){};
+    defer ptrs.deinit(rt_alloc);
+    ptrs.ensureTotalCapacity(rt_alloc, names.len) catch @panic("oom");
+
+    var i: usize = 0;
+    while (i < names.len) : (i += 1) {
+        ptrs.appendAssumeCapacity(flixStringFromWit(&names.ptr[i]));
+    }
+
+    const arr_ptr = allocFlixArrayFromPtrPayloadsInRegion(ctx.flix_ctx, region_ptr0, ptrs.items);
+    resumeIoOkTuple4Ptr(ctx, s, true, arr_ptr, 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_list_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    const srep = exports_flix_runtime_runtime_suspension_rep(s);
+    const susp_ptr = flix_handle_get(ctx.flix_ctx, srep.susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    const region_ptr0 = ptrFromPayload(slots[5]);
+    const empty = allocFlixArrayFromPtrPayloadsInRegion(ctx.flix_ctx, region_ptr0, &[_]*anyopaque{});
+    resumeIoOkTuple4Ptr(ctx, s, false, empty, err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_write_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t) void {
+    resumeIoOkTuple4Bool(ctx, s, true, 0, 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_write_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, 0, err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_write_bytes_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t) void {
+    resumeIoOkTuple4Bool(ctx, s, true, 0, 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_write_bytes_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, 0, err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_append_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t) void {
+    resumeIoOkTuple4Bool(ctx, s, true, 0, 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_append_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, 0, err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_append_bytes_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t) void {
+    resumeIoOkTuple4Bool(ctx, s, true, 0, 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_append_bytes_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, 0, err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_truncate_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t) void {
+    resumeIoOkTuple4Bool(ctx, s, true, 0, 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_truncate_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, 0, err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_mkdir_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t) void {
+    resumeIoOkTuple4Bool(ctx, s, true, 0, 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_mkdir_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, 0, err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_mkdirs_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t) void {
+    resumeIoOkTuple4Bool(ctx, s, true, 0, 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_mkdirs_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, 0, err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_mk_temp_dir_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, path: *flix_string_t) void {
+    const str_ptr = flixStringFromWit(path);
+    resumeIoOkTuple4Ptr(ctx, s, true, str_ptr, 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_file_mk_temp_dir_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    const empty = allocFlixStringFromAscii("");
+    resumeIoOkTuple4Ptr(ctx, s, false, empty, err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_process_exec_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, process_id: u64) void {
+    resumeIoOkTuple4Bool(ctx, s, true, @intCast(process_id), 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_process_exec_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, 0, err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_process_exit_value_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, code: i32) void {
+    resumeIoOkTuple4Bool(ctx, s, true, @intCast(code), 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_process_exit_value_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, 0, err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_process_is_alive_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, is_alive: bool) void {
+    resumeIoOkTuple4Bool(ctx, s, true, payloadFromBool(is_alive), 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_process_is_alive_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, payloadFromBool(false), err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_process_pid_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, pid: i64) void {
+    resumeIoOkTuple4Bool(ctx, s, true, pid, 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_process_pid_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, 0, err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_process_stop_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t) void {
+    resumeIoOkTuple4Bool(ctx, s, true, 0, 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_process_stop_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, 0, err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_process_wait_for_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, code: i32) void {
+    resumeIoOkTuple4Bool(ctx, s, true, @intCast(code), 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_process_wait_for_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, 0, err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_process_wait_for_timeout_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, finished: bool) void {
+    resumeIoOkTuple4Bool(ctx, s, true, payloadFromBool(finished), 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_process_wait_for_timeout_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, payloadFromBool(false), err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_process_stdin_write_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t) void {
+    const srep = exports_flix_runtime_runtime_suspension_rep(s);
+    const susp_ptr = flix_handle_get(ctx.flix_ctx, srep.susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    const buf_ptr = ptrFromPayload(slots[6]); // arg1 = buffer
+    const n: i64 = @intCast(flixArrayLen(buf_ptr));
+    resumeIoOkTuple3(ctx, s, true, n, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_process_stdin_write_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple3(ctx, s, false, 0, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_process_stdout_read_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, bytes: *flix_list_u8_t) void {
+    const srep = exports_flix_runtime_runtime_suspension_rep(s);
+    const susp_ptr = flix_handle_get(ctx.flix_ctx, srep.susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    const buf_ptr = ptrFromPayload(slots[6]); // arg1 = buffer
+
+    const slice = bytes.ptr[0..bytes.len];
+    flixWriteBytesToInt8Array(buf_ptr, slice);
+    const n: i64 = @intCast(@min(bytes.len, flixArrayLen(buf_ptr)));
+    resumeIoOkTuple3(ctx, s, true, n, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_process_stdout_read_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple3(ctx, s, false, 0, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_process_stderr_read_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, bytes: *flix_list_u8_t) void {
+    const srep = exports_flix_runtime_runtime_suspension_rep(s);
+    const susp_ptr = flix_handle_get(ctx.flix_ctx, srep.susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    const buf_ptr = ptrFromPayload(slots[6]); // arg1 = buffer
+
+    const slice = bytes.ptr[0..bytes.len];
+    flixWriteBytesToInt8Array(buf_ptr, slice);
+    const n: i64 = @intCast(@min(bytes.len, flixArrayLen(buf_ptr)));
+    resumeIoOkTuple3(ctx, s, true, n, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_process_stderr_read_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple3(ctx, s, false, 0, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_process_release_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t) void {
+    resumeIoOkTuple2(ctx, s, true, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_process_release_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    // Best-effort: map to (false, msg).
+    resumeIoOkTuple2(ctx, s, false, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_tcp_socket_connect_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, socket_id: u64) void {
+    resumeIoOkTuple4Bool(ctx, s, true, @intCast(socket_id), 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_tcp_socket_connect_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, 0, err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_tcp_socket_read_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, bytes: *flix_list_u8_t) void {
+    const srep = exports_flix_runtime_runtime_suspension_rep(s);
+    const susp_ptr = flix_handle_get(ctx.flix_ctx, srep.susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    const buf_ptr = ptrFromPayload(slots[6]); // arg1 = buffer
+
+    const slice = bytes.ptr[0..bytes.len];
+    flixWriteBytesToInt8Array(buf_ptr, slice);
+    const n: i64 = @intCast(@min(bytes.len, flixArrayLen(buf_ptr)));
+    resumeIoOkTuple3(ctx, s, true, n, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_tcp_socket_read_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple3(ctx, s, false, 0, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_tcp_socket_write_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t) void {
+    const srep = exports_flix_runtime_runtime_suspension_rep(s);
+    const susp_ptr = flix_handle_get(ctx.flix_ctx, srep.susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    const buf_ptr = ptrFromPayload(slots[6]);
+    const n: i64 = @intCast(flixArrayLen(buf_ptr));
+    resumeIoOkTuple3(ctx, s, true, n, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_tcp_socket_write_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple3(ctx, s, false, 0, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_tcp_socket_close_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t) void {
+    resumeIoOkTuple2(ctx, s, true, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_tcp_socket_close_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple2(ctx, s, false, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_tcp_server_bind_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, server_id: u64) void {
+    resumeIoOkTuple4Bool(ctx, s, true, @intCast(server_id), 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_tcp_server_bind_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, 0, err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_tcp_server_accept_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, socket_id: u64) void {
+    resumeIoOkTuple4Bool(ctx, s, true, @intCast(socket_id), 14, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_tcp_server_accept_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple4Bool(ctx, s, false, 0, err_.kind_code, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_tcp_server_local_port_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, port: u16) void {
+    resumeIoOkTuple3(ctx, s, true, @intCast(port), allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_tcp_server_local_port_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple3(ctx, s, false, 0, ioMsgFromWit(err_));
+}
+
+export fn exports_flix_runtime_runtime_resume_tcp_server_close_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t) void {
+    resumeIoOkTuple2(ctx, s, true, allocFlixStringFromAscii(""));
+}
+
+export fn exports_flix_runtime_runtime_resume_tcp_server_close_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
+    resumeIoOkTuple2(ctx, s, false, ioMsgFromWit(err_));
 }

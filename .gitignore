@@ -27,3 +27,7 @@ crash_report_*.txt
 **/personal/**
 vendor
 .zig-cache
+
+# wasm smoke harness outputs
+tools/wasm-smoke/out
+tools/wasm-smoke/browser-out

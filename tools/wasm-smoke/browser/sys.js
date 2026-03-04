@@ -1,0 +1,58 @@
+// Host implementation for the WIT interface `flix:sys/sys@0.1.0`.
+//
+// This is used by `jco transpile` output via an import map rewrite.
+//
+// Design goals:
+// - Work in both Node and browsers (no Node-only APIs).
+// - Stay minimal; this is a smoke harness, not a real host runtime.
+
+export function log(level, msg) {
+  // `level` is a WIT enum lifted as a string, e.g. "info".
+  console.log(`[guest:${level}] ${msg}`);
+}
+
+export function timeNowMs() {
+  // WIT expects `s64`, lifted as JS BigInt by jco.
+  return BigInt(Date.now());
+}
+
+export function randomBytes(len) {
+  const bytes = new Uint8Array(len);
+
+  // Prefer WebCrypto if available.
+  const cryptoObj = globalThis.crypto;
+  if (cryptoObj?.getRandomValues) {
+    cryptoObj.getRandomValues(bytes);
+    return bytes;
+  }
+
+  // Deterministic fallback (not cryptographic).
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = (i * 31) & 0xff;
+  }
+  return bytes;
+}
+
+export function hasCapability(cap) {
+  // `cap` is a WIT enum lifted as a string (e.g. "http").
+  //
+  // This file is used by the JS smoke harness and should stay conservative:
+  // - Only claim a capability if the JS host environment can plausibly implement it.
+  // - The portable stdlib should still treat capabilities as optional.
+  const isNode = typeof process !== "undefined" && !!process.versions?.node;
+
+  switch (cap) {
+    case "http":
+      return typeof globalThis.fetch === "function";
+    case "filesystem":
+      return isNode || typeof navigator?.storage?.getDirectory === "function";
+    case "sockets":
+    case "process":
+      return isNode;
+    case "threads":
+      // Best-effort. Browser threads require COOP/COEP (crossOriginIsolated).
+      return isNode || (globalThis.crossOriginIsolated === true && typeof globalThis.SharedArrayBuffer !== "undefined");
+    default:
+      return false;
+  }
+}

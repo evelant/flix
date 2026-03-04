@@ -84,7 +84,7 @@ object LoweredAst {
       def purity: Purity = Pure
     }
 
-    case class ApplyAtomic(op: AtomicOp, exps: List[Expr], tpe: SimpleType, purity: Purity, loc: SourceLocation) extends Expr
+    case class ApplyAtomic(op: AtomicOp, exps: List[Expr], pcPointId: Int, tpe: SimpleType, purity: Purity, loc: SourceLocation) extends Expr
 
     case class ApplyClo(exp1: Expr, exp2: Expr, ct: ExpPosition, pcPointId: Int, tpe: SimpleType, purity: Purity, loc: SourceLocation) extends Expr
 

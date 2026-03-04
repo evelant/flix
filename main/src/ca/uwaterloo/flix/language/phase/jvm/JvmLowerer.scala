@@ -136,7 +136,10 @@ object JvmLowerer {
         val offset = getVarSymReadOffset(sym)
         JvmAst.Expr.Var(sym, offset, tpe, loc)
 
-      case LoweredAst.Expr.ApplyAtomic(op, exps, tpe, purity, loc) =>
+      case LoweredAst.Expr.ApplyAtomic(op, exps, pcPointId, tpe, purity, loc) =>
+        if (pcPointId != 0) {
+          throw InternalCompilerException(s"Unexpected pcPointId in ApplyAtomic: $pcPointId.", loc)
+        }
         val es = exps.map(visitExpr)
         JvmAst.Expr.ApplyAtomic(op, es, tpe, purity, loc)
 

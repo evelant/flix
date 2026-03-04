@@ -189,7 +189,9 @@ object LlvmBackend {
         Decl.DeclareFun(Type.I64, "flix_channel_get", List(Type.Ptr)),
         Decl.DeclareFun(Type.I64, "flix_spawn", List(Type.Ptr, Type.Ptr, Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_region_enter", List(Type.Ptr)),
-        Decl.DeclareFun(flixResultType, "flix_region_exit", List(Type.Ptr, Type.Ptr, flixResultType)),
+        // Note: Passing `FlixResult` by-value is not ABI-stable across Zig/Clang on wasm, so we pass
+        // tag/payload as separate i64s.
+        Decl.DeclareFun(flixResultType, "flix_region_exit", List(Type.Ptr, Type.Ptr, Type.I64, Type.I64)),
         Decl.DeclareFun(Type.Ptr, "flix_region_malloc", List(Type.Ptr, Type.Ptr, Type.I64)),
         Decl.DeclareFun(Type.Ptr, "flix_region_alloc", List(Type.Ptr, Type.Ptr, Type.Ptr)),
         Decl.DeclareFun(Type.Void, "flix_region_remember_slot", List(Type.Ptr, Type.Ptr, Type.Ptr)),
@@ -260,6 +262,7 @@ object LlvmBackend {
         Decl.DeclareFun(Type.I64, "flix_handle_new", List(Type.Ptr, Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_handle_get", List(Type.Ptr, Type.I64)),
         Decl.DeclareFun(Type.I64, "flix_handle_payload", List(Type.Ptr, Type.I64)),
+        Decl.DeclareFun(Type.I64, "flix_handle_new_i64", List(Type.Ptr, Type.I64)),
         Decl.DeclareFun(Type.Void, "flix_exn_report_ptr", List(Type.Ptr)),
         Decl.DeclareFun(Type.Void, "flix_suspension_report_ptr", List(Type.Ptr)),
         Decl.DeclareFun(Type.Void, "flix_gc_push_root_value_i64", List(Type.Ptr, Type.Ptr)),
@@ -301,6 +304,13 @@ object LlvmBackend {
       root.defs.values.toList.filter(_.ann.isExport).sortBy(_.sym.toString).foreach { defn =>
         addExtraFunction(emitExportWrapper(defn))
         addExtraFunction(emitExportResumeWrapper(defn))
+      }
+
+      // Wasm-only: def-id based invocation dispatch used by the component runtime.
+      if (target == CompilationTarget.LlvmWasm) {
+        addExtraFunction(emitWasmInvokeDef(LlvmWasmDefs.compute(root)))
+        addExtraFunction(emitWasmResumeOkDef())
+        addExtraFunction(emitWasmResumeThrowDef())
       }
 
       val extra = extraFunctions.toList.sortBy(_.name)
@@ -570,7 +580,12 @@ object LlvmBackend {
       }
 
       val frameSpecs = root.defs.values.toList
-        .filter(defn => ca.uwaterloo.flix.language.ast.Purity.isControlImpure(defn.exp.purity))
+        // For the wasm target we compile all non-pure defs using the resumable, frame-based evaluator
+        // (so primitive effects can suspend to the host). Ensure we emit matching frame typeinfos.
+        .filter(defn =>
+          ca.uwaterloo.flix.language.ast.Purity.isControlImpure(defn.exp.purity) ||
+            (target == CompilationTarget.LlvmWasm && !ca.uwaterloo.flix.language.ast.Purity.isPure(defn.exp.purity))
+        )
         .map { defn =>
           val vars = (defn.cparams ::: defn.fparams).map(_.tpe) ::: defn.lparams.map(_.tpe)
           val ptrOffs = vars.zipWithIndex.collect {
@@ -956,6 +971,256 @@ object LlvmBackend {
       LlvmIr.Function(wrapperName, flixResultType, params, fb.result())
     }
 
+    /**
+      * Emits the def-id based invocation dispatch used by the wasm component runtime.
+      *
+      * This dispatch is intentionally simple for bring-up:
+      *   - compares `defId` in a linear chain (no LLVM `switch` yet),
+      *   - checks `argc` matches the expected arity,
+      *   - unboxes each argument from raw `i64` payload bits into the lowered ABI types,
+      *   - calls the lowered definition, then unwinds thunks to a stable non-thunk result.
+      *
+      * The runtime is expected to:
+      *   - validate that incoming WIT `value` resources match the expected kinds (future),
+      *   - allocate `value`/`suspension` resources for the returned result payload.
+      */
+    private def emitWasmInvokeDef(entries: List[LlvmWasmDefs.Entry]): LlvmIr.Function = {
+      val params = List(
+        LlvmIr.Param("ctx", Type.Ptr),
+        LlvmIr.Param("defId", Type.I64),
+        LlvmIr.Param("args", Type.Ptr),
+        LlvmIr.Param("argc", Type.I32),
+      )
+
+      val ctxPtr = Value.Local("ctx", Type.Ptr)
+      val defId = Value.Local("defId", Type.I64)
+      val argsPtr = Value.Local("args", Type.Ptr)
+      val argc = Value.Local("argc", Type.I32)
+
+      val fb = new FunBuilder()
+      val entry = fb.newBlock("entry")
+      fb.setCurrent(entry)
+
+      if (entries.isEmpty) {
+        fb.current.emitTrap()
+        fb.current.setTerminator(Terminator.Unreachable)
+        return LlvmIr.Function("flix_wasm_invoke_def", flixResultType, params, fb.result())
+      }
+
+      var currentCheck = entry
+
+      entries.zipWithIndex.foreach { case (e, idx) =>
+        val caseLabel = s"def_${e.defId}"
+        val nextLabel = if (idx == entries.length - 1) "default" else s"check_def_${entries(idx + 1).defId}"
+        val cmp = Value.Local(s"cmp_def_${e.defId}", Type.I1)
+
+        currentCheck.emitAssign(cmp, Op.ICmp("eq", defId, Value.IntConst(e.defId, Type.I64)))
+        currentCheck.setTerminator(Terminator.CondBr(cmp, caseLabel, nextLabel))
+
+        val caseBlock = fb.newBlock(caseLabel)
+        fb.setCurrent(caseBlock)
+
+        val expected = e.defn.cparams.length + e.defn.fparams.length
+        val arityOk = Value.Local(s"arity_ok_${e.defId}", Type.I1)
+        caseBlock.emitAssign(arityOk, Op.ICmp("eq", argc, Value.IntConst(expected.toLong, Type.I32)))
+
+        val callLabel = s"def_call_${e.defId}"
+        caseBlock.setTerminator(Terminator.CondBr(arityOk, callLabel, "default"))
+
+        val callBlock = fb.newBlock(callLabel)
+        fb.setCurrent(callBlock)
+
+        val paramTpes = e.defn.cparams ::: e.defn.fparams
+        val args: List[Value] = paramTpes.zipWithIndex.map {
+          case (p, idx) =>
+            val eltPtr = freshTmp(Type.Ptr)
+            fb.current.emitAssign(eltPtr, Op.Gep(Type.I64, argsPtr, Value.IntConst(idx.toLong, Type.I64)))
+            val bits = freshTmp(Type.I64)
+            fb.current.emitAssign(bits, Op.Load(Type.I64, eltPtr))
+            unboxFromI64(bits, p.tpe, fb)
+        }
+
+        val callTmp = freshTmp(flixResultType)
+        fb.current.emitAssign(callTmp, Op.Call(flixResultType, LlvmNames.defName(e.sym), ctxPtr :: args))
+        val r0 = unwindThunkToResult(callTmp, ctxPtr, fb)
+        val r = wrapResultForWasmRuntime(r0, ctxPtr, fb)
+        fb.current.setTerminator(Terminator.Ret(flixResultType, r))
+
+        // Fallthrough continuation (for the next check).
+        if (idx < entries.length - 1) {
+          val nextCheck = fb.newBlock(nextLabel)
+          currentCheck = nextCheck
+          fb.setCurrent(nextCheck)
+        }
+      }
+
+      // Default case: invalid def-id or arity.
+      val defaultBlock = fb.newBlock("default")
+      fb.setCurrent(defaultBlock)
+      defaultBlock.emitTrap()
+      defaultBlock.setTerminator(Terminator.Unreachable)
+
+      LlvmIr.Function("flix_wasm_invoke_def", flixResultType, params, fb.result())
+    }
+
+    /**
+      * Converts an internal (raw) flixResult payload into a wasm-runtime friendly result where the payload is a
+      * stable handle id (for VALUE/EXCEPTION/SUSPENSION).
+      *
+      * The wasm component runtime stores these handles inside tasks and returns them to the host as `value`
+      * resources. The host can then unbox values via WIT helpers.
+      */
+    private def wrapResultForWasmRuntime(r0: Value, ctxPtr: Value, fb: FunBuilder): Value = {
+      val tag = freshTmp(Type.I64)
+      fb.current.emitAssign(tag, Op.ExtractValue(Type.I64, flixResultType, r0, index = 0))
+      val payload = freshTmp(Type.I64)
+      fb.current.emitAssign(payload, Op.ExtractValue(Type.I64, flixResultType, r0, index = 1))
+
+      val isValue = freshTmp(Type.I1)
+      fb.current.emitAssign(isValue, Op.ICmp("eq", tag, Value.IntConst(ResultTagValue, Type.I64)))
+
+      val valueLabel = freshLabel("wasm_wrap_value")
+      val notValueLabel = freshLabel("wasm_wrap_not_value")
+      fb.current.setTerminator(Terminator.CondBr(isValue, valueLabel, notValueLabel))
+
+      val endLabel = freshLabel("wasm_wrap_end")
+
+      val incomings = mutable.ArrayBuffer.empty[(Value, String)]
+
+      // VALUE => allocate an i64 handle containing the raw value bits.
+      val valueBlock = fb.newBlock(valueLabel)
+      fb.setCurrent(valueBlock)
+      val valueHandle = freshTmp(Type.I64)
+      fb.current.emitAssign(valueHandle, Op.Call(Type.I64, "flix_handle_new_i64", List(ctxPtr, payload)))
+      val valueResult = packResultTagged(ResultTagValue, valueHandle, fb)
+      val valuePred = fb.current.label
+      fb.current.setTerminator(Terminator.Br(endLabel))
+      incomings.addOne((valueResult, valuePred))
+
+      // Not VALUE: EXCEPTION/SUSPENSION are pointer payloads; wrap them as pointer handles.
+      val notValueBlock = fb.newBlock(notValueLabel)
+      fb.setCurrent(notValueBlock)
+      val isExn = freshTmp(Type.I1)
+      fb.current.emitAssign(isExn, Op.ICmp("eq", tag, Value.IntConst(ResultTagException, Type.I64)))
+
+      val exnLabel = freshLabel("wasm_wrap_exn")
+      val suspCheckLabel = freshLabel("wasm_wrap_susp_check")
+      fb.current.setTerminator(Terminator.CondBr(isExn, exnLabel, suspCheckLabel))
+
+      val exnBlock = fb.newBlock(exnLabel)
+      fb.setCurrent(exnBlock)
+      val exnPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(exnPtr, Op.Cast("inttoptr", Type.Ptr, payload))
+      val exnHandle = freshTmp(Type.I64)
+      fb.current.emitAssign(exnHandle, Op.Call(Type.I64, "flix_handle_new", List(ctxPtr, exnPtr)))
+      val exnResult = packResultTagged(ResultTagException, exnHandle, fb)
+      val exnPred = fb.current.label
+      fb.current.setTerminator(Terminator.Br(endLabel))
+      incomings.addOne((exnResult, exnPred))
+
+      val suspCheckBlock = fb.newBlock(suspCheckLabel)
+      fb.setCurrent(suspCheckBlock)
+      val isSusp = freshTmp(Type.I1)
+      fb.current.emitAssign(isSusp, Op.ICmp("eq", tag, Value.IntConst(ResultTagSuspension, Type.I64)))
+
+      val suspLabel = freshLabel("wasm_wrap_susp")
+      val otherLabel = freshLabel("wasm_wrap_other")
+      fb.current.setTerminator(Terminator.CondBr(isSusp, suspLabel, otherLabel))
+
+      val suspBlock = fb.newBlock(suspLabel)
+      fb.setCurrent(suspBlock)
+      val suspPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(suspPtr, Op.Cast("inttoptr", Type.Ptr, payload))
+      val suspHandle = freshTmp(Type.I64)
+      fb.current.emitAssign(suspHandle, Op.Call(Type.I64, "flix_handle_new", List(ctxPtr, suspPtr)))
+      val suspResult = packResultTagged(ResultTagSuspension, suspHandle, fb)
+      val suspPred = fb.current.label
+      fb.current.setTerminator(Terminator.Br(endLabel))
+      incomings.addOne((suspResult, suspPred))
+
+      val otherBlock = fb.newBlock(otherLabel)
+      fb.setCurrent(otherBlock)
+      fb.current.emitTrap()
+      fb.current.setTerminator(Terminator.Unreachable)
+
+      val endBlock = fb.newBlock(endLabel)
+      fb.setCurrent(endBlock)
+      val r = freshTmp(flixResultType)
+      endBlock.emitPhi(r, incomings.toList)
+      r
+    }
+
+    /**
+      * Resumes a suspension with a value, returning a wasm-runtime friendly handle-result.
+      *
+      * Signature matches the Zig runtime's `extern fn flix_wasm_resume_ok_def`.
+      */
+    private def emitWasmResumeOkDef(): LlvmIr.Function = {
+      val params = List(
+        LlvmIr.Param("ctx", Type.Ptr),
+        LlvmIr.Param("defId", Type.I64),
+        LlvmIr.Param("susp", Type.I64),
+        LlvmIr.Param("resume", Type.I64),
+      )
+
+      val ctxPtr = Value.Local("ctx", Type.Ptr)
+      val suspHandle = Value.Local("susp", Type.I64)
+      val resumeHandle = Value.Local("resume", Type.I64)
+
+      val fb = new FunBuilder()
+      val entry = fb.newBlock("entry")
+      fb.setCurrent(entry)
+
+      val suspPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(suspPtr, Op.Call(Type.Ptr, "flix_handle_get", List(ctxPtr, suspHandle)))
+
+      val resumePayload = freshTmp(Type.I64)
+      fb.current.emitAssign(resumePayload, Op.Call(Type.I64, "flix_handle_payload", List(ctxPtr, resumeHandle)))
+
+      val callTmp = freshTmp(flixResultType)
+      fb.current.emitAssign(callTmp, Op.Call(flixResultType, "flix_resume_suspension", List(ctxPtr, suspPtr, resumePayload)))
+
+      val r0 = unwindThunkToResult(callTmp, ctxPtr, fb)
+      val r = wrapResultForWasmRuntime(r0, ctxPtr, fb)
+      fb.current.setTerminator(Terminator.Ret(flixResultType, r))
+
+      LlvmIr.Function("flix_wasm_resume_ok_def", flixResultType, params, fb.result())
+    }
+
+    /**
+      * Resumes a suspension by throwing an exception.
+      *
+      * Note: The long-term semantics should inject an exception at the suspension point (catchable by surrounding
+      * Flix `try/catch`). For bring-up we treat this as aborting the task with the given exception.
+      *
+      * Signature matches the Zig runtime's `extern fn flix_wasm_resume_throw_def`.
+      */
+    private def emitWasmResumeThrowDef(): LlvmIr.Function = {
+      val params = List(
+        LlvmIr.Param("ctx", Type.Ptr),
+        LlvmIr.Param("defId", Type.I64),
+        LlvmIr.Param("susp", Type.I64),
+        LlvmIr.Param("exn", Type.I64),
+      )
+
+      val ctxPtr = Value.Local("ctx", Type.Ptr)
+      val exnHandle = Value.Local("exn", Type.I64)
+
+      val fb = new FunBuilder()
+      val entry = fb.newBlock("entry")
+      fb.setCurrent(entry)
+
+      val exnPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(exnPtr, Op.Call(Type.Ptr, "flix_handle_get", List(ctxPtr, exnHandle)))
+      val outHandle = freshTmp(Type.I64)
+      fb.current.emitAssign(outHandle, Op.Call(Type.I64, "flix_handle_new", List(ctxPtr, exnPtr)))
+
+      val r = packResultTagged(ResultTagException, outHandle, fb)
+      fb.current.setTerminator(Terminator.Ret(flixResultType, r))
+
+      LlvmIr.Function("flix_wasm_resume_throw_def", flixResultType, params, fb.result())
+    }
+
     private def emitExportResumeWrapper(defn: LoweredAst.Def): LlvmIr.Function = {
       val wrapperName = LlvmNames.exportResumeName(defn.sym)
 
@@ -1109,7 +1374,7 @@ object LlvmBackend {
     }
 
     private def emitDef(defn: LoweredAst.Def): LlvmIr.Function = {
-      if (ca.uwaterloo.flix.language.ast.Purity.isControlImpure(defn.exp.purity)) emitDefControlImpure(defn)
+      if (ca.uwaterloo.flix.language.ast.Purity.isControlImpure(defn.exp.purity) || (target == CompilationTarget.LlvmWasm && !ca.uwaterloo.flix.language.ast.Purity.isPure(defn.exp.purity))) emitDefControlImpure(defn)
       else emitDefControlPure(defn)
     }
 
@@ -1411,7 +1676,7 @@ object LlvmBackend {
 
         case Expr.JumpTo(_, _, _, _) => ()
 
-        case Expr.ApplyAtomic(op, exps, _, _, _) =>
+        case Expr.ApplyAtomic(op, exps, _, _, _, _) =>
           op match {
             case AtomicOp.Closure(sym) => syms += sym
             case _ => ()
@@ -1476,7 +1741,7 @@ object LlvmBackend {
 
         case Expr.JumpTo(_, _, _, _) => ()
 
-        case Expr.ApplyAtomic(_, exps, _, _, _) =>
+        case Expr.ApplyAtomic(_, exps, _, _, _, _) =>
           exps.foreach(visitExp)
 
         case Expr.ApplyClo(e1, e2, _, _, _, _, _) =>
@@ -1538,7 +1803,7 @@ object LlvmBackend {
 
         case Expr.JumpTo(_, _, _, _) => ()
 
-        case Expr.ApplyAtomic(_, exps, _, _, _) =>
+        case Expr.ApplyAtomic(_, exps, _, _, _, _) =>
           exps.foreach(visitExp)
 
         case Expr.ApplyClo(e1, e2, ct, _, _, _, _) =>
@@ -1600,7 +1865,7 @@ object LlvmBackend {
 
         case Expr.JumpTo(_, _, _, _) => ()
 
-        case Expr.ApplyAtomic(op, exps, tpe, _, _) =>
+        case Expr.ApplyAtomic(op, exps, _, tpe, _, _) =>
           op match {
             case AtomicOp.Lazy =>
               tpe match {
@@ -1679,7 +1944,7 @@ object LlvmBackend {
         case Expr.JumpTo(_, _, _, _) =>
           record(e.tpe)
 
-        case Expr.ApplyAtomic(_, exps, _, _, _) =>
+        case Expr.ApplyAtomic(_, exps, _, _, _, _) =>
           record(e.tpe)
           exps.foreach(visitExp)
 
@@ -1763,7 +2028,7 @@ object LlvmBackend {
         case Expr.JumpTo(_, _, _, _) =>
           record(e.tpe)
 
-        case Expr.ApplyAtomic(_, exps, _, _, _) =>
+        case Expr.ApplyAtomic(_, exps, _, _, _, _) =>
           record(e.tpe)
           exps.foreach(visitExp)
 
@@ -2581,8 +2846,12 @@ object LlvmBackend {
         val bodyValue = emitExpr(exp, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel, Some(innerHandler))
         if (!fb.current.isTerminated) {
           val bodyOutcome = packResult(bodyValue, tpe, fb)
+          val bodyTag = freshTmp(Type.I64)
+          fb.current.emitAssign(bodyTag, Op.ExtractValue(Type.I64, flixResultType, bodyOutcome, index = 0))
+          val bodyPayload = freshTmp(Type.I64)
+          fb.current.emitAssign(bodyPayload, Op.ExtractValue(Type.I64, flixResultType, bodyOutcome, index = 1))
           val exitTmp = freshTmp(flixResultType)
-          fb.current.emitAssign(exitTmp, Op.Call(flixResultType, "flix_region_exit", List(ctxPtr, regionPtr, bodyOutcome)))
+          fb.current.emitAssign(exitTmp, Op.Call(flixResultType, "flix_region_exit", List(ctxPtr, regionPtr, bodyTag, bodyPayload)))
 
           val payloadBits = unwindThunkToValuePayloadOrPropagateExn(exitTmp, ctxPtr, fb, exnHandlerOpt)
           val v = unboxFromI64(payloadBits, tpe, fb)
@@ -2599,9 +2868,13 @@ object LlvmBackend {
         val exnBits = freshTmp(Type.I64)
         fb.current.emitAssign(exnBits, Op.Load(Type.I64, exnSlotPtr))
         val exnOutcome = packResultTagged(ResultTagException, exnBits, fb)
+        val exnTag = freshTmp(Type.I64)
+        fb.current.emitAssign(exnTag, Op.ExtractValue(Type.I64, flixResultType, exnOutcome, index = 0))
+        val exnPayload = freshTmp(Type.I64)
+        fb.current.emitAssign(exnPayload, Op.ExtractValue(Type.I64, flixResultType, exnOutcome, index = 1))
 
         val exitTmp2 = freshTmp(flixResultType)
-        fb.current.emitAssign(exitTmp2, Op.Call(flixResultType, "flix_region_exit", List(ctxPtr, regionPtr, exnOutcome)))
+        fb.current.emitAssign(exitTmp2, Op.Call(flixResultType, "flix_region_exit", List(ctxPtr, regionPtr, exnTag, exnPayload)))
 
         val payloadBits2 = unwindThunkToValuePayloadOrPropagateExn(exitTmp2, ctxPtr, fb, exnHandlerOpt)
         if (!fb.current.isTerminated) {
@@ -2676,7 +2949,7 @@ object LlvmBackend {
           phiDest
         }
 
-      case Expr.ApplyAtomic(op, exps, tpe, _, _) =>
+      case Expr.ApplyAtomic(op, exps, _, tpe, _, _) =>
         val argTpes = exps.map(_.tpe)
         emitExprs(exps, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel, exnHandlerOpt) match {
           case None => Value.Undef(llvmTypeOf(tpe))
@@ -3047,8 +3320,12 @@ object LlvmBackend {
         val bodyValue = emitExprControlImpure(exp, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, Some(innerHandler))
         if (!fb.current.isTerminated) {
           val bodyOutcome = packResult(bodyValue, tpe, fb)
+          val bodyTag = freshTmp(Type.I64)
+          fb.current.emitAssign(bodyTag, Op.ExtractValue(Type.I64, flixResultType, bodyOutcome, index = 0))
+          val bodyPayload = freshTmp(Type.I64)
+          fb.current.emitAssign(bodyPayload, Op.ExtractValue(Type.I64, flixResultType, bodyOutcome, index = 1))
           val exitTmp = freshTmp(flixResultType)
-          fb.current.emitAssign(exitTmp, Op.Call(flixResultType, "flix_region_exit", List(ctxPtr, regionPtr, bodyOutcome)))
+          fb.current.emitAssign(exitTmp, Op.Call(flixResultType, "flix_region_exit", List(ctxPtr, regionPtr, bodyTag, bodyPayload)))
 
           val payloadBits = unwindThunkToValuePayloadOrPropagateExn(exitTmp, ctxPtr, fb, exnHandlerOpt)
           val v = unboxFromI64(payloadBits, tpe, fb)
@@ -3065,9 +3342,13 @@ object LlvmBackend {
         val exnBits = freshTmp(Type.I64)
         fb.current.emitAssign(exnBits, Op.Load(Type.I64, exnSlotPtr))
         val exnOutcome = packResultTagged(ResultTagException, exnBits, fb)
+        val exnTag = freshTmp(Type.I64)
+        fb.current.emitAssign(exnTag, Op.ExtractValue(Type.I64, flixResultType, exnOutcome, index = 0))
+        val exnPayload = freshTmp(Type.I64)
+        fb.current.emitAssign(exnPayload, Op.ExtractValue(Type.I64, flixResultType, exnOutcome, index = 1))
 
         val exitTmp2 = freshTmp(flixResultType)
-        fb.current.emitAssign(exitTmp2, Op.Call(flixResultType, "flix_region_exit", List(ctxPtr, regionPtr, exnOutcome)))
+        fb.current.emitAssign(exitTmp2, Op.Call(flixResultType, "flix_region_exit", List(ctxPtr, regionPtr, exnTag, exnPayload)))
 
         val payloadBits2 = unwindThunkToValuePayloadOrPropagateExn(exitTmp2, ctxPtr, fb, exnHandlerOpt)
         if (!fb.current.isTerminated) {
@@ -3135,11 +3416,23 @@ object LlvmBackend {
           phiDest
         }
 
-      case Expr.ApplyAtomic(op, exps, tpe, _, _) =>
+      case Expr.ApplyAtomic(op, exps, pcPointId, tpe, purity, _) =>
         val argTpes = exps.map(_.tpe)
         emitExprsControlImpure(exps, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt) match {
           case None => Value.Undef(llvmTypeOf(tpe))
-          case Some(args) => emitApplyAtomic(op, argTpes, args, tpe, ctxPtr, fb, exnHandlerOpt)
+          case Some(args) =>
+            target match {
+              case CompilationTarget.LlvmWasm if pcPointId > 0 =>
+                op match {
+                  case AtomicOp.Unary(sop) if isSuspendableWasmIoOp(sop) =>
+                    val x = args.headOption.getOrElse(Value.Undef(llvmTypeOf(argTpes.headOption.getOrElse(SimpleType.Object))))
+                    emitApplyWasmIoOpSuspension(sop, x, pcPointId, tpe, ctxPtr, fb, framePtr, resumePayload, pcBlocks, exnHandlerOpt)
+                  case _ =>
+                    emitApplyAtomic(op, argTpes, args, tpe, ctxPtr, fb, exnHandlerOpt)
+                }
+              case _ =>
+                emitApplyAtomic(op, argTpes, args, tpe, ctxPtr, fb, exnHandlerOpt)
+            }
         }
 
       case Expr.ApplyDef(sym, exps, ct, pcPointId, tpe, _, _) =>
@@ -3708,6 +4001,286 @@ object LlvmBackend {
       }
     }
 
+    /**
+      * Creates a resumption-less suspension for a portable IO primop on wasm.
+      *
+      * The suspension is represented using the same runtime `Suspension` object layout as effect operations:
+      * - effSymId is `0` (reserved for host-backed IO ops),
+      * - opIndex is a stable numeric tag for the IO primop,
+      * - args are boxed payloads required to compute the WIT request and to build the resume value.
+      *
+      * This relies on [[flix_resume_suspension]]'s behavior when `resumption` is null:
+      * resuming yields the `resumePayload` directly and then applies prefix frames.
+      */
+    private def emitApplyWasmIoOpSuspension(sop: SemanticOp.UnaryOp,
+                                           x: Value,
+                                           pcPointId: Int,
+                                           tpe: SimpleType,
+                                           ctxPtr: Value,
+                                           fb: FunBuilder,
+                                           framePtr: Value,
+                                           resumePayload: Value,
+                                           pcBlocks: Map[Int, BlockBuilder],
+                                           exnHandlerOpt: Option[ExnHandler] = None): Value = {
+      val opIndex = wasmIoOpIndex(sop)
+      if (opIndex <= 0L) {
+        fb.current.emitTrap()
+        return Value.Undef(llvmTypeOf(tpe))
+      }
+
+      val argPayloads: List[Value] = sop match {
+        case SemanticOp.IoOp.SleepMillis =>
+          val ms = castValue(x, Type.I64, fb)
+          List(boxToI64(ms, SimpleType.Int64, fb))
+
+        case SemanticOp.IoOp.FileExists |
+             SemanticOp.IoOp.FileIsDirectory |
+             SemanticOp.IoOp.FileIsRegularFile |
+             SemanticOp.IoOp.FileIsReadable |
+             SemanticOp.IoOp.FileIsSymbolicLink |
+             SemanticOp.IoOp.FileIsWritable |
+             SemanticOp.IoOp.FileIsExecutable |
+             SemanticOp.IoOp.FileAccessTime |
+             SemanticOp.IoOp.FileCreationTime |
+             SemanticOp.IoOp.FileModificationTime |
+             SemanticOp.IoOp.FileSize |
+             SemanticOp.IoOp.FileRead |
+             SemanticOp.IoOp.FileTruncate |
+             SemanticOp.IoOp.FileMkDir |
+             SemanticOp.IoOp.FileMkDirs |
+             SemanticOp.IoOp.FileMkTempDir =>
+          val path = castValue(x, Type.Ptr, fb)
+          List(boxToI64(path, SimpleType.String, fb))
+
+        case SemanticOp.IoOp.FileReadLines |
+             SemanticOp.IoOp.FileReadBytes |
+             SemanticOp.IoOp.FileList =>
+          val rc = loadTupleElement(x, 0L, SimpleType.Region, fb)
+          val path = loadTupleElement(x, 1L, SimpleType.String, fb)
+          List(boxToI64(rc, SimpleType.Region, fb), boxToI64(path, SimpleType.String, fb))
+
+        case SemanticOp.IoOp.FileWrite |
+             SemanticOp.IoOp.FileAppend =>
+          val data = loadTupleElement(x, 0L, SimpleType.String, fb)
+          val path = loadTupleElement(x, 1L, SimpleType.String, fb)
+          List(boxToI64(data, SimpleType.String, fb), boxToI64(path, SimpleType.String, fb))
+
+        case SemanticOp.IoOp.FileWriteBytes |
+             SemanticOp.IoOp.FileAppendBytes =>
+          val bytes = loadTupleElement(x, 0L, SimpleType.Array(SimpleType.Int8), fb)
+          val path = loadTupleElement(x, 1L, SimpleType.String, fb)
+          List(
+            boxToI64(bytes, SimpleType.Array(SimpleType.Int8), fb),
+            boxToI64(path, SimpleType.String, fb)
+          )
+
+        case SemanticOp.IoOp.TcpSocketRead |
+             SemanticOp.IoOp.TcpSocketWrite |
+             SemanticOp.IoOp.ProcessStdinWrite |
+             SemanticOp.IoOp.ProcessStdoutRead |
+             SemanticOp.IoOp.ProcessStderrRead =>
+          val id = loadTupleElement(x, 0L, SimpleType.Int64, fb)
+          val buf = loadTupleElement(x, 1L, SimpleType.Array(SimpleType.Int8), fb)
+          List(
+            boxToI64(id, SimpleType.Int64, fb),
+            boxToI64(buf, SimpleType.Array(SimpleType.Int8), fb)
+          )
+
+        case SemanticOp.IoOp.TcpSocketConnect |
+             SemanticOp.IoOp.TcpServerBind =>
+          val ipBytes = loadTupleElement(x, 0L, SimpleType.Array(SimpleType.Int8), fb)
+          val port = loadTupleElement(x, 1L, SimpleType.Int32, fb)
+          List(
+            boxToI64(ipBytes, SimpleType.Array(SimpleType.Int8), fb),
+            boxToI64(port, SimpleType.Int32, fb)
+          )
+
+        case SemanticOp.IoOp.TcpSocketClose |
+             SemanticOp.IoOp.TcpServerLocalPort |
+             SemanticOp.IoOp.TcpServerAccept |
+             SemanticOp.IoOp.TcpServerClose |
+             SemanticOp.IoOp.ProcessExitValue |
+             SemanticOp.IoOp.ProcessIsAlive |
+             SemanticOp.IoOp.ProcessPid |
+             SemanticOp.IoOp.ProcessStop |
+             SemanticOp.IoOp.ProcessWaitFor |
+             SemanticOp.IoOp.ProcessRelease =>
+          val id = castValue(x, Type.I64, fb)
+          List(boxToI64(id, SimpleType.Int64, fb))
+
+        case SemanticOp.IoOp.ProcessWaitForTimeout =>
+          val id = loadTupleElement(x, 0L, SimpleType.Int64, fb)
+          val timeoutMs = loadTupleElement(x, 1L, SimpleType.Int64, fb)
+          List(boxToI64(id, SimpleType.Int64, fb), boxToI64(timeoutMs, SimpleType.Int64, fb))
+
+        case SemanticOp.IoOp.ProcessExec =>
+          val argv = loadTupleElement(x, 0L, SimpleType.Array(SimpleType.String), fb)
+          val hasCwd = loadTupleElement(x, 1L, SimpleType.Bool, fb)
+          val cwdStr = loadTupleElement(x, 2L, SimpleType.String, fb)
+          val envPairs = loadTupleElement(x, 3L, SimpleType.Array(SimpleType.String), fb)
+          List(
+            boxToI64(argv, SimpleType.Array(SimpleType.String), fb),
+            boxToI64(hasCwd, SimpleType.Bool, fb),
+            boxToI64(cwdStr, SimpleType.String, fb),
+            boxToI64(envPairs, SimpleType.Array(SimpleType.String), fb),
+          )
+
+        case SemanticOp.IoOp.HttpRequest =>
+          val method = loadTupleElement(x, 0L, SimpleType.String, fb)
+          val url = loadTupleElement(x, 1L, SimpleType.String, fb)
+          val headers = loadTupleElement(x, 2L, SimpleType.Array(SimpleType.String), fb)
+          val hasBody = loadTupleElement(x, 3L, SimpleType.Bool, fb)
+          val body = loadTupleElement(x, 4L, SimpleType.String, fb)
+          List(
+            boxToI64(method, SimpleType.String, fb),
+            boxToI64(url, SimpleType.String, fb),
+            boxToI64(headers, SimpleType.Array(SimpleType.String), fb),
+            boxToI64(hasBody, SimpleType.Bool, fb),
+            boxToI64(body, SimpleType.String, fb),
+          )
+
+        case _ =>
+          fb.current.emitTrap()
+          return Value.Undef(llvmTypeOf(tpe))
+      }
+
+      // Set pc on the current frame.
+      storeObjI64Slot(framePtr, Value.IntConst(0L, Type.I64), Value.IntConst(pcPointId.toLong, Type.I64), fb)
+
+      // Create prefix frames list with this frame.
+      val prefixPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(prefixPtr, Op.Call(Type.Ptr, "flix_frames_push", List(framePtr, Value.Null(Type.Ptr))))
+      val prefixBits = freshTmp(Type.I64)
+      fb.current.emitAssign(prefixBits, Op.Cast("ptrtoint", Type.I64, prefixPtr))
+
+      // Allocate suspension object.
+      val slots = 5L + argPayloads.length.toLong
+      val payloadBytes = Value.IntConst(slots * 8L, Type.I64)
+      val sizeBytes = freshTmp(Type.I64)
+      fb.current.emitAssign(sizeBytes, Op.Bin("add", Type.I64, payloadBytes, Value.IntConst(flixObjHeaderBytes, Type.I64)))
+      val suspPtr = freshTmp(Type.Ptr)
+      val suspTi = Value.Global(LlvmNames.suspensionTypeInfoName, Type.Ptr)
+      fb.current.emitAssign(suspPtr, Op.Call(Type.Ptr, "flix_alloc_flex", List(ctxPtr, suspTi, sizeBytes)))
+
+      storeObjI64Slot(suspPtr, Value.IntConst(0L, Type.I64), Value.IntConst(0L, Type.I64), fb) // effSymId = 0 (Wasm IO)
+      storeObjI64Slot(suspPtr, Value.IntConst(1L, Type.I64), Value.IntConst(opIndex, Type.I64), fb)
+      storeObjI64Slot(suspPtr, Value.IntConst(2L, Type.I64), prefixBits, fb)
+      storeObjI64Slot(suspPtr, Value.IntConst(3L, Type.I64), Value.IntConst(0L, Type.I64), fb) // resumption = null
+      storeObjI64Slot(suspPtr, Value.IntConst(4L, Type.I64), Value.IntConst(argPayloads.length.toLong, Type.I64), fb)
+      argPayloads.zipWithIndex.foreach {
+        case (p, i) =>
+          storeObjI64Slot(suspPtr, Value.IntConst(5L + i.toLong, Type.I64), p, fb)
+      }
+
+      val suspBits = freshTmp(Type.I64)
+      fb.current.emitAssign(suspBits, Op.Cast("ptrtoint", Type.I64, suspPtr))
+      val suspResult = packResultTagged(ResultTagSuspension, suspBits, fb)
+      fb.current.setTerminator(Terminator.Ret(flixResultType, suspResult))
+
+      // Resume pc block.
+      val afterLabel = freshLabel("io_after")
+      val resumeBlock = pcBlocks.getOrElse(pcPointId, throw new IllegalStateException(s"missing pc block: $pcPointId"))
+      if (resumeBlock.isTerminated) {
+        throw new IllegalStateException(s"pc block $pcPointId already terminated")
+      }
+
+      val resumedValue = {
+        val saved = fb.current
+        fb.setCurrent(resumeBlock)
+
+        if (isGcRootType(tpe)) {
+          val resumeSlotPtr = freshTmp(Type.Ptr)
+          fb.current.emitAssign(resumeSlotPtr, Op.Alloca(Type.I64))
+          fb.current.emitStore(resumePayload, resumeSlotPtr)
+          fb.current.emitCallVoid(rootPushNameOf(Type.I64), List(ctxPtr, resumeSlotPtr))
+        }
+
+        fb.current.emitCallVoid("flix_gc_pollcheck", List(ctxPtr))
+        if (isGcRootType(tpe)) {
+          fb.current.emitCallVoid("flix_gc_pop_roots", List(ctxPtr, Value.IntConst(1L, Type.I64)))
+        }
+
+        val v = unboxFromI64(resumePayload, tpe, fb)
+
+        val isCancelled = freshTmp(Type.I1)
+        fb.current.emitAssign(isCancelled, Op.Call(Type.I1, "flix_cancel_requested", List(ctxPtr)))
+        val cancelLabel = freshLabel("resume_cancel")
+        fb.current.setTerminator(Terminator.CondBr(isCancelled, cancelLabel, afterLabel))
+
+        val cancelBlock = fb.newBlock(cancelLabel)
+        fb.setCurrent(cancelBlock)
+        val cancelExnPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(cancelExnPtr, Op.Call(Type.Ptr, "flix_cancel_exn", List(ctxPtr, Value.IntConst(cancelledKindId, Type.I64), exnExnTypeInfo, Value.IntConst(exnExnTagId, Type.I64))))
+        val tracedCancelExnPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tracedCancelExnPtr, Op.Call(Type.Ptr, "flix_exn_with_trace", List(cancelExnPtr)))
+        val cancelBits = freshTmp(Type.I64)
+        fb.current.emitAssign(cancelBits, Op.Cast("ptrtoint", Type.I64, tracedCancelExnPtr))
+        val cancelResult = packResultTagged(ResultTagException, cancelBits, fb)
+        fb.current.setTerminator(Terminator.Ret(flixResultType, cancelResult))
+
+        fb.setCurrent(saved)
+        v
+      }
+
+      val afterBlock = fb.newBlock(afterLabel)
+      fb.setCurrent(afterBlock)
+      val joinTpe = llvmTypeOf(tpe)
+      val phiDest = freshTmp(joinTpe)
+      afterBlock.emitPhi(phiDest, List((resumedValue, resumeBlock.label)))
+      phiDest
+    }
+
+    private def isSuspendableWasmIoOp(sop: SemanticOp.UnaryOp): Boolean =
+      target == CompilationTarget.LlvmWasm && wasmIoOpIndex(sop) > 0L
+
+    private def wasmIoOpIndex(sop: SemanticOp.UnaryOp): Long = sop match {
+      case SemanticOp.IoOp.SleepMillis => 1L
+      case SemanticOp.IoOp.HttpRequest => 2L
+      case SemanticOp.IoOp.FileExists => 3L
+      case SemanticOp.IoOp.FileIsDirectory => 4L
+      case SemanticOp.IoOp.FileIsRegularFile => 5L
+      case SemanticOp.IoOp.FileIsReadable => 6L
+      case SemanticOp.IoOp.FileIsSymbolicLink => 7L
+      case SemanticOp.IoOp.FileIsWritable => 8L
+      case SemanticOp.IoOp.FileIsExecutable => 9L
+      case SemanticOp.IoOp.FileAccessTime => 10L
+      case SemanticOp.IoOp.FileCreationTime => 11L
+      case SemanticOp.IoOp.FileModificationTime => 12L
+      case SemanticOp.IoOp.FileSize => 13L
+      case SemanticOp.IoOp.FileRead => 14L
+      case SemanticOp.IoOp.FileReadLines => 15L
+      case SemanticOp.IoOp.FileReadBytes => 16L
+      case SemanticOp.IoOp.FileList => 17L
+      case SemanticOp.IoOp.FileWrite => 18L
+      case SemanticOp.IoOp.FileWriteBytes => 19L
+      case SemanticOp.IoOp.FileAppend => 20L
+      case SemanticOp.IoOp.FileAppendBytes => 21L
+      case SemanticOp.IoOp.FileTruncate => 22L
+      case SemanticOp.IoOp.FileMkDir => 23L
+      case SemanticOp.IoOp.FileMkDirs => 24L
+      case SemanticOp.IoOp.FileMkTempDir => 25L
+      case SemanticOp.IoOp.ProcessExec => 26L
+      case SemanticOp.IoOp.ProcessExitValue => 27L
+      case SemanticOp.IoOp.ProcessIsAlive => 28L
+      case SemanticOp.IoOp.ProcessPid => 29L
+      case SemanticOp.IoOp.ProcessStop => 30L
+      case SemanticOp.IoOp.ProcessWaitFor => 31L
+      case SemanticOp.IoOp.ProcessWaitForTimeout => 32L
+      case SemanticOp.IoOp.ProcessStdinWrite => 33L
+      case SemanticOp.IoOp.ProcessStdoutRead => 34L
+      case SemanticOp.IoOp.ProcessStderrRead => 35L
+      case SemanticOp.IoOp.ProcessRelease => 36L
+      case SemanticOp.IoOp.TcpSocketConnect => 37L
+      case SemanticOp.IoOp.TcpSocketRead => 38L
+      case SemanticOp.IoOp.TcpSocketWrite => 39L
+      case SemanticOp.IoOp.TcpSocketClose => 40L
+      case SemanticOp.IoOp.TcpServerBind => 41L
+      case SemanticOp.IoOp.TcpServerAccept => 42L
+      case SemanticOp.IoOp.TcpServerLocalPort => 43L
+      case SemanticOp.IoOp.TcpServerClose => 44L
+      case _ => 0L
+    }
+
     private def emitRunWithExpression(exp: Expr,
                                      effSym: Symbol.EffSym,
                                      rules: List[LoweredAst.HandlerRule],
@@ -3789,8 +4362,8 @@ object LlvmBackend {
     }
 
     private def findClosureSym(exp0: Expr): Option[Symbol.DefnSym] = exp0 match {
-      case Expr.ApplyAtomic(AtomicOp.Closure(sym), _, _, _, _) => Some(sym)
-      case Expr.ApplyAtomic(AtomicOp.Box | AtomicOp.Unbox | AtomicOp.Cast, exps, _, _, _) if exps.length == 1 =>
+      case Expr.ApplyAtomic(AtomicOp.Closure(sym), _, _, _, _, _) => Some(sym)
+      case Expr.ApplyAtomic(AtomicOp.Box | AtomicOp.Unbox | AtomicOp.Cast, exps, _, _, _, _) if exps.length == 1 =>
         findClosureSym(exps.head)
       case _ => None
     }

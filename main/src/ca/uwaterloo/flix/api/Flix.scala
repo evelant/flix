@@ -21,7 +21,7 @@ import ca.uwaterloo.flix.language.ast.shared.{AvailableClasses, Input, SecurityC
 import ca.uwaterloo.flix.language.dbg.AstPrinter
 import ca.uwaterloo.flix.language.fmt.FormatOptions
 import ca.uwaterloo.flix.language.phase.*
-import ca.uwaterloo.flix.language.phase.llvm.{LlvmBackend, LlvmExportWriter, LlvmNativeDriver, LlvmWriter}
+import ca.uwaterloo.flix.language.phase.llvm.{LlvmBackend, LlvmExportWriter, LlvmNativeDriver, LlvmWasmDriver, LlvmWasmExportWriter, LlvmWriter}
 import ca.uwaterloo.flix.language.phase.jvm.{JvmBackend, JvmLoader, JvmLowerer, JvmWriter}
 import ca.uwaterloo.flix.language.phase.monomorph.Specialization
 import ca.uwaterloo.flix.language.phase.optimizer.{LambdaDrop, Optimizer}
@@ -670,6 +670,11 @@ class Flix {
             LlvmExportWriter.run(loweredAst)
             LlvmNativeDriver.buildStaticLibrary(LlvmWriter.modulePath(flix.options.outputPath))
             LlvmNativeDriver.buildSharedLibrary(LlvmWriter.modulePath(flix.options.outputPath))
+            new CompilationResult(None, Map.empty, typedAst.sources, totalTime, totalSize)
+
+          case CompilationTarget.LlvmWasm =>
+            LlvmWasmExportWriter.run(loweredAst)
+            LlvmWasmDriver.run(LlvmWriter.modulePath(flix.options.outputPath))
             new CompilationResult(None, Map.empty, typedAst.sources, totalTime, totalSize)
 
           case _ =>

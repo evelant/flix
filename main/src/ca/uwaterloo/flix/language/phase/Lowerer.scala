@@ -17,8 +17,9 @@ package ca.uwaterloo.flix.language.phase
 
 import ca.uwaterloo.flix.api.Flix
 import ca.uwaterloo.flix.language.ast.shared.ExpPosition
-import ca.uwaterloo.flix.language.ast.{ErasedAst, LoweredAst, Purity, SimpleType}
+import ca.uwaterloo.flix.language.ast.{AtomicOp, ErasedAst, LoweredAst, Purity, SemanticOp, SimpleType}
 import ca.uwaterloo.flix.language.dbg.AstPrinter.DebugNoOp
+import ca.uwaterloo.flix.util.CompilationTarget
 import ca.uwaterloo.flix.util.ParOps
 
 import scala.collection.mutable
@@ -30,8 +31,9 @@ object Lowerer {
 
   def run(root: ErasedAst.Root)(implicit flix: Flix): LoweredAst.Root = flix.phase("Lowerer") {
     implicit val r: ErasedAst.Root = root
+    val target = flix.options.target
 
-    val defs = ParOps.parMapValues(root.defs)(visitDef)
+    val defs = ParOps.parMapValues(root.defs)(visitDef(_, target))
     val enums = ParOps.parMapValues(root.enums)(visitEnum)
     val structs = ParOps.parMapValues(root.structs)(visitStruct)
     val effects = ParOps.parMapValues(root.effects)(visitEffect)
@@ -39,14 +41,14 @@ object Lowerer {
     LoweredAst.Root(defs, enums, structs, effects, root.mainEntryPoint, root.entryPoints, root.sources)
   }(DebugNoOp())
 
-  private def visitDef(d: ErasedAst.Def)(implicit root: ErasedAst.Root): LoweredAst.Def = d match {
+  private def visitDef(d: ErasedAst.Def, target: CompilationTarget)(implicit root: ErasedAst.Root): LoweredAst.Def = d match {
     case ErasedAst.Def(ann, mod, sym, cparams0, fparams0, exp, tpe, unboxedType0, loc) =>
-      implicit val lctx: LocalContext = new LocalContext(isControlImpure = Purity.isControlImpure(exp.purity))
+      implicit val lctx: LocalContext = new LocalContext(isControlImpure = canSuspend(exp.purity, target))
 
       // It is important to visit parameters and variables in the order the backend expects: cparams, fparams, then lparams.
       val cparams = cparams0.map(visitFormalParam)
       val fparams = fparams0.map(visitFormalParam)
-      val e = visitExpr(exp)
+      val e = visitExpr(exp, target)
 
       val ls = lctx.lparams.toList
       val pcPoints = lctx.getPcPoints
@@ -83,7 +85,7 @@ object Lowerer {
     LoweredAst.Op(op.sym, op.ann, op.mod, fparams, op.tpe, op.purity, op.loc)
   }
 
-  private def visitExpr(exp0: ErasedAst.Expr)(implicit lctx: LocalContext, root: ErasedAst.Root): LoweredAst.Expr = exp0 match {
+  private def visitExpr(exp0: ErasedAst.Expr, target: CompilationTarget)(implicit lctx: LocalContext, root: ErasedAst.Root): LoweredAst.Expr = exp0 match {
     case ErasedAst.Expr.Cst(cst, loc) =>
       LoweredAst.Expr.Cst(cst, loc)
 
@@ -91,40 +93,41 @@ object Lowerer {
       LoweredAst.Expr.Var(sym, tpe, loc)
 
     case ErasedAst.Expr.ApplyAtomic(op, exps, tpe, purity, loc) =>
-      val es = exps.map(visitExpr)
-      LoweredAst.Expr.ApplyAtomic(op, es, tpe, purity, loc)
+      val pcPointId = if (isSuspendableAtomicOp(op, target)) lctx.newPcPointId() else 0
+      val es = exps.map(visitExpr(_, target))
+      LoweredAst.Expr.ApplyAtomic(op, es, pcPointId, tpe, purity, loc)
 
     case ErasedAst.Expr.ApplyClo(exp1, exp2, ct, tpe, purity, loc) =>
-      val pcPointId = if (ct == ExpPosition.NonTail && Purity.isControlImpure(purity)) lctx.newPcPointId() else 0
-      val e1 = visitExpr(exp1)
-      val e2 = visitExpr(exp2)
+      val pcPointId = if (ct == ExpPosition.NonTail && canSuspend(purity, target)) lctx.newPcPointId() else 0
+      val e1 = visitExpr(exp1, target)
+      val e2 = visitExpr(exp2, target)
       LoweredAst.Expr.ApplyClo(e1, e2, ct, pcPointId, tpe, purity, loc)
 
     case ErasedAst.Expr.ApplyDef(sym, exps, ct, tpe, purity, loc) =>
       val defn = root.defs(sym)
-      val pcPointId = if (ct == ExpPosition.NonTail && Purity.isControlImpure(defn.exp.purity)) lctx.newPcPointId() else 0
-      val es = exps.map(visitExpr)
+      val pcPointId = if (ct == ExpPosition.NonTail && canSuspend(defn.exp.purity, target)) lctx.newPcPointId() else 0
+      val es = exps.map(visitExpr(_, target))
       LoweredAst.Expr.ApplyDef(sym, es, ct, pcPointId, tpe, purity, loc)
 
     case ErasedAst.Expr.ApplyOp(sym, exps, tpe, purity, loc) =>
       val pcPointId = lctx.newPcPointId()
-      val es = exps.map(visitExpr)
+      val es = exps.map(visitExpr(_, target))
       LoweredAst.Expr.ApplyOp(sym, es, pcPointId, tpe, purity, loc)
 
     case ErasedAst.Expr.ApplySelfTail(sym, actuals, tpe, purity, loc) =>
-      val es = actuals.map(visitExpr)
+      val es = actuals.map(visitExpr(_, target))
       LoweredAst.Expr.ApplySelfTail(sym, es, tpe, purity, loc)
 
     case ErasedAst.Expr.IfThenElse(exp1, exp2, exp3, tpe, purity, loc) =>
-      val e1 = visitExpr(exp1)
-      val e2 = visitExpr(exp2)
-      val e3 = visitExpr(exp3)
+      val e1 = visitExpr(exp1, target)
+      val e2 = visitExpr(exp2, target)
+      val e3 = visitExpr(exp3, target)
       LoweredAst.Expr.IfThenElse(e1, e2, e3, tpe, purity, loc)
 
     case ErasedAst.Expr.Branch(exp, branches, tpe, purity, loc) =>
-      val e = visitExpr(exp)
+      val e = visitExpr(exp, target)
       val bs = branches.map {
-        case (label, body) => label -> visitExpr(body)
+        case (label, body) => label -> visitExpr(body, target)
       }
       LoweredAst.Expr.Branch(e, bs, tpe, purity, loc)
 
@@ -133,36 +136,36 @@ object Lowerer {
 
     case ErasedAst.Expr.Let(sym, exp1, exp2, loc) =>
       lctx.lparams.addOne(LoweredAst.LocalParam(sym, exp1.tpe))
-      val e1 = visitExpr(exp1)
-      val e2 = visitExpr(exp2)
+      val e1 = visitExpr(exp1, target)
+      val e2 = visitExpr(exp2, target)
       LoweredAst.Expr.Let(sym, e1, e2, loc)
 
     case ErasedAst.Expr.Stmt(exp1, exp2, loc) =>
-      val e1 = visitExpr(exp1)
-      val e2 = visitExpr(exp2)
+      val e1 = visitExpr(exp1, target)
+      val e2 = visitExpr(exp2, target)
       LoweredAst.Expr.Stmt(e1, e2, loc)
 
     case ErasedAst.Expr.Region(sym, exp, tpe, purity, loc) =>
       lctx.lparams.addOne(LoweredAst.LocalParam(sym, SimpleType.Region))
-      val e = visitExpr(exp)
+      val e = visitExpr(exp, target)
       LoweredAst.Expr.Region(sym, e, tpe, purity, loc)
 
     case ErasedAst.Expr.TryCatch(exp, rules, tpe, purity, loc) =>
-      val e = visitExpr(exp)
+      val e = visitExpr(exp, target)
       val rs = rules.map {
         case ErasedAst.CatchRule(sym, catchTpe, body) =>
           lctx.lparams.addOne(LoweredAst.LocalParam(sym, SimpleType.Object))
-          val b = visitExpr(body)
+          val b = visitExpr(body, target)
           LoweredAst.CatchRule(sym, catchTpe, b)
       }
       LoweredAst.Expr.TryCatch(e, rs, tpe, purity, loc)
 
     case ErasedAst.Expr.RunWith(exp, effUse, rules, ct, tpe, purity, loc) =>
       val pcPointId = if (ct == ExpPosition.NonTail) lctx.newPcPointId() else 0
-      val e = visitExpr(exp)
+      val e = visitExpr(exp, target)
       val rs = rules.map {
         case ErasedAst.HandlerRule(op, fparams, body) =>
-          val b = visitExpr(body)
+          val b = visitExpr(body, target)
           LoweredAst.HandlerRule(op, fparams.map(visitFormalParam), b)
       }
       LoweredAst.Expr.RunWith(e, effUse, rs, ct, pcPointId, tpe, purity, loc)
@@ -170,7 +173,7 @@ object Lowerer {
     case ErasedAst.Expr.NewObject(name, clazz, tpe, purity, methods, loc) =>
       val specs = methods.map {
         case ErasedAst.JvmMethod(ident, fparams, clo, retTpe, methPurity, methLoc) =>
-          val c = visitExpr(clo)
+          val c = visitExpr(clo, target)
           LoweredAst.JvmMethod(ident, fparams.map(visitFormalParam), c, retTpe, methPurity, methLoc)
       }
       LoweredAst.Expr.NewObject(name, clazz, tpe, purity, specs, loc)
@@ -199,6 +202,68 @@ object Lowerer {
     }
 
     def getPcPoints: Int = pcPoints
+  }
+
+  private def canSuspend(purity: Purity, target: CompilationTarget): Boolean = target match {
+    case CompilationTarget.LlvmWasm => !Purity.isPure(purity)
+    case _ => Purity.isControlImpure(purity)
+  }
+
+  private def isSuspendableAtomicOp(op: AtomicOp, target: CompilationTarget): Boolean = target match {
+    case CompilationTarget.LlvmWasm =>
+      op match {
+        case AtomicOp.Unary(sop) => isSuspendableIoOp(sop)
+        case _ => false
+      }
+    case _ => false
+  }
+
+  private def isSuspendableIoOp(sop: SemanticOp.UnaryOp): Boolean = sop match {
+    case SemanticOp.IoOp.SleepMillis => true
+    case SemanticOp.IoOp.FileExists => true
+    case SemanticOp.IoOp.FileIsDirectory => true
+    case SemanticOp.IoOp.FileIsRegularFile => true
+    case SemanticOp.IoOp.FileIsReadable => true
+    case SemanticOp.IoOp.FileIsSymbolicLink => true
+    case SemanticOp.IoOp.FileIsWritable => true
+    case SemanticOp.IoOp.FileIsExecutable => true
+    case SemanticOp.IoOp.FileAccessTime => true
+    case SemanticOp.IoOp.FileCreationTime => true
+    case SemanticOp.IoOp.FileModificationTime => true
+    case SemanticOp.IoOp.FileSize => true
+    case SemanticOp.IoOp.FileRead => true
+    case SemanticOp.IoOp.FileReadLines => true
+    case SemanticOp.IoOp.FileReadBytes => true
+    case SemanticOp.IoOp.FileList => true
+    case SemanticOp.IoOp.FileWrite => true
+    case SemanticOp.IoOp.FileWriteBytes => true
+    case SemanticOp.IoOp.FileAppend => true
+    case SemanticOp.IoOp.FileAppendBytes => true
+    case SemanticOp.IoOp.FileTruncate => true
+    case SemanticOp.IoOp.FileMkDir => true
+    case SemanticOp.IoOp.FileMkDirs => true
+    case SemanticOp.IoOp.FileMkTempDir => true
+    case SemanticOp.IoOp.TcpSocketRead => true
+    case SemanticOp.IoOp.TcpSocketWrite => true
+    case SemanticOp.IoOp.TcpSocketConnect => true
+    case SemanticOp.IoOp.TcpSocketClose => true
+    case SemanticOp.IoOp.TcpServerBind => true
+    case SemanticOp.IoOp.TcpServerLocalPort => true
+    case SemanticOp.IoOp.TcpServerAccept => true
+    case SemanticOp.IoOp.TcpServerClose => true
+    case SemanticOp.IoOp.ProcessStdinWrite => true
+    case SemanticOp.IoOp.ProcessExec => true
+    case SemanticOp.IoOp.ProcessExitValue => true
+    case SemanticOp.IoOp.ProcessIsAlive => true
+    case SemanticOp.IoOp.ProcessPid => true
+    case SemanticOp.IoOp.ProcessStop => true
+    case SemanticOp.IoOp.ProcessWaitFor => true
+    case SemanticOp.IoOp.ProcessWaitForTimeout => true
+    case SemanticOp.IoOp.ProcessStdoutRead => true
+    case SemanticOp.IoOp.ProcessStderrRead => true
+    case SemanticOp.IoOp.ProcessRelease => true
+    case SemanticOp.IoOp.HttpRequest => true
+    case _ => false
   }
 
 }
