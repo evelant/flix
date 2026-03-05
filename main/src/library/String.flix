@@ -1403,8 +1403,45 @@ pub mod String {
     def linesWithNewLine(s: String): List[String] =
         if (isEmpty(s))
             Nil
-        else
-            split({regex = "(?<=\\R)"}, s)
+        else {
+            let len = length(s);
+
+            ///
+            /// Returns the length of the linebreak sequence starting at `ix`, or `0` if none.
+            ///
+            /// Matches the same set as Java's `\R`:
+            ///   - CRLF ("\r\n")
+            ///   - LF ("\n"), CR ("\r"), VT ("\u000B"), FF ("\u000C"), NEL ("\u0085"),
+            ///     LS ("\u2028"), PS ("\u2029")
+            ///
+            def lbLen(ix: Int32): Int32 = {
+                let c = charAt(ix, s);
+                if (c == '\r') {
+                    if (ix + 1 < len and charAt(ix + 1, s) == '\n') 2 else 1
+                } else if (c == '\n' or c == '\u000B' or c == '\u000C' or c == '\u0085' or c == '\u2028' or c == '\u2029') {
+                    1
+                } else {
+                    0
+                }
+            };
+
+            def loop(pos: Int32, start: Int32, acc: List[String]): List[String] = {
+                if (pos >= len) {
+                    if (start >= len)
+                        List.reverse(acc)
+                    else
+                        List.reverse(slice(start = start, end = len, s) :: acc)
+                } else match lbLen(pos) {
+                    case 0 => loop(pos + 1, start, acc)
+                    case n =>
+                        let end = pos + n;
+                        let line = slice(start = start, end = end, s);
+                        loop(end, end, line :: acc)
+                }
+            };
+
+            loop(0, 0, Nil)
+        }
 
     ///
     /// Returns `Some(suffix)` of string `s` if its prefix matches `substr`.

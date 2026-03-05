@@ -339,6 +339,7 @@ object OpPrinter {
     case IoOp.SleepMillis => "sleepMillis"
     case IoOp.Exit => "exit"
     case IoOp.NewId => "newId"
+    case IoOp.TimeNowMillis => "timeNowMillis"
     case IoOp.FileExists => "fileExists"
     case IoOp.FileIsDirectory => "fileIsDirectory"
     case IoOp.FileIsRegularFile => "fileIsRegularFile"

@@ -28,6 +28,7 @@ const RtCondition = if (is_wasm) struct {
 } else std.Thread.Condition;
 
 const RtThread = if (is_wasm) struct {
+    task_id: u64,
     pub fn join(_: @This()) void {}
 } else std.Thread;
 
@@ -224,27 +225,92 @@ const c = if (is_wasm) struct {
         wasmExit(code);
     }
 
-    // Regex is currently unsupported on wasm32-freestanding. We provide stub types and trap
-    // implementations so the runtime can still compile.
-    pub const regex_t = extern struct {
+    // Regex support for wasm32-freestanding: implemented in pure Zig (`runtime/src/rt_regex.zig`).
+    pub const regex_t = struct {
         re_nsub: usize = 0,
-        _dummy: usize = 0,
+        prog: ?*rt_regex.Program = null,
     };
     pub const regmatch_t = extern struct { rm_so: i32 = 0, rm_eo: i32 = 0 };
-    pub const REG_EXTENDED: i32 = 0;
-    pub const REG_ICASE: i32 = 0;
+    pub const REG_EXTENDED: i32 = 1;
+    pub const REG_ICASE: i32 = rt_regex.REG_ICASE;
 
-    pub fn regcomp(_: *regex_t, _: [*:0]const u8, _: i32) i32 {
-        @panic("regex unsupported on wasm");
+    const REG_NOMATCH: i32 = 1;
+    const REG_BADPAT: i32 = 2;
+    const REG_EPAREN: i32 = 3;
+    const REG_EBRACK: i32 = 4;
+    const REG_BADRPT: i32 = 5;
+    const REG_ESPACE: i32 = 6;
+
+    pub fn regcomp(preg: *regex_t, pattern: [*:0]const u8, cflags: i32) i32 {
+        const pat = std.mem.span(pattern);
+        const prog = rt_regex.compile(rt_alloc, pat, cflags) catch |e| switch (e) {
+            error.BadPattern => return REG_BADPAT,
+            error.UnbalancedParen => return REG_EPAREN,
+            error.UnbalancedBracket => return REG_EBRACK,
+            error.BadRepeat => return REG_BADRPT,
+            error.OutOfMemory => return REG_ESPACE,
+        };
+
+        preg.re_nsub = prog.nsub;
+        preg.prog = prog;
+        return 0;
     }
-    pub fn regexec(_: *regex_t, _: [*:0]const u8, _: usize, _: [*]regmatch_t, _: i32) i32 {
-        @panic("regex unsupported on wasm");
+
+    pub fn regexec(preg: *regex_t, str: [*:0]const u8, nmatch: usize, pmatch: [*]regmatch_t, eflags: i32) i32 {
+        _ = eflags;
+        const prog = preg.prog orelse return REG_NOMATCH;
+        const input = std.mem.span(str);
+
+        const ncap: usize = prog.ncap;
+        const caps = rt_alloc.alloc(i32, ncap) catch return REG_ESPACE;
+        defer rt_alloc.free(caps);
+        @memset(caps, -1);
+
+        const ok = rt_regex.execFirst(rt_alloc, prog, input, caps);
+        if (!ok) return REG_NOMATCH;
+
+        const want: usize = if (nmatch < (prog.nsub + 1)) nmatch else (prog.nsub + 1);
+        var i: usize = 0;
+        while (i < want) : (i += 1) {
+            const so: i32 = caps[2 * i];
+            const eo: i32 = caps[2 * i + 1];
+            pmatch[i].rm_so = so;
+            pmatch[i].rm_eo = eo;
+        }
+        while (i < nmatch) : (i += 1) {
+            pmatch[i].rm_so = -1;
+            pmatch[i].rm_eo = -1;
+        }
+
+        return 0;
     }
-    pub fn regerror(_: i32, _: *regex_t, _: [*]u8, _: usize) usize {
-        @panic("regex unsupported on wasm");
+
+    pub fn regerror(errcode: i32, _: *regex_t, buf: [*]u8, size: usize) usize {
+        const msg = switch (errcode) {
+            REG_NOMATCH => "no match",
+            REG_BADPAT => "invalid pattern",
+            REG_EPAREN => "unbalanced parentheses",
+            REG_EBRACK => "unbalanced bracket expression",
+            REG_BADRPT => "invalid repetition operator",
+            REG_ESPACE => "out of memory",
+            else => "regex error",
+        };
+
+        const n: usize = msg.len;
+        if (size == 0) return n;
+        const to_copy: usize = if (n < (size - 1)) n else (size - 1);
+        std.mem.copyForwards(u8, buf[0..to_copy], msg[0..to_copy]);
+        buf[to_copy] = 0;
+        return n;
     }
-    pub fn regfree(_: *regex_t) void {
-        @panic("regex unsupported on wasm");
+
+    pub fn regfree(preg: *regex_t) void {
+        if (preg.prog) |p| {
+            var pp: *rt_regex.Program = p;
+            pp.deinit(rt_alloc);
+            preg.prog = null;
+            preg.re_nsub = 0;
+        }
     }
 } else @cImport({
     @cInclude("stdlib.h");
@@ -252,6 +318,7 @@ const c = if (is_wasm) struct {
 });
 
 const unicode_case = @import("unicode_case_tables.zig");
+const rt_regex = @import("rt_regex.zig");
 
 // ----------------------------------------------------------------------------
 // WIT sys imports (wasm only).
@@ -266,6 +333,7 @@ const WitString = extern struct {
 };
 
 extern fn flix_sys_sys_log(level: u8, msg: *WitString) void;
+extern fn flix_sys_sys_time_now_ms() i64;
 
 // ============================================================================
 // GC Heap (bring-up): non-moving mark/sweep, STW at pollchecks.
@@ -918,6 +986,7 @@ fn gcMarkAllRoots(marker: *GcMarker) void {
 
             if (region.cancel_cause) |p| gcMarkerMarkPtr(marker, p);
             if (region.child_exn) |p| gcMarkerMarkPtr(marker, p);
+            if (region.exit_initialized) gcMarkerMarkPayload(marker, region.exit_body_payload);
 
             for (region.remembered_slots.items) |slot_ptr| {
                 gcMarkerMarkPayload(marker, slot_ptr.*);
@@ -1577,7 +1646,7 @@ export fn flix_float64_to_string(x: f64) *anyopaque {
 
 const RegexObj = struct {
     re: c.regex_t,
-    pattern: *anyopaque,
+    pattern_ascii: []u8,
     flags: i32,
 };
 
@@ -2294,6 +2363,8 @@ export fn flix_regex_compile_with_flags(flags: i32, pattern_ptr: *anyopaque) *an
     const pat_z = flixStringToAsciiZ(pattern_ptr);
     defer c.free(@ptrCast(pat_z.ptr));
 
+    const pat_copy = rt_alloc.dupe(u8, pat_z[0..pat_z.len]) catch @panic("oom");
+
     const literal = (flags & 16) != 0; // Pattern.LITERAL
     var quoted: []u8 = &.{};
     defer if (quoted.len != 0) rt_alloc.free(quoted);
@@ -2311,7 +2382,7 @@ export fn flix_regex_compile_with_flags(flags: i32, pattern_ptr: *anyopaque) *an
     defer if (literal) c.free(@ptrCast(@constCast(pat_ptr)));
 
     const obj = rt_alloc.create(RegexObj) catch @panic("oom");
-    obj.pattern = pattern_ptr;
+    obj.pattern_ascii = pat_copy;
     obj.flags = flags;
 
     const rc = c.regcomp(&obj.re, pat_ptr, flagsToPosix(flags));
@@ -2327,6 +2398,8 @@ export fn flix_regex_try_compile(pattern_ptr: *anyopaque) *anyopaque {
 export fn flix_regex_try_compile_with_flags(flags: i32, pattern_ptr: *anyopaque) *anyopaque {
     const pat_z = flixStringToAsciiZ(pattern_ptr);
     defer c.free(@ptrCast(pat_z.ptr));
+
+    const pat_copy = rt_alloc.dupe(u8, pat_z[0..pat_z.len]) catch @panic("oom");
 
     const literal = (flags & 16) != 0; // Pattern.LITERAL
     var quoted: []u8 = &.{};
@@ -2346,6 +2419,7 @@ export fn flix_regex_try_compile_with_flags(flags: i32, pattern_ptr: *anyopaque)
     var re: c.regex_t = undefined;
     const rc = c.regcomp(&re, pat_ptr, flagsToPosix(flags));
     if (rc != 0) {
+        rt_alloc.free(pat_copy);
         var buf: [256]u8 = undefined;
         _ = c.regerror(rc, &re, &buf, buf.len);
         const msg_len: usize = std.mem.indexOfScalar(u8, &buf, 0) orelse buf.len;
@@ -2361,7 +2435,7 @@ export fn flix_regex_try_compile_with_flags(flags: i32, pattern_ptr: *anyopaque)
 
     const obj = rt_alloc.create(RegexObj) catch @panic("oom");
     obj.re = re;
-    obj.pattern = pattern_ptr;
+    obj.pattern_ascii = pat_copy;
     obj.flags = flags;
 
     const empty_msg = allocFlixStringFromAscii("");
@@ -2384,7 +2458,7 @@ export fn flix_regex_quote(input_ptr: *anyopaque) *anyopaque {
 
 export fn flix_regex_pattern(rgx_ptr: *anyopaque) *anyopaque {
     const rgx: *RegexObj = @ptrCast(@alignCast(rgx_ptr));
-    return rgx.pattern;
+    return allocFlixStringFromAscii(rgx.pattern_ascii);
 }
 
 export fn flix_regex_flags(rgx_ptr: *anyopaque) i32 {
@@ -2840,7 +2914,10 @@ export fn flix_eprintln(s_ptr: *anyopaque) i64 {
 
 export fn flix_readln(_: i64) *anyopaque {
     if (is_wasm) {
-        @panic("flix_readln: unsupported on wasm");
+        // Browser/wasm environments generally lack a stable stdin concept.
+        // Treat `readln` as EOF (empty string) rather than trapping so portable programs
+        // can degrade gracefully. A future host-backed suspension op can provide real input.
+        return allocFlixStringFromAscii("");
     } else {
         if (!g_stdin_reader_ready) {
             g_stdin_reader = std.fs.File.stdin().readerStreaming(g_stdin_buf[0..]);
@@ -2883,6 +2960,14 @@ export fn flix_exit(code: i32) void {
 
 export fn flix_new_id(_: i64) i64 {
     return g_next_id.fetchAdd(1, .monotonic);
+}
+
+export fn flix_time_now_ms(_: i64) i64 {
+    if (is_wasm) {
+        return flix_sys_sys_time_now_ms();
+    } else {
+        return std.time.milliTimestamp();
+    }
 }
 
 // ============================================================================
@@ -4928,6 +5013,7 @@ const FlixTypeInfo = extern struct {
 extern const flix_ti_array_prim: FlixTypeInfo;
 extern const flix_ti_array_ptr: FlixTypeInfo;
 extern const flix_ti_string: FlixTypeInfo;
+extern const flix_ti_suspension: FlixTypeInfo;
 
 const FlixObj = if (@sizeOf(usize) == 4) extern struct {
     typeinfo: *const FlixTypeInfo,
@@ -5349,6 +5435,9 @@ const FlixRegion = struct {
     arena: std.heap.ArenaAllocator,
     children: std.ArrayListUnmanaged(RtThread),
     child_exn: ?*anyopaque,
+    exit_initialized: bool,
+    exit_body_tag: i64,
+    exit_body_payload: i64,
     remembered_slots: std.ArrayListUnmanaged(*i64),
     remembered_ptr_arrays: std.ArrayListUnmanaged(RememberedPtrArray),
 };
@@ -5397,6 +5486,9 @@ export fn flix_region_enter(ctx: *anyopaque) *anyopaque {
         .arena = std.heap.ArenaAllocator.init(rt_alloc),
         .children = .{},
         .child_exn = null,
+        .exit_initialized = false,
+        .exit_body_tag = 0,
+        .exit_body_payload = 0,
         .remembered_slots = .{},
         .remembered_ptr_arrays = .{},
     };
@@ -5410,7 +5502,7 @@ export fn flix_region_enter(ctx: *anyopaque) *anyopaque {
 
 export fn flix_region_exit(ctx: *anyopaque, region_ptr0: ?*anyopaque, body_tag: i64, body_payload: i64) FlixResult {
     const fctx: *FlixCtx = requireCtx(ctx);
-    const body_outcome: FlixResult = .{ .tag = body_tag, .payload = body_payload };
+    var body_outcome: FlixResult = .{ .tag = body_tag, .payload = body_payload };
 
     // `body_outcome` may carry a pointer payload that is not otherwise present in the explicit root
     // stack (it is passed by value across the region delimiter). Since `region_exit` may block while
@@ -5424,68 +5516,167 @@ export fn flix_region_exit(ctx: *anyopaque, region_ptr0: ?*anyopaque, body_tag: 
     const region: *FlixRegion = @ptrCast(@alignCast(region_ptr));
     dbg("region_exit: {x} start\n", .{@intFromPtr(region)});
 
-    if (current_region != region) {
-        @panic("flix_region_exit: region mismatch");
+    if (is_wasm) {
+        const ctx_rep = current_wit_ctx orelse @panic("flix_region_exit: missing wasm WIT context");
+
+        // Close the region (idempotent) and cache the body outcome for retries.
+        region.mutex.lock();
+        switch (region.state) {
+            .Open => {
+                if (current_region != region) {
+                    @panic("flix_region_exit: region mismatch");
+                }
+
+                // `Region` is a delimiter: only VALUE or EXCEPTION outcomes are legal.
+                if (body_outcome.tag != RESULT_TAG_VALUE and body_outcome.tag != RESULT_TAG_EXCEPTION) {
+                    @panic("flix_region_exit: invalid body outcome");
+                }
+
+                region.exit_initialized = true;
+                region.exit_body_tag = body_outcome.tag;
+                region.exit_body_payload = body_outcome.payload;
+                outcome_payload_slot = body_outcome.payload;
+
+                // Pop the region from the thread-local stack early so nested unwinding uses the parent.
+                current_region = region.parent;
+
+                region.state = .Closing;
+            },
+
+            .Closing => {
+                if (!region.exit_initialized) @panic("flix_region_exit: closing without stored body outcome");
+                body_outcome = .{ .tag = region.exit_body_tag, .payload = region.exit_body_payload };
+                outcome_payload_slot = body_outcome.payload;
+            },
+
+            .Closed => @panic("flix_region_exit: region already closed"),
+        }
+
+        // Request cooperative cancellation iff a child has thrown.
+        //
+        // Important: we intentionally do *not* request cancellation solely because the parent is exiting exceptionally.
+        // This preserves the JVM backend behavior where children are allowed to run to completion and any child
+        // exception takes precedence over the parent exception at region exit.
+        if (region.child_exn) |cause_ptr| {
+            if (region.cancel_cause == null) region.cancel_cause = cause_ptr;
+            region.cancel_requested.store(true, .release);
+        }
+
+        region.mutex.unlock();
+
+        // Join all attached children before reclaiming arena memory. On wasm this may suspend.
+        for (region.children.items) |t| {
+            const task_id = t.task_id;
+            const tptr = ctx_rep.tasks.getPtr(task_id) orelse continue;
+            switch (tptr.state) {
+                .Completed => {},
+                else => {
+                    const susp = allocTimerSleepSuspension(0);
+                    return FlixResult{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp) };
+                },
+            }
+        }
+        dbg("region_exit: {x} joined\n", .{@intFromPtr(region)});
+
+        // Child exception takes precedence over parent outcome at region exit.
+        region.mutex.lock();
+        const out: FlixResult = if (region.child_exn) |exn_ptr|
+            FlixResult{ .tag = RESULT_TAG_EXCEPTION, .payload = payloadFromPtr(exn_ptr) }
+        else
+            body_outcome;
+        outcome_payload_slot = out.payload;
+
+        // Release and remove all region-attached child tasks (host-invisible).
+        for (region.children.items) |t| {
+            const task_id = t.task_id;
+            const task_ptr = ctx_rep.tasks.getPtr(task_id) orelse continue;
+            switch (task_ptr.state) {
+                .Completed => |st| {
+                    if (!st.consumed) flix_handle_release(ctx_rep.flix_ctx, st.handle);
+                },
+                else => @panic("region_exit: unexpected non-completed child at join completion"),
+            }
+            _ = ctx_rep.tasks.remove(task_id);
+        }
+        region.children.deinit(rt_alloc);
+        region.children = .{};
+
+        region.state = .Closed;
+        region.mutex.unlock();
+
+        // Region remembered-set metadata.
+        region.remembered_slots.deinit(rt_alloc);
+        region.remembered_ptr_arrays.deinit(rt_alloc);
+
+        region.arena.deinit();
+        deregisterRegion(region);
+        rt_alloc.destroy(region);
+        dbg("region_exit: {x} done\n", .{@intFromPtr(region)});
+        return out;
+    } else {
+        if (current_region != region) {
+            @panic("flix_region_exit: region mismatch");
+        }
+
+        // `Region` is a delimiter: only VALUE or EXCEPTION outcomes are legal.
+        if (body_outcome.tag != RESULT_TAG_VALUE and body_outcome.tag != RESULT_TAG_EXCEPTION) {
+            @panic("flix_region_exit: invalid body outcome");
+        }
+
+        // Pop the region from the thread-local stack early so nested unwinding uses the parent.
+        current_region = region.parent;
+
+        // Close region and snapshot children (prevents racy spawn/join).
+        region.mutex.lock();
+        region.state = .Closing;
+
+        // Request cooperative cancellation iff a child has thrown.
+        //
+        // Important: we intentionally do *not* request cancellation solely because the parent is exiting exceptionally.
+        // This preserves the JVM backend behavior where children are allowed to run to completion and any child
+        // exception takes precedence over the parent exception at region exit.
+        //
+        // (Cancellation requests due to a child exception are also performed eagerly in `spawnThreadMain`.)
+        if (region.child_exn) |cause_ptr| {
+            if (region.cancel_cause == null) region.cancel_cause = cause_ptr;
+            region.cancel_requested.store(true, .release);
+        }
+
+        var children = region.children;
+        region.children = .{};
+        region.mutex.unlock();
+
+        // Join all attached children before reclaiming arena memory.
+        fctx.blocked.store(true, .release);
+        for (children.items) |t| {
+            t.join();
+        }
+        pollcheckCooperate(fctx);
+        fctx.blocked.store(false, .release);
+        children.deinit(rt_alloc);
+        dbg("region_exit: {x} joined\n", .{@intFromPtr(region)});
+
+        // Child exception takes precedence over parent outcome at region exit.
+        region.mutex.lock();
+        const child_exn_ptr = region.child_exn;
+        region.state = .Closed;
+        region.mutex.unlock();
+
+        const out = if (child_exn_ptr) |exn_ptr|
+            FlixResult{ .tag = RESULT_TAG_EXCEPTION, .payload = payloadFromPtr(exn_ptr) }
+        else
+            body_outcome;
+
+        // Region remembered-set metadata.
+        region.remembered_slots.deinit(rt_alloc);
+        region.remembered_ptr_arrays.deinit(rt_alloc);
+
+        region.arena.deinit();
+        deregisterRegion(region);
+        rt_alloc.destroy(region);
+        dbg("region_exit: {x} done\n", .{@intFromPtr(region)});
+        return out;
     }
-
-    // `Region` is a delimiter: only VALUE or EXCEPTION outcomes are legal.
-    if (body_outcome.tag != RESULT_TAG_VALUE and body_outcome.tag != RESULT_TAG_EXCEPTION) {
-        @panic("flix_region_exit: invalid body outcome");
-    }
-
-    // Pop the region from the thread-local stack early so nested unwinding uses the parent.
-    current_region = region.parent;
-
-    // Close region and snapshot children (prevents racy spawn/join).
-    region.mutex.lock();
-    region.state = .Closing;
-
-    // Request cooperative cancellation iff a child has thrown.
-    //
-    // Important: we intentionally do *not* request cancellation solely because the parent is exiting exceptionally.
-    // This preserves the JVM backend behavior where children are allowed to run to completion and any child
-    // exception takes precedence over the parent exception at region exit.
-    //
-    // (Cancellation requests due to a child exception are also performed eagerly in `spawnThreadMain`.)
-    if (region.child_exn) |cause_ptr| {
-        if (region.cancel_cause == null) region.cancel_cause = cause_ptr;
-        region.cancel_requested.store(true, .release);
-    }
-
-    var children = region.children;
-    region.children = .{};
-    region.mutex.unlock();
-
-    // Join all attached children before reclaiming arena memory.
-    fctx.blocked.store(true, .release);
-    for (children.items) |t| {
-        t.join();
-    }
-    pollcheckCooperate(fctx);
-    fctx.blocked.store(false, .release);
-    children.deinit(rt_alloc);
-    dbg("region_exit: {x} joined\n", .{@intFromPtr(region)});
-
-    // Child exception takes precedence over parent outcome at region exit.
-    region.mutex.lock();
-    const child_exn_ptr = region.child_exn;
-    region.state = .Closed;
-    region.mutex.unlock();
-
-    const out = if (child_exn_ptr) |exn_ptr|
-        FlixResult{ .tag = RESULT_TAG_EXCEPTION, .payload = payloadFromPtr(exn_ptr) }
-    else
-        body_outcome;
-
-    // Region remembered-set metadata.
-    region.remembered_slots.deinit(rt_alloc);
-    region.remembered_ptr_arrays.deinit(rt_alloc);
-
-    region.arena.deinit();
-    deregisterRegion(region);
-    rt_alloc.destroy(region);
-    dbg("region_exit: {x} done\n", .{@intFromPtr(region)});
-    return out;
 }
 
 export fn flix_region_malloc(ctx: *anyopaque, region_ptr0: ?*anyopaque, size_bytes_i64: i64) *anyopaque {
@@ -5576,9 +5767,45 @@ export fn flix_store_ptr(ctx: *anyopaque, slot_ptr: *anyopaque, value: i64) void
 
 export fn flix_spawn(ctx: *anyopaque, region_ptr0: ?*anyopaque, clo: *anyopaque) i64 {
     if (is_wasm) {
-        @panic("flix_spawn: unsupported on wasm in this build (no wasm threads yet)");
+        const ctx_rep = current_wit_ctx orelse @panic("flix_spawn: missing wasm WIT context");
+        const fctx: *FlixCtx = requireCtx(ctx);
+        _ = fctx;
+
+        const region: ?*FlixRegion = if (region_ptr0) |rp| @ptrCast(@alignCast(rp)) else null;
+
+        if (region) |r| {
+            r.mutex.lock();
+            defer r.mutex.unlock();
+            if (r.state != .Open) {
+                @panic("flix_spawn: spawn into closing/closed region");
+            }
+        }
+
+        // Root the closure for the lifetime of the spawned task via a handle.
+        const clo_handle = flix_handle_new(ctx, clo);
+
+        const task_id = ctx_rep.next_task_id;
+        ctx_rep.next_task_id +%= 1;
+
+        const t: Task = .{
+            .kind = .{ .Thunk = clo_handle },
+            .args = .{},
+            .state = .ReadyStart,
+            .region = region,
+            .host_visible = false,
+        };
+
+        ctx_rep.tasks.put(rt_alloc, task_id, t) catch @panic("oom");
+        taskQueuePush(ctx_rep, task_id);
+
+        if (region) |r| {
+            r.mutex.lock();
+            defer r.mutex.unlock();
+            r.children.append(rt_alloc, .{ .task_id = task_id }) catch @panic("oom");
+        }
+
+        return 0;
     } else {
-        _ = ctx;
         // Publish the closure pointer as a temporary GC root until the new thread has a chance to
         // register its context and root the closure explicitly.
         spawnRootsAdd(clo);
@@ -6001,11 +6228,18 @@ extern fn flix_wasm_resume_throw_def(ctx: *anyopaque, def_id: i64, susp_handle: 
 
 const WasmIoEffSymId: i64 = 0;
 
+const TaskKind = union(enum) {
+    Def: i64,
+    /// Handle id for a thunk/closure pointer (must be a `.Ptr` handle).
+    Thunk: i64,
+};
+
 const Task = struct {
-    def_id: i64,
+    kind: TaskKind,
     args: std.ArrayListUnmanaged(i64),
     state: TaskState,
     region: ?*FlixRegion,
+    host_visible: bool,
 };
 
 const TaskState = union(enum) {
@@ -6016,9 +6250,12 @@ const TaskState = union(enum) {
     Completed: struct { tag: u8, handle: i64, consumed: bool },
 };
 
+threadlocal var current_wit_ctx: ?*exports_flix_runtime_runtime_ctx_t = null;
+
 fn witSetCurrentCtx(ctx_rep: *exports_flix_runtime_runtime_ctx_t) void {
     // Ensure threadlocals used by the runtime point at the correct context for this call.
     current_ctx = @ptrCast(@alignCast(ctx_rep.flix_ctx));
+    current_wit_ctx = ctx_rep;
 }
 
 fn witBytesToOwned(buf: []const u8) flix_list_u8_t {
@@ -6160,7 +6397,52 @@ fn taskReleaseArgs(ctx_ptr: *anyopaque, t: *Task) void {
 fn taskMarkCompleted(ctx_rep: *exports_flix_runtime_runtime_ctx_t, t: *Task, tag: u8, handle: i64) void {
     // Task no longer needs its original arguments.
     taskReleaseArgs(ctx_rep.flix_ctx, t);
+    // If the task was started from a thunk handle, release it now that we are completed.
+    switch (t.kind) {
+        .Thunk => |th| {
+            flix_handle_release(ctx_rep.flix_ctx, th);
+            t.kind = .{ .Thunk = 0 };
+        },
+        else => {},
+    }
+    // Region-attached tasks propagate their exception to the region (child exception precedence)
+    // and request cooperative cancellation.
+    if (tag == 1) {
+        if (t.region) |region| {
+            const exn_ptr = flix_handle_get(ctx_rep.flix_ctx, handle);
+            const fctx: *FlixCtx = requireCtx(ctx_rep.flix_ctx);
+            const is_cancel = if (fctx.cancel_exn) |p| p == exn_ptr else false;
+
+            if (!is_cancel) {
+                // First exception wins.
+                region.mutex.lock();
+                if (region.child_exn == null) {
+                    region.child_exn = exn_ptr;
+                }
+                // Request cooperative cancellation for siblings and parent.
+                const cause_ptr = region.child_exn orelse exn_ptr;
+                if (region.cancel_cause == null) region.cancel_cause = cause_ptr;
+                region.cancel_requested.store(true, .release);
+                region.mutex.unlock();
+            }
+        }
+    }
     t.state = .{ .Completed = .{ .tag = tag, .handle = handle, .consumed = false } };
+}
+
+fn allocTimerSleepSuspension(ms: u64) *anyopaque {
+    const slots_total: usize = 6;
+    const size_bytes: usize = @sizeOf(FlixObj) + slots_total * @sizeOf(i64);
+    const mem = gcAllocBytes(size_bytes, &flix_ti_suspension);
+    const slots: [*]i64 = objPayloadSlots(mem);
+
+    slots[0] = WasmIoEffSymId;
+    slots[1] = 1; // timer-sleep
+    slots[2] = 0; // prefix frames (filled in by codegen when returning the suspension)
+    slots[3] = 0; // resumption chain (not used for simple yields)
+    slots[4] = 1; // arg count
+    slots[5] = @intCast(ms);
+    return mem;
 }
 
 fn taskMakeSuspensionForHost(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, susp_handle: i64) exports_flix_runtime_runtime_own_suspension_t {
@@ -6191,38 +6473,80 @@ fn runTaskOnce(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, t: *T
 
     switch (t.state) {
         .ReadyStart => {
-            // Prepare argv bits for the def dispatcher.
-            const argc: usize = t.args.items.len;
-            const arg_bits = rt_alloc.alloc(i64, argc) catch @panic("oom");
-            defer rt_alloc.free(arg_bits);
-            var i: usize = 0;
-            while (i < argc) : (i += 1) {
-                arg_bits[i] = flix_handle_payload(ctx_rep.flix_ctx, t.args.items[i]);
-            }
+            switch (t.kind) {
+                .Def => |def_id| {
+                    // Prepare argv bits for the def dispatcher.
+                    const argc: usize = t.args.items.len;
+                    const arg_bits = rt_alloc.alloc(i64, argc) catch @panic("oom");
+                    defer rt_alloc.free(arg_bits);
+                    var i: usize = 0;
+                    while (i < argc) : (i += 1) {
+                        arg_bits[i] = flix_handle_payload(ctx_rep.flix_ctx, t.args.items[i]);
+                    }
 
-            const r = flix_wasm_invoke_def(ctx_rep.flix_ctx, t.def_id, arg_bits.ptr, @intCast(argc));
-            switch (r.tag) {
-                RESULT_TAG_VALUE => {
-                    taskMarkCompleted(ctx_rep, t, 0, r.payload);
-                    return null;
+                    const r = flix_wasm_invoke_def(ctx_rep.flix_ctx, def_id, arg_bits.ptr, @intCast(argc));
+                    switch (r.tag) {
+                        RESULT_TAG_VALUE => {
+                            taskMarkCompleted(ctx_rep, t, 0, r.payload);
+                            return null;
+                        },
+                        RESULT_TAG_EXCEPTION => {
+                            taskMarkCompleted(ctx_rep, t, 1, r.payload);
+                            return null;
+                        },
+                        RESULT_TAG_SUSPENSION => {
+                            // Task owns this suspension handle.
+                            taskReleaseArgs(ctx_rep.flix_ctx, t);
+                            t.state = .{ .Blocked = .{ .susp_handle = r.payload } };
+                            const own = taskMakeSuspensionForHost(ctx_rep, task_id, r.payload);
+                            return own;
+                        },
+                        else => @panic("unexpected result tag from flix_wasm_invoke_def"),
+                    }
                 },
-                RESULT_TAG_EXCEPTION => {
-                    taskMarkCompleted(ctx_rep, t, 1, r.payload);
-                    return null;
+
+                .Thunk => |thunk_handle| {
+                    if (thunk_handle == 0) @panic("runTaskOnce: thunk task has null thunk handle");
+                    const thunk_ptr = flix_handle_get(ctx_rep.flix_ctx, thunk_handle);
+
+                    // Invoke the thunk and unwind to a stable non-thunk result.
+                    var r0 = invokeThunk(ctx_rep.flix_ctx, thunk_ptr, 0);
+                    while (r0.tag == RESULT_TAG_THUNK) {
+                        const tptr = ptrFromPayload(r0.payload);
+                        r0 = invokeThunk(ctx_rep.flix_ctx, tptr, 0);
+                    }
+
+                    switch (r0.tag) {
+                        RESULT_TAG_VALUE => {
+                            const h = flix_handle_new_i64(ctx_rep.flix_ctx, r0.payload);
+                            taskMarkCompleted(ctx_rep, t, 0, h);
+                            return null;
+                        },
+                        RESULT_TAG_EXCEPTION => {
+                            const exn_ptr = ptrFromPayload(r0.payload);
+                            const h = flix_handle_new(ctx_rep.flix_ctx, exn_ptr);
+                            taskMarkCompleted(ctx_rep, t, 1, h);
+                            return null;
+                        },
+                        RESULT_TAG_SUSPENSION => {
+                            const susp_ptr = ptrFromPayload(r0.payload);
+                            const h = flix_handle_new(ctx_rep.flix_ctx, susp_ptr);
+                            t.state = .{ .Blocked = .{ .susp_handle = h } };
+                            const own = taskMakeSuspensionForHost(ctx_rep, task_id, h);
+                            return own;
+                        },
+                        else => @panic("unexpected result tag from thunk invocation"),
+                    }
                 },
-                RESULT_TAG_SUSPENSION => {
-                    // Task owns this suspension handle.
-                    taskReleaseArgs(ctx_rep.flix_ctx, t);
-                    t.state = .{ .Blocked = .{ .susp_handle = r.payload } };
-                    const own = taskMakeSuspensionForHost(ctx_rep, task_id, r.payload);
-                    return own;
-                },
-                else => @panic("unexpected result tag from flix_wasm_invoke_def"),
             }
         },
 
         .ReadyResumeOk => |st| {
-            const r = flix_wasm_resume_ok_def(ctx_rep.flix_ctx, t.def_id, st.susp_handle, st.resume_handle);
+            const def_id: i64 = switch (t.kind) {
+                .Def => |d| d,
+                else => 0,
+            };
+            const r = flix_wasm_resume_ok_def(ctx_rep.flix_ctx, def_id, st.susp_handle, st.resume_handle);
             flix_handle_release(ctx_rep.flix_ctx, st.susp_handle);
             flix_handle_release(ctx_rep.flix_ctx, st.resume_handle);
 
@@ -6245,7 +6569,11 @@ fn runTaskOnce(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, t: *T
         },
 
         .ReadyResumeThrow => |st| {
-            const r = flix_wasm_resume_throw_def(ctx_rep.flix_ctx, t.def_id, st.susp_handle, st.exn_handle);
+            const def_id: i64 = switch (t.kind) {
+                .Def => |d| d,
+                else => 0,
+            };
+            const r = flix_wasm_resume_throw_def(ctx_rep.flix_ctx, def_id, st.susp_handle, st.exn_handle);
             flix_handle_release(ctx_rep.flix_ctx, st.susp_handle);
             flix_handle_release(ctx_rep.flix_ctx, st.exn_handle);
 
@@ -6366,6 +6694,10 @@ export fn exports_flix_runtime_runtime_ctx_destructor(rep: *exports_flix_runtime
     while (it.next()) |e| {
         var t = e.value_ptr.*;
         taskReleaseArgs(rep.flix_ctx, &t);
+        switch (t.kind) {
+            .Thunk => |th| if (th != 0) flix_handle_release(rep.flix_ctx, th),
+            else => {},
+        }
         switch (t.state) {
             .Blocked => |st| flix_handle_release(rep.flix_ctx, st.susp_handle),
             .ReadyResumeOk => |st| {
@@ -6457,10 +6789,11 @@ export fn exports_flix_runtime_runtime_start_task(ctx: exports_flix_runtime_runt
     ctx.next_task_id +%= 1;
 
     var t: Task = .{
-        .def_id = @intCast(def_id),
+        .kind = .{ .Def = @intCast(def_id) },
         .args = .{},
         .state = .ReadyStart,
         .region = current_region,
+        .host_visible = true,
     };
     // Capture args (retain handles so they survive until task runs).
     t.args.ensureTotalCapacity(rt_alloc, args.len) catch @panic("oom");
@@ -6494,8 +6827,29 @@ export fn exports_flix_runtime_runtime_sched_step(ctx: exports_flix_runtime_runt
             else => continue,
         }
 
-        if (runTaskOnce(ctx, task_id, tptr)) |s| {
+        const own_susp_opt = runTaskOnce(ctx, task_id, tptr);
+        if (own_susp_opt) |s| {
             out.append(rt_alloc, s) catch @panic("oom");
+        }
+
+        // Auto-cleanup for detached, host-invisible tasks (spawn in Static region).
+        //
+        // Region-attached tasks are joined and cleaned up by `flix_region_exit`.
+        if (!tptr.host_visible and tptr.region == null) {
+            switch (tptr.state) {
+                .Completed => |st| {
+                    if (st.tag == 1) {
+                        const exn_ptr = flix_handle_get(ctx.flix_ctx, st.handle);
+                        const fctx: *FlixCtx = requireCtx(ctx.flix_ctx);
+                        const is_cancel = if (fctx.cancel_exn) |p| p == exn_ptr else false;
+                        if (!is_cancel) flix_exn_report_ptr(exn_ptr);
+                    }
+
+                    if (!st.consumed) flix_handle_release(ctx.flix_ctx, st.handle);
+                    _ = ctx.tasks.remove(task_id);
+                },
+                else => {},
+            }
         }
     }
 
@@ -6545,10 +6899,11 @@ export fn exports_flix_runtime_runtime_invoke(ctx: exports_flix_runtime_runtime_
     ctx.next_task_id +%= 1;
 
     var t: Task = .{
-        .def_id = @intCast(def_id),
+        .kind = .{ .Def = @intCast(def_id) },
         .args = .{},
         .state = .ReadyStart,
         .region = current_region,
+        .host_visible = true,
     };
     t.args.ensureTotalCapacity(rt_alloc, args.len) catch @panic("oom");
     var i: usize = 0;

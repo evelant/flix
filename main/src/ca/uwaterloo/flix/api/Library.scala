@@ -237,6 +237,8 @@ object Library {
     * They provide default handlers and implementations that do not rely on Java interop.
     */
   private val StandardLibraryPortableOverlay = List(
+    "portable/Clock.flix" -> LocalResource.get("/src/library/portable/Clock.flix"),
+    "portable/Random.flix" -> LocalResource.get("/src/library/portable/Random.flix"),
     "portable/FileRead.flix" -> LocalResource.get("/src/library/portable/FileRead.flix"),
     "portable/FileReadWithResult.flix" -> LocalResource.get("/src/library/portable/FileReadWithResult.flix"),
     "portable/FileWrite.flix" -> LocalResource.get("/src/library/portable/FileWrite.flix"),

@@ -209,7 +209,10 @@ object JvmLowerer {
         val e2 = visitExpr(exp2)
         JvmAst.Expr.Stmt(e1, e2, loc)
 
-      case LoweredAst.Expr.Region(sym, exp, tpe, purity, loc) =>
+      case LoweredAst.Expr.Region(sym, exp, pcPointId, tpe, purity, loc) =>
+        if (pcPointId != 0) {
+          throw InternalCompilerException(s"Unexpected pcPointId in Region: $pcPointId.", loc)
+        }
         val offset = lctx.assignOffset(sym, SimpleType.Region)
         lctx.lparams.addOne(JvmAst.LocalParam(sym, offset, SimpleType.Region))
         val e = visitExpr(exp)

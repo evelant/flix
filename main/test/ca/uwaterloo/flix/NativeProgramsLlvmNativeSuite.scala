@@ -24,9 +24,12 @@ import com.sun.net.httpserver.{HttpExchange, HttpHandler, HttpServer}
 import org.scalatest.funsuite.AnyFunSuite
 
 import java.io.IOException
+import java.io.{BufferedReader, InputStreamReader}
+import java.net.{InetAddress, ServerSocket, Socket}
 import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.{ExecutorService, Executors, TimeUnit}
 import scala.jdk.CollectionConverters.*
 
@@ -121,6 +124,95 @@ class NativeProgramsLlvmNativeSuite extends AnyFunSuite {
     }
   }
 
+  test("llvm-native-fixture-tcp-client") {
+    assume(hasZig, "zig not found on PATH (skipping LLVM-native real program fixture)")
+
+    val server = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+    server.setSoTimeout(10_000)
+    val port = server.getLocalPort
+
+    val serverErr = new AtomicReference[Throwable](null)
+    val serverThread = new Thread(() => {
+      try {
+        val socket = server.accept()
+        socket.setSoTimeout(10_000)
+        try {
+          val b = socket.getInputStream.read()
+          if (b != 65) throw new AssertionError(s"expected client byte 65, got $b")
+          socket.getOutputStream.write(Array(66.toByte))
+          socket.getOutputStream.flush()
+        } finally {
+          socket.close()
+        }
+      } catch {
+        case t: Throwable => serverErr.set(t)
+      } finally {
+        server.close()
+      }
+    })
+    serverThread.setDaemon(true)
+    serverThread.start()
+
+    val outDir = Files.createTempDirectory("flix-llvm-native-fixture-tcp-client-")
+    try {
+      val exe = compileLlvmNative(fixturesDir.resolve("tcp_client"), outDir)
+      val (exit, output) = runExecutable(
+        exe,
+        args = List("127.0.0.1", port.toString),
+        timeoutSeconds = 15,
+      )
+      serverThread.join(2_000)
+      val t = serverErr.get()
+      if (t != null) throw t
+
+      if (exit != 0) {
+        fail(s"TCP client fixture failed with exit $exit:\n$output")
+      }
+      if (!output.contains("tcp-client: ok")) {
+        fail(s"Expected success banner, but output was:\n$output")
+      }
+    } finally {
+      deleteRecursive(outDir)
+    }
+  }
+
+  test("llvm-native-fixture-tcp-server") {
+    assume(hasZig, "zig not found on PATH (skipping LLVM-native real program fixture)")
+
+    val outDir = Files.createTempDirectory("flix-llvm-native-fixture-tcp-server-")
+    try {
+      val exe = compileLlvmNative(fixturesDir.resolve("tcp_server"), outDir)
+
+      val (exit, output) = runTcpServerFixture(exe, timeoutSeconds = 20)
+      if (exit != 0) {
+        fail(s"TCP server fixture failed with exit $exit:\n$output")
+      }
+      if (!output.contains("tcp-server: ok")) {
+        fail(s"Expected success banner, but output was:\n$output")
+      }
+    } finally {
+      deleteRecursive(outDir)
+    }
+  }
+
+  test("llvm-native-fixture-process-spawn") {
+    assume(hasZig, "zig not found on PATH (skipping LLVM-native real program fixture)")
+
+    val outDir = Files.createTempDirectory("flix-llvm-native-fixture-process-spawn-")
+    try {
+      val exe = compileLlvmNative(fixturesDir.resolve("process_spawn"), outDir)
+      val (exit, output) = runExecutable(exe, timeoutSeconds = 20)
+      if (exit != 0) {
+        fail(s"Process spawn fixture failed with exit $exit:\n$output")
+      }
+      if (!output.contains("process-spawn: ok")) {
+        fail(s"Expected success banner, but output was:\n$output")
+      }
+    } finally {
+      deleteRecursive(outDir)
+    }
+  }
+
   private def compileLlvmNative(dir: Path, outDir: Path): Path = {
     val flix = new Flix()
     flix.setOptions(TestOptions.copy(outputPath = outDir))
@@ -160,13 +252,120 @@ class NativeProgramsLlvmNativeSuite extends AnyFunSuite {
       os.close()
     }
 
-    val output = new String(p.getInputStream.readAllBytes(), StandardCharsets.UTF_8)
+    val is = p.getInputStream
+    val baos = new java.io.ByteArrayOutputStream()
+    val readerThread = new Thread(() => {
+      val buf = new Array[Byte](8192)
+      try {
+        var n = is.read(buf)
+        while (n != -1) {
+          baos.write(buf, 0, n)
+          n = is.read(buf)
+        }
+      } catch {
+        case _: IOException => ()
+      }
+    })
+    readerThread.setDaemon(true)
+    readerThread.start()
+
     val finished = p.waitFor(timeoutSeconds, TimeUnit.SECONDS)
     if (!finished) {
       p.destroyForcibly()
+      p.waitFor(2, TimeUnit.SECONDS)
+    }
+
+    if (!finished) {
+      try is.close() catch { case _: IOException => () }
+      readerThread.join(1_000)
+    } else {
+      readerThread.join(1_000)
+      if (readerThread.isAlive) {
+        try is.close() catch { case _: IOException => () }
+        readerThread.join(1_000)
+      }
+    }
+
+    val output = new String(baos.toByteArray, StandardCharsets.UTF_8)
+    if (!finished) {
       fail(s"Process timed out after ${timeoutSeconds}s. Output so far:\n$output")
     }
     (p.exitValue(), output)
+  }
+
+  private def runTcpServerFixture(executable: Path, timeoutSeconds: Long): (Int, String) = {
+    val pb = new ProcessBuilder(executable.toString)
+    pb.redirectErrorStream(true)
+
+    val p = pb.start()
+    p.getOutputStream.close()
+
+    val output = new StringBuilder
+    val portRef = new AtomicReference[Option[Int]](None)
+    val portReady = new java.util.concurrent.CountDownLatch(1)
+
+    val readerThread = new Thread(() => {
+      val br = new BufferedReader(new InputStreamReader(p.getInputStream, StandardCharsets.UTF_8))
+      try {
+        var line: String = br.readLine()
+        while (line != null) {
+          output.append(line).append('\n')
+          if (line.startsWith("PORT=") && portRef.get().isEmpty) {
+            val s = line.stripPrefix("PORT=")
+            try {
+              portRef.set(Some(s.toInt))
+              portReady.countDown()
+            } catch {
+              case _: NumberFormatException =>
+                portRef.set(None)
+                portReady.countDown()
+            }
+          }
+          line = br.readLine()
+        }
+      } finally {
+        br.close()
+      }
+    })
+    readerThread.setDaemon(true)
+    readerThread.start()
+
+    val gotPort = portReady.await(10, TimeUnit.SECONDS)
+    val portOpt = portRef.get()
+    if (!gotPort || portOpt.isEmpty) {
+      p.destroyForcibly()
+      p.waitFor(2, TimeUnit.SECONDS)
+      readerThread.join(1_000)
+      fail(s"Did not observe PORT=... line from tcp_server fixture. Output so far:\n$output")
+    }
+
+    val port = portOpt.get
+    val client = new Socket()
+    try {
+      client.connect(new InetSocketAddress("127.0.0.1", port), 10_000)
+      client.setSoTimeout(10_000)
+      client.getOutputStream.write(Array(65.toByte))
+      client.getOutputStream.flush()
+      val b = client.getInputStream.read()
+      if (b != 66) {
+        fail(s"Expected server byte 66, got $b. Output so far:\n$output")
+      }
+    } finally {
+      client.close()
+    }
+
+    val finished = p.waitFor(timeoutSeconds, TimeUnit.SECONDS)
+    if (!finished) {
+      p.destroyForcibly()
+      p.waitFor(2, TimeUnit.SECONDS)
+    }
+
+    readerThread.join(1_000)
+    val outStr = output.toString
+    if (!finished) {
+      fail(s"tcp_server fixture timed out after ${timeoutSeconds}s. Output so far:\n$outStr")
+    }
+    (p.exitValue(), outStr)
   }
 
   private def hasZig: Boolean = {
@@ -202,4 +401,3 @@ class NativeProgramsLlvmNativeSuite extends AnyFunSuite {
     }
   }
 }
-

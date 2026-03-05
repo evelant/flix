@@ -114,7 +114,7 @@ object LoweredAst {
       def purity: Purity = Purity.combine(exp1.purity, exp2.purity)
     }
 
-    case class Region(sym: Symbol.VarSym, exp: Expr, tpe: SimpleType, purity: Purity, loc: SourceLocation) extends Expr
+    case class Region(sym: Symbol.VarSym, exp: Expr, pcPointId: Int, tpe: SimpleType, purity: Purity, loc: SourceLocation) extends Expr
 
     case class TryCatch(exp: Expr, rules: List[CatchRule], tpe: SimpleType, purity: Purity, loc: SourceLocation) extends Expr
 

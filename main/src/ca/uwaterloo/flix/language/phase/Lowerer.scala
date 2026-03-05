@@ -147,8 +147,9 @@ object Lowerer {
 
     case ErasedAst.Expr.Region(sym, exp, tpe, purity, loc) =>
       lctx.lparams.addOne(LoweredAst.LocalParam(sym, SimpleType.Region))
+      val pcPointId = if (target == CompilationTarget.LlvmWasm && canSuspend(purity, target)) lctx.newPcPointId() else 0
       val e = visitExpr(exp, target)
-      LoweredAst.Expr.Region(sym, e, tpe, purity, loc)
+      LoweredAst.Expr.Region(sym, e, pcPointId, tpe, purity, loc)
 
     case ErasedAst.Expr.TryCatch(exp, rules, tpe, purity, loc) =>
       val e = visitExpr(exp, target)

@@ -31,3 +31,6 @@ vendor
 # wasm smoke harness outputs
 tools/wasm-smoke/out
 tools/wasm-smoke/browser-out
+
+AGENTS.md
+.codex_tmp

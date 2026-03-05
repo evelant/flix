@@ -839,6 +839,14 @@ object ConstraintGen {
           val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
           (resTpe, resEff)
 
+        case SemanticOp.IoOp.TimeNowMillis =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Unit, actual = tpe, exp.loc)
+          c.unifyType(Type.Int64, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, Type.IO, exp.loc)
+          (resTpe, resEff)
+
         case SemanticOp.IoOp.FileExists
              | SemanticOp.IoOp.FileIsDirectory
              | SemanticOp.IoOp.FileIsRegularFile

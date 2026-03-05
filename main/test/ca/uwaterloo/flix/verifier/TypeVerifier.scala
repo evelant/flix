@@ -202,6 +202,7 @@ object TypeVerifier {
             case SemanticOp.IoOp.SleepMillis => (SimpleType.Int64, SimpleType.Unit)
             case SemanticOp.IoOp.Exit => (SimpleType.Int32, SimpleType.Unit)
             case SemanticOp.IoOp.NewId => (SimpleType.Unit, SimpleType.Int64)
+            case SemanticOp.IoOp.TimeNowMillis => (SimpleType.Unit, SimpleType.Int64)
             case SemanticOp.IoOp.FileExists => (SimpleType.String, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Bool, SimpleType.Int32, SimpleType.String)))
             case SemanticOp.IoOp.FileIsDirectory => (SimpleType.String, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Bool, SimpleType.Int32, SimpleType.String)))
             case SemanticOp.IoOp.FileIsRegularFile => (SimpleType.String, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Bool, SimpleType.Int32, SimpleType.String)))

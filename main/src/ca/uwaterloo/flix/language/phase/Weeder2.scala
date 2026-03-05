@@ -2361,6 +2361,7 @@ object Weeder2 {
         case ("SLEEP_MILLIS", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.SleepMillis, e1, loc)
         case ("EXIT", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.Exit, e1, loc)
         case ("NEW_ID", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.NewId, e1, loc)
+        case ("TIME_NOW_MILLIS", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.TimeNowMillis, e1, loc)
         case ("FILE_EXISTS", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileExists, e1, loc)
         case ("FILE_IS_DIRECTORY", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileIsDirectory, e1, loc)
         case ("FILE_IS_REGULAR_FILE", Some(e1 :: Nil)) => Expr.Unary(SemanticOp.IoOp.FileIsRegularFile, e1, loc)

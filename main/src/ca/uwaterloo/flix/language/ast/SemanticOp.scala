@@ -1186,6 +1186,11 @@ object SemanticOp {
     case object NewId extends IoOp with UnaryOp
 
     /**
+      * Returns the current time in milliseconds since the epoch.
+      */
+    case object TimeNowMillis extends IoOp with UnaryOp
+
+    /**
       * Returns `true` if the file exists.
       */
     case object FileExists extends IoOp with UnaryOp

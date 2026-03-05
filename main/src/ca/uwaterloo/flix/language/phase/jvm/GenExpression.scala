@@ -1372,6 +1372,13 @@ object GenExpression {
             val jGlobal = JvmName(JvmName.DevFlixRuntime, "Global")
             INVOKESTATIC(jGlobal, "newId", mkDescriptor()(BackendType.Int64))
 
+          case IoOp.TimeNowMillis =>
+            import BytecodeInstructions.*
+            BytecodeInstructions.addLoc(loc)
+            compileExpr(exp)
+            POP()
+            INVOKESTATIC(JvmName.System, "currentTimeMillis", mkDescriptor()(BackendType.Int64))
+
           case op @ (IoOp.FileExists |
             IoOp.FileIsDirectory |
             IoOp.FileIsRegularFile |

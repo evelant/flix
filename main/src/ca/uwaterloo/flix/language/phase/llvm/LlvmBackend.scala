@@ -205,6 +205,7 @@ object LlvmBackend {
         Decl.DeclareFun(Type.I64, "flix_sleep_millis", List(Type.I64)),
         Decl.DeclareFun(Type.Void, "flix_exit", List(Type.I32)),
         Decl.DeclareFun(Type.I64, "flix_new_id", List(Type.I64)),
+        Decl.DeclareFun(Type.I64, "flix_time_now_ms", List(Type.I64)),
         Decl.DeclareFun(Type.Ptr, "flix_file_exists", List(Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_file_is_directory", List(Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_file_is_regular_file", List(Type.Ptr)),
@@ -654,7 +655,11 @@ object LlvmBackend {
           ), flixTypeInfoType)
 
           val linkage =
-            if (spec.name == LlvmNames.arrayPrimTypeInfoName || spec.name == LlvmNames.arrayPtrTypeInfoName || spec.name == LlvmNames.stringTypeInfoName)
+            if (spec.name == LlvmNames.arrayPrimTypeInfoName ||
+              spec.name == LlvmNames.arrayPtrTypeInfoName ||
+              spec.name == LlvmNames.stringTypeInfoName ||
+              spec.name == LlvmNames.handlerTypeInfoName ||
+              spec.name == LlvmNames.suspensionTypeInfoName)
               LlvmIr.GlobalDef.Linkage.External
             else
               LlvmIr.GlobalDef.Linkage.Private
@@ -1696,7 +1701,7 @@ object LlvmBackend {
         case Expr.ApplySelfTail(_, actuals, _, _, _) =>
           actuals.foreach(visitExp)
 
-        case Expr.Region(_, e0, _, _, _) =>
+        case Expr.Region(_, e0, _, _, _, _) =>
           visitExp(e0)
 
         case Expr.TryCatch(e0, rules, _, _, _) =>
@@ -1758,7 +1763,7 @@ object LlvmBackend {
         case Expr.ApplySelfTail(_, actuals, _, _, _) =>
           actuals.foreach(visitExp)
 
-        case Expr.Region(_, e0, _, _, _) =>
+        case Expr.Region(_, e0, _, _, _, _) =>
           visitExp(e0)
 
         case Expr.TryCatch(e0, rules, _, _, _) =>
@@ -1820,7 +1825,7 @@ object LlvmBackend {
         case Expr.ApplySelfTail(_, actuals, _, _, _) =>
           actuals.foreach(visitExp)
 
-        case Expr.Region(_, e0, _, _, _) =>
+        case Expr.Region(_, e0, _, _, _, _) =>
           visitExp(e0)
 
         case Expr.TryCatch(e0, rules, _, _, _) =>
@@ -1889,7 +1894,7 @@ object LlvmBackend {
         case Expr.ApplySelfTail(_, actuals, _, _, _) =>
           actuals.foreach(visitExp)
 
-        case Expr.Region(_, e0, _, _, _) =>
+        case Expr.Region(_, e0, _, _, _, _) =>
           visitExp(e0)
 
         case Expr.TryCatch(e0, rules, _, _, _) =>
@@ -1965,7 +1970,7 @@ object LlvmBackend {
           record(e.tpe)
           actuals.foreach(visitExp)
 
-        case Expr.Region(_, e0, _, _, _) =>
+        case Expr.Region(_, e0, _, _, _, _) =>
           record(e.tpe)
           visitExp(e0)
 
@@ -2049,7 +2054,7 @@ object LlvmBackend {
           record(e.tpe)
           actuals.foreach(visitExp)
 
-        case Expr.Region(_, e0, _, _, _) =>
+        case Expr.Region(_, e0, _, _, _, _) =>
           record(e.tpe)
           visitExp(e0)
 
@@ -2822,7 +2827,7 @@ object LlvmBackend {
         if (fb.current.isTerminated) Value.Undef(llvmTypeOf(exp0.tpe))
         else emitExpr(exp2, env, ctxPtr, fb, lenv, slotTypes, selfTailLabel, exnHandlerOpt)
 
-      case Expr.Region(sym, exp, tpe, _, _) =>
+      case Expr.Region(sym, exp, _, tpe, _, _) =>
         val joinTpe = llvmTypeOf(tpe)
         val endLabel = freshLabel("region_end")
         val handlerLabel = freshLabel("region_exn")
@@ -3294,7 +3299,7 @@ object LlvmBackend {
         if (fb.current.isTerminated) Value.Undef(llvmTypeOf(exp0.tpe))
         else emitExprControlImpure(exp2, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt)
 
-      case Expr.Region(sym, exp, tpe, _, _) =>
+      case Expr.Region(sym, exp, pcPointId, tpe, _, _) =>
         val joinTpe = llvmTypeOf(tpe)
         val endLabel = freshLabel("region_end")
         val handlerLabel = freshLabel("region_exn")
@@ -3316,6 +3321,121 @@ object LlvmBackend {
 
         val incomings = mutable.ArrayBuffer.empty[(Value, String)]
 
+        def emitRegionExitAttempt(bodyTag: Value, bodyPayload: Value): Unit = {
+          val exitTmp = freshTmp(flixResultType)
+          // The region scope may cross suspension/resumption boundaries. The SSA `regionPtr` is not
+          // reliable across resumptions, so reload the region pointer from the frame slot.
+          val regionBits0 = loadObjI64Slot(framePtr, Value.IntConst(idx, Type.I64), fb)
+          val regionPtr0 = unboxFromI64(regionBits0, SimpleType.Region, fb)
+          fb.current.emitAssign(exitTmp, Op.Call(flixResultType, "flix_region_exit", List(ctxPtr, regionPtr0, bodyTag, bodyPayload)))
+
+          if (pcPointId <= 0) {
+            val payloadBits = unwindThunkToValuePayloadOrPropagateExn(exitTmp, ctxPtr, fb, exnHandlerOpt)
+            if (!fb.current.isTerminated) {
+              val v = unboxFromI64(payloadBits, tpe, fb)
+              val vCoerced = coerceValue(v, joinTpe, fb)
+              val predLabel = fb.current.label
+              fb.current.setTerminator(Terminator.Br(endLabel))
+              incomings.addOne((vCoerced, predLabel))
+            }
+            return
+          }
+
+          // On cooperative runtimes (wasm), region exit may itself suspend while joining children.
+          // This uses `pcPointId` to resume by retrying `flix_region_exit` (which is idempotent once
+          // the region is in Closing state).
+          val r = unwindThunkToResult(exitTmp, ctxPtr, fb)
+          val tag = freshTmp(Type.I64)
+          fb.current.emitAssign(tag, Op.ExtractValue(Type.I64, flixResultType, r, index = 0))
+
+          val isValue = freshTmp(Type.I1)
+          fb.current.emitAssign(isValue, Op.ICmp("eq", tag, Value.IntConst(ResultTagValue, Type.I64)))
+
+          val valueLabel = freshLabel("region_exit_value")
+          val notValueLabel = freshLabel("region_exit_not_value")
+          fb.current.setTerminator(Terminator.CondBr(isValue, valueLabel, notValueLabel))
+
+          val valueBlock = fb.newBlock(valueLabel)
+          fb.setCurrent(valueBlock)
+          val payloadBits = freshTmp(Type.I64)
+          valueBlock.emitAssign(payloadBits, Op.ExtractValue(Type.I64, flixResultType, r, index = 1))
+          val v = unboxFromI64(payloadBits, tpe, fb)
+          val vCoerced = coerceValue(v, joinTpe, fb)
+          val predLabel = fb.current.label
+          fb.current.setTerminator(Terminator.Br(endLabel))
+          incomings.addOne((vCoerced, predLabel))
+
+          val notValueBlock = fb.newBlock(notValueLabel)
+          fb.setCurrent(notValueBlock)
+          val isSusp = freshTmp(Type.I1)
+          fb.current.emitAssign(isSusp, Op.ICmp("eq", tag, Value.IntConst(ResultTagSuspension, Type.I64)))
+          val suspLabel = freshLabel("region_exit_susp")
+          val exnLabel = freshLabel("region_exit_exn")
+          fb.current.setTerminator(Terminator.CondBr(isSusp, suspLabel, exnLabel))
+
+          val suspBlock = fb.newBlock(suspLabel)
+          fb.setCurrent(suspBlock)
+
+          // Attach current frame as a prefix frame and return the suspension.
+          val suspPayload = freshTmp(Type.I64)
+          fb.current.emitAssign(suspPayload, Op.ExtractValue(Type.I64, flixResultType, r, index = 1))
+          val suspPtr = freshTmp(Type.Ptr)
+          fb.current.emitAssign(suspPtr, Op.Cast("inttoptr", Type.Ptr, suspPayload))
+
+          val oldPrefixBits = loadObjI64Slot(suspPtr, Value.IntConst(2L, Type.I64), fb)
+          val oldPrefixPtr = castValue(oldPrefixBits, Type.Ptr, fb)
+
+          storeObjI64Slot(framePtr, Value.IntConst(0L, Type.I64), Value.IntConst(pcPointId.toLong, Type.I64), fb)
+
+          val newPrefixPtr = freshTmp(Type.Ptr)
+          fb.current.emitAssign(newPrefixPtr, Op.Call(Type.Ptr, "flix_frames_push", List(framePtr, oldPrefixPtr)))
+          val newPrefixBits = freshTmp(Type.I64)
+          fb.current.emitAssign(newPrefixBits, Op.Cast("ptrtoint", Type.I64, newPrefixPtr))
+          storeObjI64Slot(suspPtr, Value.IntConst(2L, Type.I64), newPrefixBits, fb)
+
+          fb.current.setTerminator(Terminator.Ret(flixResultType, r))
+
+          val exnBlock = fb.newBlock(exnLabel)
+          fb.setCurrent(exnBlock)
+          val isExn = freshTmp(Type.I1)
+          fb.current.emitAssign(isExn, Op.ICmp("eq", tag, Value.IntConst(ResultTagException, Type.I64)))
+          val exnOkLabel = freshLabel("region_exit_exn_ok")
+          val exnBadLabel = freshLabel("region_exit_exn_bad")
+          fb.current.setTerminator(Terminator.CondBr(isExn, exnOkLabel, exnBadLabel))
+
+          val exnOkBlock = fb.newBlock(exnOkLabel)
+          fb.setCurrent(exnOkBlock)
+          exnHandlerOpt match {
+            case Some(ExnHandler(label, slotPtr)) =>
+              val exnPayloadBits = freshTmp(Type.I64)
+              fb.current.emitAssign(exnPayloadBits, Op.ExtractValue(Type.I64, flixResultType, r, index = 1))
+              fb.current.emitStore(exnPayloadBits, slotPtr)
+              fb.current.setTerminator(Terminator.Br(label))
+            case None =>
+              fb.current.setTerminator(Terminator.Ret(flixResultType, r))
+          }
+
+          val exnBadBlock = fb.newBlock(exnBadLabel)
+          fb.setCurrent(exnBadBlock)
+          fb.current.emitTrap()
+          fb.current.setTerminator(Terminator.Unreachable)
+        }
+
+        if (pcPointId > 0) {
+          // Populate the resume pc block for region-exit join.
+          val resumeBlock = pcBlocks.getOrElse(pcPointId, throw new IllegalStateException(s"missing pc block: $pcPointId"))
+          if (resumeBlock.isTerminated) {
+            throw new IllegalStateException(s"pc block $pcPointId already terminated")
+          }
+          val saved = fb.current
+          fb.setCurrent(resumeBlock)
+
+          // Region exit has already stored the body outcome on the first attempt, so we can pass dummy args.
+          emitRegionExitAttempt(Value.IntConst(0L, Type.I64), Value.IntConst(0L, Type.I64))
+
+          fb.setCurrent(saved)
+        }
+
         // Region body (may branch to handlerLabel via innerHandler).
         val bodyValue = emitExprControlImpure(exp, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, Some(innerHandler))
         if (!fb.current.isTerminated) {
@@ -3324,15 +3444,7 @@ object LlvmBackend {
           fb.current.emitAssign(bodyTag, Op.ExtractValue(Type.I64, flixResultType, bodyOutcome, index = 0))
           val bodyPayload = freshTmp(Type.I64)
           fb.current.emitAssign(bodyPayload, Op.ExtractValue(Type.I64, flixResultType, bodyOutcome, index = 1))
-          val exitTmp = freshTmp(flixResultType)
-          fb.current.emitAssign(exitTmp, Op.Call(flixResultType, "flix_region_exit", List(ctxPtr, regionPtr, bodyTag, bodyPayload)))
-
-          val payloadBits = unwindThunkToValuePayloadOrPropagateExn(exitTmp, ctxPtr, fb, exnHandlerOpt)
-          val v = unboxFromI64(payloadBits, tpe, fb)
-          val vCoerced = coerceValue(v, joinTpe, fb)
-          val predLabel = fb.current.label
-          fb.current.setTerminator(Terminator.Br(endLabel))
-          incomings.addOne((vCoerced, predLabel))
+          emitRegionExitAttempt(bodyTag, bodyPayload)
         }
 
         // Exception handler: exit the region and propagate the chosen exception.
@@ -3346,18 +3458,7 @@ object LlvmBackend {
         fb.current.emitAssign(exnTag, Op.ExtractValue(Type.I64, flixResultType, exnOutcome, index = 0))
         val exnPayload = freshTmp(Type.I64)
         fb.current.emitAssign(exnPayload, Op.ExtractValue(Type.I64, flixResultType, exnOutcome, index = 1))
-
-        val exitTmp2 = freshTmp(flixResultType)
-        fb.current.emitAssign(exitTmp2, Op.Call(flixResultType, "flix_region_exit", List(ctxPtr, regionPtr, exnTag, exnPayload)))
-
-        val payloadBits2 = unwindThunkToValuePayloadOrPropagateExn(exitTmp2, ctxPtr, fb, exnHandlerOpt)
-        if (!fb.current.isTerminated) {
-          val v = unboxFromI64(payloadBits2, tpe, fb)
-          val vCoerced = coerceValue(v, joinTpe, fb)
-          val predLabel = fb.current.label
-          fb.current.setTerminator(Terminator.Br(endLabel))
-          incomings.addOne((vCoerced, predLabel))
-        }
+        emitRegionExitAttempt(exnTag, exnPayload)
 
         // Join.
         val endBlock = fb.newBlock(endLabel)
@@ -6583,6 +6684,12 @@ object LlvmBackend {
         val unit = castValue(x, Type.I64, fb)
         val tmp = freshTmp(Type.I64)
         fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_new_id", List(unit)))
+        tmp
+
+      case SemanticOp.IoOp.TimeNowMillis =>
+        val unit = castValue(x, Type.I64, fb)
+        val tmp = freshTmp(Type.I64)
+        fb.current.emitAssign(tmp, Op.Call(Type.I64, "flix_time_now_ms", List(unit)))
         tmp
 
       case SemanticOp.IoOp.FileExists =>

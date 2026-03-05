@@ -43,6 +43,8 @@ class PortableStdlibLlvmNativeRuntimeSuite extends AnyFunSuite {
       outputJvm = false,
     )
 
+  private val preludeFile = Paths.get("main/test/flix/Prelude.flix")
+
   private val portableTestsDir = Paths.get("main/test/flix/portable")
 
   test("portable-stdlib-llvm-native-runtime") {
@@ -51,12 +53,14 @@ class PortableStdlibLlvmNativeRuntimeSuite extends AnyFunSuite {
     val driverFile = Files.createTempFile("flix-portable-llvm-native-driver-", ".flix")
     val outDir = Files.createTempDirectory("flix-llvm-native-portable-runtime-")
     try {
+      val driverSource = mkPortableDriverSource()
       Files.writeString(driverFile, driverSource, StandardCharsets.UTF_8)
 
       val flix = new Flix()
       flix.setOptions(TestOptions.copy(outputPath = outDir))
       implicit val sctx: SecurityContext = SecurityContext.Unrestricted
 
+      flix.addFile(preludeFile)
       for (p <- FileOps.getFlixFilesIn(portableTestsDir, 1)) flix.addFile(p)
       flix.addFile(driverFile)
 
@@ -196,65 +200,27 @@ class PortableStdlibLlvmNativeRuntimeSuite extends AnyFunSuite {
     }
   }
 
-  private val driverSource: String =
-    """
-      |mod Test {}
-      |
-      |def main(): Unit \ {Chan, NonDet, IO} = {
-      |    %%PRINTLN%%("portable-stdlib-llvm-native-runtime: start");
-      |
-      |    %%PRINTLN%%("portable: Channel");
-      |    let _ = Test.Portable.Channel.runAll();
-      |
-      |    %%PRINTLN%%("portable: DnsPingSignatures");
-      |    let _ = Test.Portable.DnsPingSignatures.runAll();
-      |
-      |    %%PRINTLN%%("portable: FileSystem");
-      |    let _ = Test.Portable.FileSystem.runAll();
-      |
-      |    %%PRINTLN%%("portable: BufReader");
-      |    let _ = Test.Portable.BufReaderSuite.runAll();
-      |
-      |    %%PRINTLN%%("portable: NetAddrs");
-      |    let _ = Test.Portable.NetAddrs.runAll();
-      |
-      |    %%PRINTLN%%("portable: Parsing");
-      |    let _ = Test.Portable.Parsing.runAll();
-      |
-      |    %%PRINTLN%%("portable: Regex");
-      |    let _ = Test.Portable.Regex.runAll();
-      |
-      |    %%PRINTLN%%("portable: String");
-      |    let _ = Test.Portable.String.runAll();
-      |
-      |    %%PRINTLN%%("portable: Char");
-      |    let _ = Test.Portable.Char.runAll();
-      |
-      |    %%PRINTLN%%("portable: StringBuilder");
-      |    let _ = Test.Portable.StringBuilder.runAll();
-      |
-      |    %%PRINTLN%%("portable: Ref");
-      |    let _ = Test.Portable.Ref.runAll();
-      |
-      |    %%PRINTLN%%("portable: MutCollections");
-      |    let _ = Test.Portable.MutCollections.runAll();
-      |
-      |    %%PRINTLN%%("portable: Exceptions");
-      |    let _ = Test.Portable.Exceptions.runAll();
-      |
-      |    %%PRINTLN%%("portable: RegionSpawn");
-      |    let _ = Test.Portable.RegionSpawn.runAll();
-      |
-      |    %%PRINTLN%%("portable: TcpProcessSignatures");
-      |    let _ = Test.Portable.TcpProcessSignatures.runAll();
-      |
-      |    %%PRINTLN%%("portable: TcpLoopback");
-      |    let _ = Test.Portable.TcpLoopback.runAll();
-      |
-      |    %%PRINTLN%%("portable-stdlib-llvm-native-runtime: done");
-      |    ()
-      |}
-      |""".stripMargin
+  private def mkPortableDriverSource(): String = {
+    val flix = new Flix()
+    flix.setOptions(TestOptions)
+    implicit val sctx: SecurityContext = SecurityContext.Unrestricted
+
+    flix.addFile(preludeFile)
+    for (p <- FileOps.getFlixFilesIn(portableTestsDir, 1)) flix.addFile(p)
+
+    val (optRoot, errors) = flix.check()
+    if (errors.nonEmpty) {
+      fail(CompilationMessage.formatAll(errors)(flix.getFormatter, optRoot))
+    }
+
+    val root = optRoot.getOrElse {
+      throw new IllegalStateException("Expected a TypedAst root for portable conformance suite.")
+    }
+
+    implicit val iflix: Flix = flix
+    val tests = PortableConformance.collectPortableTests(root)
+    PortableConformance.mkDriverSource(tests, banner = "portable-stdlib-llvm-native-runtime")
+  }
 
   private val uncaughtExnDriverSource: String =
     """
