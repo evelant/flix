@@ -249,6 +249,11 @@ object GenExpression {
             compileExpr(exp)
             mv.visitInsn(LNEG)
 
+          case BigIntOp.Neg =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "negate",
+              mkDescriptor()(JvmName.BigInteger.toTpe).toDescriptor, false)
+
           case Int8Op.Not | Int16Op.Not | Int32Op.Not =>
             compileExpr(exp)
             mv.visitInsn(ICONST_M1)
@@ -259,6 +264,21 @@ object GenExpression {
             mv.visitInsn(ICONST_M1)
             mv.visitInsn(I2L)
             mv.visitInsn(LXOR)
+
+          case BigIntOp.Not =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "not",
+              mkDescriptor()(JvmName.BigInteger.toTpe).toDescriptor, false)
+
+          case BigIntOp.BitLength =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "bitLength",
+              mkDescriptor()(BackendType.Int32).toDescriptor, false)
+
+          case BigIntOp.FromInt64 =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKESTATIC, JvmName.BigInteger.toInternalName, "valueOf",
+              mkDescriptor(BackendType.Int64)(JvmName.BigInteger.toTpe).toDescriptor, false)
 
           case ToStringOp.CharToString =>
             compileExpr(exp)
@@ -294,6 +314,11 @@ object GenExpression {
             compileExpr(exp)
             mv.visitMethodInsn(INVOKESTATIC, JvmName.Long.toInternalName, "toString",
               mkDescriptor(BackendType.Int64)(BackendType.String).toDescriptor, false)
+
+          case ToStringOp.BigIntToString =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "toString",
+              mkDescriptor()(BackendType.String).toDescriptor, false)
 
           case op: ConvertOp =>
             compileExpr(exp)
@@ -625,6 +650,43 @@ object GenExpression {
             DUP()
             pushBool(false)
             mv.visitInsn(DCONST_0)
+            INVOKESPECIAL(tupleType.Constructor)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(after)
+
+          case ParseOp.BigIntFromString =>
+            import BytecodeInstructions.*
+            val SimpleType.Tuple(elmTypes) = tpe
+            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+            val tryStart = new Label()
+            val tryEnd = new Label()
+            val handlerStart = new Label()
+            val after = new Label()
+
+            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, JvmName.NumberFormatException.toInternalName)
+
+            mv.visitLabel(tryStart)
+            NEW(tupleType.jvmName)
+            DUP()
+            pushBool(true)
+            NEW(JvmName.BigInteger)
+            DUP()
+            compileExpr(exp)
+            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.String.toInternalName, "strip",
+              mkDescriptor()(BackendType.String).toDescriptor, false)
+            INVOKESPECIAL(ClassConstants.BigInteger.Constructor)
+            INVOKESPECIAL(tupleType.Constructor)
+            mv.visitLabel(tryEnd)
+            mv.visitJumpInsn(GOTO, after)
+
+            mv.visitLabel(handlerStart)
+            POP()
+            NEW(tupleType.jvmName)
+            DUP()
+            pushBool(false)
+            mv.visitFieldInsn(org.objectweb.asm.Opcodes.GETSTATIC, JvmName.BigInteger.toInternalName, "ZERO", JvmName.BigInteger.toDescriptor)
             INVOKESPECIAL(tupleType.Constructor)
             mv.visitJumpInsn(GOTO, after)
 
@@ -1295,6 +1357,11 @@ object GenExpression {
             compileExpr(exp)
             mv.visitMethodInsn(INVOKESTATIC, JvmName.Long.toInternalName, "hashCode",
               mkDescriptor(BackendType.Int64)(BackendType.Int32).toDescriptor, false)
+
+          case HashOp.BigIntHash =>
+            compileExpr(exp)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "hashCode",
+              mkDescriptor()(BackendType.Int32).toDescriptor, false)
 
           case HashOp.StringHash =>
             compileExpr(exp)
@@ -4005,6 +4072,72 @@ object GenExpression {
             mv.visitMethodInsn(INVOKESTATIC, JvmName.Math.toInternalName, "pow",
               mkDescriptor(BackendType.Float64, BackendType.Float64)(BackendType.Float64).toDescriptor, false)
             mv.visitInsn(D2L) // Convert to long
+
+          case BigIntOp.Add =>
+            compileExpr(exp1)
+            compileExpr(exp2)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "add",
+              mkDescriptor(JvmName.BigInteger.toTpe)(JvmName.BigInteger.toTpe).toDescriptor, false)
+
+          case BigIntOp.Sub =>
+            compileExpr(exp1)
+            compileExpr(exp2)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "subtract",
+              mkDescriptor(JvmName.BigInteger.toTpe)(JvmName.BigInteger.toTpe).toDescriptor, false)
+
+          case BigIntOp.Mul =>
+            compileExpr(exp1)
+            compileExpr(exp2)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "multiply",
+              mkDescriptor(JvmName.BigInteger.toTpe)(JvmName.BigInteger.toTpe).toDescriptor, false)
+
+          case BigIntOp.Div =>
+            compileExpr(exp1)
+            compileExpr(exp2)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "divide",
+              mkDescriptor(JvmName.BigInteger.toTpe)(JvmName.BigInteger.toTpe).toDescriptor, false)
+
+          case BigIntOp.Rem =>
+            compileExpr(exp1)
+            compileExpr(exp2)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "remainder",
+              mkDescriptor(JvmName.BigInteger.toTpe)(JvmName.BigInteger.toTpe).toDescriptor, false)
+
+          case BigIntOp.Shl =>
+            compileExpr(exp1)
+            compileExpr(exp2)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "shiftLeft",
+              mkDescriptor(BackendType.Int32)(JvmName.BigInteger.toTpe).toDescriptor, false)
+
+          case BigIntOp.Shr =>
+            compileExpr(exp1)
+            compileExpr(exp2)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "shiftRight",
+              mkDescriptor(BackendType.Int32)(JvmName.BigInteger.toTpe).toDescriptor, false)
+
+          case BigIntOp.And =>
+            compileExpr(exp1)
+            compileExpr(exp2)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "and",
+              mkDescriptor(JvmName.BigInteger.toTpe)(JvmName.BigInteger.toTpe).toDescriptor, false)
+
+          case BigIntOp.Or =>
+            compileExpr(exp1)
+            compileExpr(exp2)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "or",
+              mkDescriptor(JvmName.BigInteger.toTpe)(JvmName.BigInteger.toTpe).toDescriptor, false)
+
+          case BigIntOp.Xor =>
+            compileExpr(exp1)
+            compileExpr(exp2)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "xor",
+              mkDescriptor(JvmName.BigInteger.toTpe)(JvmName.BigInteger.toTpe).toDescriptor, false)
+
+          case BigIntOp.Cmp =>
+            compileExpr(exp1)
+            compileExpr(exp2)
+            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "compareTo",
+              mkDescriptor(JvmName.BigInteger.toTpe)(BackendType.Int32).toDescriptor, false)
 
           case Int8Op.And | Int16Op.And | Int32Op.And =>
             compileExpr(exp1)

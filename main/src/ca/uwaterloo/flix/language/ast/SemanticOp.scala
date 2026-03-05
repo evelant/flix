@@ -763,6 +763,92 @@ object SemanticOp {
   }
 
   /**
+    * BigInt Operators.
+    *
+    * These operators exist to allow a portable stdlib implementation without JVM interop.
+    */
+  sealed trait BigIntOp extends SemanticOp
+
+  object BigIntOp {
+
+    /**
+      * Negation.
+      */
+    case object Neg extends BigIntOp with UnaryOp
+
+    /**
+      * Addition.
+      */
+    case object Add extends BigIntOp with BinaryOp
+
+    /**
+      * Subtraction.
+      */
+    case object Sub extends BigIntOp with BinaryOp
+
+    /**
+      * Multiplication.
+      */
+    case object Mul extends BigIntOp with BinaryOp
+
+    /**
+      * Division.
+      */
+    case object Div extends BigIntOp with BinaryOp
+
+    /**
+      * Remainder.
+      */
+    case object Rem extends BigIntOp with BinaryOp
+
+    /**
+      * Shift left.
+      */
+    case object Shl extends BigIntOp with BinaryOp
+
+    /**
+      * Shift right (arithmetic).
+      */
+    case object Shr extends BigIntOp with BinaryOp
+
+    /**
+      * Bitwise and.
+      */
+    case object And extends BigIntOp with BinaryOp
+
+    /**
+      * Bitwise or.
+      */
+    case object Or extends BigIntOp with BinaryOp
+
+    /**
+      * Bitwise xor.
+      */
+    case object Xor extends BigIntOp with BinaryOp
+
+    /**
+      * Bitwise not.
+      */
+    case object Not extends BigIntOp with UnaryOp
+
+    /**
+      * Compares two BigInts, returning -1, 0, or 1.
+      */
+    case object Cmp extends BigIntOp with BinaryOp
+
+    /**
+      * Returns the bit length of the BigInt.
+      */
+    case object BitLength extends BigIntOp with UnaryOp
+
+    /**
+      * Converts an Int64 to a BigInt.
+      */
+    case object FromInt64 extends BigIntOp with UnaryOp
+
+  }
+
+  /**
     * String Operators.
     */
   sealed trait StringOp extends SemanticOp
@@ -839,6 +925,11 @@ object SemanticOp {
       * Parses the given string as a Float64, returning (success, value).
       */
     case object Float64FromString extends ParseOp with UnaryOp
+
+    /**
+      * Parses the given string as a BigInt, returning (success, value).
+      */
+    case object BigIntFromString extends ParseOp with UnaryOp
 
     /**
       * Parses the given (radix, string) tuple as an Int32, returning (success, value).
@@ -1080,6 +1171,8 @@ object SemanticOp {
     case object Int32ToString extends ToStringOp with UnaryOp
 
     case object Int64ToString extends ToStringOp with UnaryOp
+
+    case object BigIntToString extends ToStringOp with UnaryOp
 
   }
 
@@ -1472,6 +1565,8 @@ object SemanticOp {
     case object Int32Hash extends HashOp with UnaryOp
 
     case object Int64Hash extends HashOp with UnaryOp
+
+    case object BigIntHash extends HashOp with UnaryOp
 
     case object StringHash extends HashOp with UnaryOp
 

@@ -77,6 +77,32 @@ class NativeProgramsLlvmNativeSuite extends AnyFunSuite {
     }
   }
 
+  test("llvm-native-fixture-channel-rendezvous") {
+    assume(hasZig, "zig not found on PATH (skipping LLVM-native real program fixture)")
+
+    val outDir = Files.createTempDirectory("flix-llvm-native-fixture-channel-rendezvous-")
+    try {
+      val exe = compileLlvmNative(fixturesDir.resolve("channel_rendezvous"), outDir)
+      val (exit, output) = runExecutable(
+        exe,
+        env = Map(
+          "FLIX_GC_STRESS" -> "1",
+          // Keep the heap tiny so we are likely to collect while messages are queued.
+          "FLIX_GC_HEAP_LIMIT_BYTES" -> "65536",
+        ),
+        timeoutSeconds = 20,
+      )
+      if (exit != 0) {
+        fail(s"Channel rendezvous fixture failed with exit $exit:\n$output")
+      }
+      if (!output.contains("channel-rendezvous: ok")) {
+        fail(s"Expected success banner, but output was:\n$output")
+      }
+    } finally {
+      deleteRecursive(outDir)
+    }
+  }
+
   test("llvm-native-fixture-http-file") {
     assume(hasZig, "zig not found on PATH (skipping LLVM-native real program fixture)")
 
@@ -121,6 +147,140 @@ class NativeProgramsLlvmNativeSuite extends AnyFunSuite {
       deleteRecursive(outDir)
       server.stop(0)
       shutdownExecutor(executor)
+    }
+  }
+
+  test("llvm-native-fixture-word-count") {
+    assume(hasZig, "zig not found on PATH (skipping LLVM-native real program fixture)")
+
+    val inputFile = Files.createTempFile("flix-llvm-native-fixture-word-count-", ".txt")
+    Files.writeString(inputFile, "a a b  c\nc\tc\n", StandardCharsets.UTF_8)
+
+    val outDir = Files.createTempDirectory("flix-llvm-native-fixture-word-count-")
+    try {
+      val exe = compileLlvmNative(fixturesDir.resolve("word_count"), outDir)
+      val (exit, output) = runExecutable(
+        exe,
+        args = List(inputFile.toString),
+        timeoutSeconds = 15,
+      )
+      if (exit != 0) {
+        fail(s"Word count fixture failed with exit $exit:\n$output")
+      }
+      if (!output.contains("word-count: ok")) {
+        fail(s"Expected success banner, but output was:\n$output")
+      }
+    } finally {
+      Files.deleteIfExists(inputFile)
+      deleteRecursive(outDir)
+    }
+  }
+
+  test("llvm-native-fixture-tce-mutual") {
+    assume(hasZig, "zig not found on PATH (skipping LLVM-native real program fixture)")
+
+    val outDir = Files.createTempDirectory("flix-llvm-native-fixture-tce-mutual-")
+    try {
+      val exe = compileLlvmNative(fixturesDir.resolve("tce_mutual"), outDir)
+      val (exit, output) = runExecutable(exe, timeoutSeconds = 15)
+      if (exit != 0) {
+        fail(s"TCE mutual recursion fixture failed with exit $exit:\n$output")
+      }
+      if (!output.contains("tce-mutual: ok")) {
+        fail(s"Expected success banner, but output was:\n$output")
+      }
+    } finally {
+      deleteRecursive(outDir)
+    }
+  }
+
+  test("llvm-native-fixture-record-areas") {
+    assume(hasZig, "zig not found on PATH (skipping LLVM-native real program fixture)")
+
+    val outDir = Files.createTempDirectory("flix-llvm-native-fixture-record-areas-")
+    try {
+      val exe = compileLlvmNative(fixturesDir.resolve("record_areas"), outDir)
+      val (exit, output) = runExecutable(exe, timeoutSeconds = 15)
+      if (exit != 0) {
+        fail(s"Record areas fixture failed with exit $exit:\n$output")
+      }
+      if (!output.contains("record-areas: ok")) {
+        fail(s"Expected success banner, but output was:\n$output")
+      }
+    } finally {
+      deleteRecursive(outDir)
+    }
+  }
+
+  test("llvm-native-fixture-struct-person") {
+    assume(hasZig, "zig not found on PATH (skipping LLVM-native real program fixture)")
+
+    val outDir = Files.createTempDirectory("flix-llvm-native-fixture-struct-person-")
+    try {
+      val exe = compileLlvmNative(fixturesDir.resolve("struct_person"), outDir)
+      val (exit, output) = runExecutable(exe, timeoutSeconds = 15)
+      if (exit != 0) {
+        fail(s"Struct person fixture failed with exit $exit:\n$output")
+      }
+      if (!output.contains("struct-person: ok")) {
+        fail(s"Expected success banner, but output was:\n$output")
+      }
+    } finally {
+      deleteRecursive(outDir)
+    }
+  }
+
+  test("llvm-native-fixture-array-foreach") {
+    assume(hasZig, "zig not found on PATH (skipping LLVM-native real program fixture)")
+
+    val outDir = Files.createTempDirectory("flix-llvm-native-fixture-array-foreach-")
+    try {
+      val exe = compileLlvmNative(fixturesDir.resolve("array_foreach"), outDir)
+      val (exit, output) = runExecutable(exe, timeoutSeconds = 15)
+      if (exit != 0) {
+        fail(s"Array foreach fixture failed with exit $exit:\n$output")
+      }
+      if (!output.contains("array-foreach: ok")) {
+        fail(s"Expected success banner, but output was:\n$output")
+      }
+    } finally {
+      deleteRecursive(outDir)
+    }
+  }
+
+  test("llvm-native-fixture-float-semantics") {
+    assume(hasZig, "zig not found on PATH (skipping LLVM-native real program fixture)")
+
+    val outDir = Files.createTempDirectory("flix-llvm-native-fixture-float-semantics-")
+    try {
+      val exe = compileLlvmNative(fixturesDir.resolve("float_semantics"), outDir)
+      val (exit, output) = runExecutable(exe, timeoutSeconds = 15)
+      if (exit != 0) {
+        fail(s"Float semantics fixture failed with exit $exit:\n$output")
+      }
+      if (!output.contains("float-semantics: ok")) {
+        fail(s"Expected success banner, but output was:\n$output")
+      }
+    } finally {
+      deleteRecursive(outDir)
+    }
+  }
+
+  test("llvm-native-fixture-counter-effect") {
+    assume(hasZig, "zig not found on PATH (skipping LLVM-native real program fixture)")
+
+    val outDir = Files.createTempDirectory("flix-llvm-native-fixture-counter-effect-")
+    try {
+      val exe = compileLlvmNative(fixturesDir.resolve("counter_effect"), outDir)
+      val (exit, output) = runExecutable(exe, timeoutSeconds = 15)
+      if (exit != 0) {
+        fail(s"Counter effect fixture failed with exit $exit:\n$output")
+      }
+      if (!output.contains("counter-effect: ok")) {
+        fail(s"Expected success banner, but output was:\n$output")
+      }
+    } finally {
+      deleteRecursive(outDir)
     }
   }
 

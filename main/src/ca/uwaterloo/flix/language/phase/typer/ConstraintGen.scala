@@ -255,6 +255,30 @@ object ConstraintGen {
           val resEff = eff
           (resTpe, resEff)
 
+        case SemanticOp.BigIntOp.Neg | SemanticOp.BigIntOp.Not =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.BigInt, actual = tpe, exp.loc)
+          c.unifyType(Type.BigInt, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.BigIntOp.BitLength =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.BigInt, actual = tpe, exp.loc)
+          c.unifyType(Type.Int32, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.BigIntOp.FromInt64 =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Int64, actual = tpe, exp.loc)
+          c.unifyType(Type.BigInt, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
         case SemanticOp.ToStringOp.CharToString =>
           val (tpe, eff) = visitExp(exp)
           c.expectType(expected = Type.Char, actual = tpe, exp.loc)
@@ -306,6 +330,14 @@ object ConstraintGen {
         case SemanticOp.ToStringOp.Int64ToString =>
           val (tpe, eff) = visitExp(exp)
           c.expectType(expected = Type.Int64, actual = tpe, exp.loc)
+          c.unifyType(Type.Str, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.ToStringOp.BigIntToString =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.BigInt, actual = tpe, exp.loc)
           c.unifyType(Type.Str, tvar, exp.loc)
           val resTpe = tvar
           val resEff = eff
@@ -443,6 +475,14 @@ object ConstraintGen {
           val (tpe, eff) = visitExp(exp)
           c.expectType(expected = Type.Str, actual = tpe, exp.loc)
           c.unifyType(Type.mkTuple(List(Type.Bool, Type.Float64), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.ParseOp.BigIntFromString =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Str, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.BigInt), exp.loc), tvar, exp.loc)
           val resTpe = tvar
           val resEff = eff
           (resTpe, resEff)
@@ -786,6 +826,14 @@ object ConstraintGen {
         case SemanticOp.HashOp.Int64Hash =>
           val (tpe, eff) = visitExp(exp)
           c.expectType(expected = Type.Int64, actual = tpe, exp.loc)
+          c.unifyType(Type.Int32, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.HashOp.BigIntHash =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.BigInt, actual = tpe, exp.loc)
           c.unifyType(Type.Int32, tvar, exp.loc)
           val resTpe = tvar
           val resEff = eff
@@ -1176,6 +1224,38 @@ object ConstraintGen {
           c.expectType(expected = Type.Int64, actual = tpe1, exp1.loc)
           c.expectType(expected = Type.Int64, actual = tpe2, exp2.loc)
           c.unifyType(tvar, Type.Int64, loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff1, eff2, loc)
+          (resTpe, resEff)
+
+        case SemanticOp.BigIntOp.Add | SemanticOp.BigIntOp.Sub | SemanticOp.BigIntOp.Mul | SemanticOp.BigIntOp.Div
+             | SemanticOp.BigIntOp.Rem
+             | SemanticOp.BigIntOp.And | SemanticOp.BigIntOp.Or | SemanticOp.BigIntOp.Xor =>
+          val (tpe1, eff1) = visitExp(exp1)
+          val (tpe2, eff2) = visitExp(exp2)
+          c.expectType(expected = Type.BigInt, actual = tpe1, exp1.loc)
+          c.expectType(expected = Type.BigInt, actual = tpe2, exp2.loc)
+          c.unifyType(tvar, Type.BigInt, loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff1, eff2, loc)
+          (resTpe, resEff)
+
+        case SemanticOp.BigIntOp.Shl | SemanticOp.BigIntOp.Shr =>
+          val (tpe1, eff1) = visitExp(exp1)
+          val (tpe2, eff2) = visitExp(exp2)
+          c.expectType(expected = Type.BigInt, actual = tpe1, exp1.loc)
+          c.expectType(expected = Type.Int32, actual = tpe2, exp2.loc)
+          c.unifyType(tvar, Type.BigInt, loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff1, eff2, loc)
+          (resTpe, resEff)
+
+        case SemanticOp.BigIntOp.Cmp =>
+          val (tpe1, eff1) = visitExp(exp1)
+          val (tpe2, eff2) = visitExp(exp2)
+          c.expectType(expected = Type.BigInt, actual = tpe1, exp1.loc)
+          c.expectType(expected = Type.BigInt, actual = tpe2, exp2.loc)
+          c.unifyType(tvar, Type.Int32, loc)
           val resTpe = tvar
           val resEff = Type.mkUnion(eff1, eff2, loc)
           (resTpe, resEff)

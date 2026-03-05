@@ -214,12 +214,14 @@ object Lowerer {
     case CompilationTarget.LlvmWasm =>
       op match {
         case AtomicOp.Unary(sop) => isSuspendableIoOp(sop)
+        case AtomicOp.ChannelGet | AtomicOp.ChannelPut => true
         case _ => false
       }
     case _ => false
   }
 
   private def isSuspendableIoOp(sop: SemanticOp.UnaryOp): Boolean = sop match {
+    case SemanticOp.IoOp.Readln => true
     case SemanticOp.IoOp.SleepMillis => true
     case SemanticOp.IoOp.FileExists => true
     case SemanticOp.IoOp.FileIsDirectory => true

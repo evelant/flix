@@ -128,6 +128,25 @@ object LlvmBackend {
         Decl.DeclareFun(Type.Void, "flix_ctx_free", List(Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_float32_to_string", List(Type.Float)),
         Decl.DeclareFun(Type.Ptr, "flix_float64_to_string", List(Type.Double)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigint_from_i64", List(Type.Ptr, Type.I64)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigint_from_string", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigint_try_parse", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigint_to_string", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigint_neg", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigint_not", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigint_add", List(Type.Ptr, Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigint_sub", List(Type.Ptr, Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigint_mul", List(Type.Ptr, Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigint_div", List(Type.Ptr, Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigint_rem", List(Type.Ptr, Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigint_shl", List(Type.Ptr, Type.Ptr, Type.I32)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigint_shr", List(Type.Ptr, Type.Ptr, Type.I32)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigint_and", List(Type.Ptr, Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigint_or", List(Type.Ptr, Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigint_xor", List(Type.Ptr, Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.I32, "flix_bigint_cmp", List(Type.Ptr, Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.I32, "flix_bigint_bit_length", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.I32, "flix_bigint_hash", List(Type.Ptr, Type.Ptr)),
         Decl.DeclareFun(Type.I32, "flix_char_to_lower_case", List(Type.I32)),
         Decl.DeclareFun(Type.I32, "flix_char_to_upper_case", List(Type.I32)),
         Decl.DeclareFun(Type.I32, "flix_char_to_title_case", List(Type.I32)),
@@ -187,6 +206,8 @@ object LlvmBackend {
         Decl.DeclareFun(Type.Ptr, "flix_channel_new", List(Type.I32)),
         Decl.DeclareFun(Type.I64, "flix_channel_put", List(Type.Ptr, Type.I64)),
         Decl.DeclareFun(Type.I64, "flix_channel_get", List(Type.Ptr)),
+        Decl.DeclareFun(flixResultType, "flix_channel_put_resumable", List(Type.Ptr, Type.Ptr, Type.I64)),
+        Decl.DeclareFun(flixResultType, "flix_channel_get_resumable", List(Type.Ptr, Type.Ptr)),
         Decl.DeclareFun(Type.I64, "flix_spawn", List(Type.Ptr, Type.Ptr, Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_region_enter", List(Type.Ptr)),
         // Note: Passing `FlixResult` by-value is not ABI-stable across Zig/Clang on wasm, so we pass
@@ -382,6 +403,19 @@ object LlvmBackend {
         TypeInfoSpec(
           name = LlvmNames.stringTypeInfoName,
           ptrOffsName = s"${LlvmNames.stringTypeInfoName}_ptr_offs",
+          sizeBytes = 0L,
+          ptrOffs = Nil,
+          trace = None,
+          invoke = None,
+          apply = None,
+          copy = None
+        )
+      )
+
+      val bigIntSpecs = List(
+        TypeInfoSpec(
+          name = LlvmNames.bigIntTypeInfoName,
+          ptrOffsName = s"${LlvmNames.bigIntTypeInfoName}_ptr_offs",
           sizeBytes = 0L,
           ptrOffs = Nil,
           trace = None,
@@ -606,7 +640,7 @@ object LlvmBackend {
           )
         }
 
-	      val typeInfoSpecs = (arraySpecs ::: stringSpecs ::: effectInternalSpecs ::: closureSpecs ::: thunkSpecs ::: kSpecs ::: thunkApplyCloSpecs ::: lazySpecs ::: tupleSpecs ::: tagSpecs ::: structSpecs ::: recordSpecs ::: frameSpecs).sortBy(_.name)
+	      val typeInfoSpecs = (arraySpecs ::: stringSpecs ::: bigIntSpecs ::: effectInternalSpecs ::: closureSpecs ::: thunkSpecs ::: kSpecs ::: thunkApplyCloSpecs ::: lazySpecs ::: tupleSpecs ::: tagSpecs ::: structSpecs ::: recordSpecs ::: frameSpecs).sortBy(_.name)
 
       val ptrOffsGlobals = typeInfoSpecs.collect {
         case spec if spec.ptrOffs.nonEmpty =>
@@ -658,6 +692,7 @@ object LlvmBackend {
             if (spec.name == LlvmNames.arrayPrimTypeInfoName ||
               spec.name == LlvmNames.arrayPtrTypeInfoName ||
               spec.name == LlvmNames.stringTypeInfoName ||
+              spec.name == LlvmNames.bigIntTypeInfoName ||
               spec.name == LlvmNames.handlerTypeInfoName ||
               spec.name == LlvmNames.suspensionTypeInfoName)
               LlvmIr.GlobalDef.Linkage.External
@@ -3528,6 +3563,26 @@ object LlvmBackend {
                   case AtomicOp.Unary(sop) if isSuspendableWasmIoOp(sop) =>
                     val x = args.headOption.getOrElse(Value.Undef(llvmTypeOf(argTpes.headOption.getOrElse(SimpleType.Object))))
                     emitApplyWasmIoOpSuspension(sop, x, pcPointId, tpe, ctxPtr, fb, framePtr, resumePayload, pcBlocks, exnHandlerOpt)
+                  case AtomicOp.ChannelPut =>
+                    val chan0 = args.headOption.getOrElse(Value.Undef(Type.Ptr))
+                    val v0 = args.drop(1).headOption.getOrElse(Value.Undef(Type.I64))
+                    val vTpe = argTpes.drop(1).headOption.getOrElse(SimpleType.Object)
+
+                    val chanPtr = castValue(chan0, Type.Ptr, fb)
+                    val payload = boxToI64(v0, vTpe, fb)
+
+                    val callTmp = freshTmp(flixResultType)
+                    fb.current.emitAssign(callTmp, Op.Call(flixResultType, "flix_channel_put_resumable", List(ctxPtr, chanPtr, payload)))
+                    emitCallAndHandleSuspension(callTmp, pcPointId, tpe, ctxPtr, fb, framePtr, resumePayload, pcBlocks, exnHandlerOpt)
+
+                  case AtomicOp.ChannelGet =>
+                    val chan0 = args.headOption.getOrElse(Value.Undef(Type.Ptr))
+                    val chanPtr = castValue(chan0, Type.Ptr, fb)
+
+                    val callTmp = freshTmp(flixResultType)
+                    fb.current.emitAssign(callTmp, Op.Call(flixResultType, "flix_channel_get_resumable", List(ctxPtr, chanPtr)))
+                    emitCallAndHandleSuspension(callTmp, pcPointId, tpe, ctxPtr, fb, framePtr, resumePayload, pcBlocks, exnHandlerOpt)
+
                   case _ =>
                     emitApplyAtomic(op, argTpes, args, tpe, ctxPtr, fb, exnHandlerOpt)
                 }
@@ -3574,11 +3629,40 @@ object LlvmBackend {
         }
 
       case Expr.ApplyClo(exp1, exp2, ct, pcPointId, tpe, purity, _) =>
-        val clo = emitExprControlImpure(exp1, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt)
-        if (fb.current.isTerminated) {
+        // In the resumable evaluator, blocks that follow a suspension point are only reachable from
+        // the corresponding resume pc-block, and thus do not dominate values computed earlier in the
+        // pre-suspension path. For applications where the argument may suspend, we must ensure that
+        // the closure value is (re)materialized in the post-resume path.
+        //
+        // We rely on the (current) LoweredAst invariant that `exp1` is pure/atomic in such cases
+        // (e.g. a `Var` or `AtomicOp.Closure`) and thus safe to evaluate after the argument.
+        val argMaySuspend = maySuspend(exp2)
+        val reorderOk = ca.uwaterloo.flix.language.ast.Purity.isPure(exp1.purity)
+        if (argMaySuspend && !reorderOk) {
+          // Correct implementation requires spilling `exp1` into the frame across the suspension.
+          // We do not support that yet; fail fast rather than miscompiling.
+          fb.current.emitTrap()
           Value.Undef(llvmTypeOf(tpe))
         } else {
-          val arg = emitExprControlImpure(exp2, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt)
+          val (clo, arg) =
+            if (argMaySuspend) {
+              val a = emitExprControlImpure(exp2, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt)
+              if (fb.current.isTerminated) {
+                (Value.Undef(Type.Ptr), Value.Undef(llvmTypeOf(exp2.tpe)))
+              } else {
+                val c = emitExprControlImpure(exp1, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt)
+                (c, a)
+              }
+            } else {
+              val c = emitExprControlImpure(exp1, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt)
+              if (fb.current.isTerminated) {
+                (Value.Undef(Type.Ptr), Value.Undef(llvmTypeOf(exp2.tpe)))
+              } else {
+                val a = emitExprControlImpure(exp2, ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt)
+                (c, a)
+              }
+            }
+
           if (fb.current.isTerminated) {
             Value.Undef(llvmTypeOf(tpe))
           } else {
@@ -3849,6 +3933,45 @@ object LlvmBackend {
         buf.addOne(emitExprControlImpure(it.next(), ctxPtr, fb, framePtr, slotIndexOf, lenv, resumePayload, pcBlocks, exnHandlerOpt))
       }
       if (fb.current.isTerminated) None else Some(buf.toList)
+    }
+
+    /**
+      * Returns `true` if evaluating `exp0` may suspend and resume via a pc-point (wasm target).
+      *
+      * This is used to avoid emitting LLVM IR that uses SSA values computed on a pre-suspension
+      * path in blocks that are only reachable from the corresponding resume pc-block.
+      */
+    private def maySuspend(exp0: Expr): Boolean = exp0 match {
+      case Expr.Cst(_, _) => false
+      case Expr.Var(_, _, _) => false
+      case Expr.ApplyAtomic(_, exps, pcPointId, _, _, _) =>
+        pcPointId > 0 || exps.exists(maySuspend)
+      case Expr.ApplyClo(exp1, exp2, _, pcPointId, _, _, _) =>
+        pcPointId > 0 || maySuspend(exp1) || maySuspend(exp2)
+      case Expr.ApplyDef(_, exps, _, pcPointId, _, _, _) =>
+        pcPointId > 0 || exps.exists(maySuspend)
+      case Expr.ApplyOp(_, exps, pcPointId, _, _, _) =>
+        pcPointId > 0 || exps.exists(maySuspend)
+      case Expr.ApplySelfTail(_, actuals, _, _, _) =>
+        actuals.exists(maySuspend)
+      case Expr.IfThenElse(exp1, exp2, exp3, _, _, _) =>
+        maySuspend(exp1) || maySuspend(exp2) || maySuspend(exp3)
+      case Expr.Branch(exp, branches, _, _, _) =>
+        maySuspend(exp) || branches.values.exists(maySuspend)
+      case Expr.JumpTo(_, _, _, _) =>
+        false
+      case Expr.Let(_, exp1, exp2, _) =>
+        maySuspend(exp1) || maySuspend(exp2)
+      case Expr.Stmt(exp1, exp2, _) =>
+        maySuspend(exp1) || maySuspend(exp2)
+      case Expr.Region(_, exp, pcPointId, _, _, _) =>
+        pcPointId > 0 || maySuspend(exp)
+      case Expr.TryCatch(exp, rules, _, _, _) =>
+        maySuspend(exp) || rules.exists(r => maySuspend(r.exp))
+      case Expr.RunWith(exp, _, rules, _, pcPointId, _, _, _) =>
+        pcPointId > 0 || maySuspend(exp) || rules.exists(r => maySuspend(r.exp))
+      case Expr.NewObject(_, _, _, _, methods, _) =>
+        methods.exists(m => maySuspend(m.exp))
     }
 
     private def emitCallAndHandleSuspension(result0: Value,
@@ -4130,6 +4253,10 @@ object LlvmBackend {
       }
 
       val argPayloads: List[Value] = sop match {
+        case SemanticOp.IoOp.Readln =>
+          // Console input is host-backed on wasm; the operand is `Unit` and carries no payload.
+          Nil
+
         case SemanticOp.IoOp.SleepMillis =>
           val ms = castValue(x, Type.I64, fb)
           List(boxToI64(ms, SimpleType.Int64, fb))
@@ -4379,6 +4506,7 @@ object LlvmBackend {
       case SemanticOp.IoOp.TcpServerAccept => 42L
       case SemanticOp.IoOp.TcpServerLocalPort => 43L
       case SemanticOp.IoOp.TcpServerClose => 44L
+      case SemanticOp.IoOp.Readln => 45L
       case _ => 0L
     }
 
@@ -4656,6 +4784,20 @@ object LlvmBackend {
 
       case Constant.Int64(lit) =>
         Value.IntConst(lit, Type.I64)
+
+      case Constant.BigInt(lit) =>
+        try {
+          val longVal = lit.longValueExact()
+          val tmp = freshTmp(Type.Ptr)
+          fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigint_from_i64", List(ctxPtr, Value.IntConst(longVal, Type.I64))))
+          tmp
+        } catch {
+          case _: java.lang.ArithmeticException =>
+            val strPtr = emitConstant(Constant.Str(lit.toString), ctxPtr, fb)
+            val tmp = freshTmp(Type.Ptr)
+            fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigint_from_string", List(ctxPtr, strPtr)))
+            tmp
+        }
 
       case Constant.Float32(lit) =>
         Value.Float32Const(java.lang.Float.floatToRawIntBits(lit))
@@ -6025,6 +6167,29 @@ object LlvmBackend {
         fb.current.emitAssign(tmp, Op.Bin("xor", Type.I64, x, Value.IntConst(-1L, Type.I64)))
         tmp
 
+      case SemanticOp.BigIntOp.Neg =>
+        val tmp = freshTmp(Type.Ptr)
+        val bigintPtr = castValue(x, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigint_neg", List(ctxPtr, bigintPtr)))
+        tmp
+
+      case SemanticOp.BigIntOp.Not =>
+        val tmp = freshTmp(Type.Ptr)
+        val bigintPtr = castValue(x, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigint_not", List(ctxPtr, bigintPtr)))
+        tmp
+
+      case SemanticOp.BigIntOp.BitLength =>
+        val tmp = freshTmp(Type.I32)
+        val bigintPtr = castValue(x, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.I32, "flix_bigint_bit_length", List(ctxPtr, bigintPtr)))
+        tmp
+
+      case SemanticOp.BigIntOp.FromInt64 =>
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigint_from_i64", List(ctxPtr, castValue(x, Type.I64, fb))))
+        tmp
+
       case SemanticOp.Float64Op.Neg =>
         val bits = freshTmp(Type.I64)
         fb.current.emitAssign(bits, Op.Cast("bitcast", Type.I64, x))
@@ -6413,6 +6578,12 @@ object LlvmBackend {
         endBlock.emitPhi(phi, incomings.toList)
         phi
 
+      case SemanticOp.ToStringOp.BigIntToString =>
+        val tmp = freshTmp(Type.Ptr)
+        val bigintPtr = castValue(x, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigint_to_string", List(ctxPtr, bigintPtr)))
+        tmp
+
       case SemanticOp.ToStringOp.Float32ToString =>
         val tmp = freshTmp(Type.Ptr)
         fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_float32_to_string", List(x)))
@@ -6471,6 +6642,46 @@ object LlvmBackend {
 
       case SemanticOp.ParseOp.Float64FromString =>
         emitParseFloatTuple(x, is32 = false, ctxPtr, fb)
+
+      case SemanticOp.ParseOp.BigIntFromString =>
+        val strPtr = castValue(x, Type.Ptr, fb)
+        val parsedPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(parsedPtr, Op.Call(Type.Ptr, "flix_bigint_try_parse", List(ctxPtr, strPtr)))
+
+        val ok = freshTmp(Type.I1)
+        fb.current.emitAssign(ok, Op.ICmp("ne", parsedPtr, Value.Null(Type.Ptr)))
+
+        val okLabel = freshLabel("parsebigint_ok")
+        val failLabel = freshLabel("parsebigint_fail")
+        val endLabel = freshLabel("parsebigint_end")
+        fb.current.setTerminator(Terminator.CondBr(ok, okLabel, failLabel))
+
+        val incomings = mutable.ArrayBuffer.empty[(Value, String)]
+        val tupleTpe = SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.BigInt))
+
+        val okBlock = fb.newBlock(okLabel)
+        fb.setCurrent(okBlock)
+        val okPayload = Value.IntConst(1L, Type.I64)
+        val valuePayload = boxToI64(parsedPtr, SimpleType.BigInt, fb)
+        val okTuple = allocTuple2(tupleTpe, okPayload, valuePayload, ctxPtr, fb)
+        fb.current.setTerminator(Terminator.Br(endLabel))
+        incomings.addOne((okTuple, okLabel))
+
+        val failBlock = fb.newBlock(failLabel)
+        fb.setCurrent(failBlock)
+        val zeroPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(zeroPtr, Op.Call(Type.Ptr, "flix_bigint_from_i64", List(ctxPtr, Value.IntConst(0L, Type.I64))))
+        val failPayload = Value.IntConst(0L, Type.I64)
+        val zeroPayload = boxToI64(zeroPtr, SimpleType.BigInt, fb)
+        val failTuple = allocTuple2(tupleTpe, failPayload, zeroPayload, ctxPtr, fb)
+        fb.current.setTerminator(Terminator.Br(endLabel))
+        incomings.addOne((failTuple, failLabel))
+
+        val endBlock = fb.newBlock(endLabel)
+        fb.setCurrent(endBlock)
+        val phi = freshTmp(Type.Ptr)
+        endBlock.emitPhi(phi, incomings.toList)
+        phi
 
       case SemanticOp.StringOp.Length =>
         stringLenI32(x, fb)
@@ -6585,6 +6796,12 @@ object LlvmBackend {
         fb.current.emitAssign(xored, Op.Bin("xor", Type.I64, x, shifted))
         val tmp = freshTmp(Type.I32)
         fb.current.emitAssign(tmp, Op.Cast("trunc", Type.I32, xored))
+        tmp
+
+      case SemanticOp.HashOp.BigIntHash =>
+        val tmp = freshTmp(Type.I32)
+        val bigintPtr = castValue(x, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.I32, "flix_bigint_hash", List(ctxPtr, bigintPtr)))
         tmp
 
       case SemanticOp.HashOp.StringHash =>
@@ -8875,6 +9092,83 @@ object LlvmBackend {
         fb.current.emitAssign(tmp, Op.ICmp("sge", a, b))
         tmp
 
+      case SemanticOp.BigIntOp.Add =>
+        val tmp = freshTmp(Type.Ptr)
+        val aPtr = castValue(a, Type.Ptr, fb)
+        val bPtr = castValue(b, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigint_add", List(ctxPtr, aPtr, bPtr)))
+        tmp
+
+      case SemanticOp.BigIntOp.Sub =>
+        val tmp = freshTmp(Type.Ptr)
+        val aPtr = castValue(a, Type.Ptr, fb)
+        val bPtr = castValue(b, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigint_sub", List(ctxPtr, aPtr, bPtr)))
+        tmp
+
+      case SemanticOp.BigIntOp.Mul =>
+        val tmp = freshTmp(Type.Ptr)
+        val aPtr = castValue(a, Type.Ptr, fb)
+        val bPtr = castValue(b, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigint_mul", List(ctxPtr, aPtr, bPtr)))
+        tmp
+
+      case SemanticOp.BigIntOp.Div =>
+        val tmp = freshTmp(Type.Ptr)
+        val aPtr = castValue(a, Type.Ptr, fb)
+        val bPtr = castValue(b, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigint_div", List(ctxPtr, aPtr, bPtr)))
+        tmp
+
+      case SemanticOp.BigIntOp.Rem =>
+        val tmp = freshTmp(Type.Ptr)
+        val aPtr = castValue(a, Type.Ptr, fb)
+        val bPtr = castValue(b, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigint_rem", List(ctxPtr, aPtr, bPtr)))
+        tmp
+
+      case SemanticOp.BigIntOp.Shl =>
+        val tmp = freshTmp(Type.Ptr)
+        val aPtr = castValue(a, Type.Ptr, fb)
+        val shift = castValue(b, Type.I32, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigint_shl", List(ctxPtr, aPtr, shift)))
+        tmp
+
+      case SemanticOp.BigIntOp.Shr =>
+        val tmp = freshTmp(Type.Ptr)
+        val aPtr = castValue(a, Type.Ptr, fb)
+        val shift = castValue(b, Type.I32, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigint_shr", List(ctxPtr, aPtr, shift)))
+        tmp
+
+      case SemanticOp.BigIntOp.And =>
+        val tmp = freshTmp(Type.Ptr)
+        val aPtr = castValue(a, Type.Ptr, fb)
+        val bPtr = castValue(b, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigint_and", List(ctxPtr, aPtr, bPtr)))
+        tmp
+
+      case SemanticOp.BigIntOp.Or =>
+        val tmp = freshTmp(Type.Ptr)
+        val aPtr = castValue(a, Type.Ptr, fb)
+        val bPtr = castValue(b, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigint_or", List(ctxPtr, aPtr, bPtr)))
+        tmp
+
+      case SemanticOp.BigIntOp.Xor =>
+        val tmp = freshTmp(Type.Ptr)
+        val aPtr = castValue(a, Type.Ptr, fb)
+        val bPtr = castValue(b, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigint_xor", List(ctxPtr, aPtr, bPtr)))
+        tmp
+
+      case SemanticOp.BigIntOp.Cmp =>
+        val tmp = freshTmp(Type.I32)
+        val aPtr = castValue(a, Type.Ptr, fb)
+        val bPtr = castValue(b, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.I32, "flix_bigint_cmp", List(ctxPtr, aPtr, bPtr)))
+        tmp
+
       case SemanticOp.Int8Op.Add =>
         val tmp = freshTmp(Type.I8)
         fb.current.emitAssign(tmp, Op.Bin("add", Type.I8, a, b))
@@ -10191,6 +10485,9 @@ object LlvmBackend {
 
     def stringTypeInfoName: String =
       "flix_ti_string"
+
+    def bigIntTypeInfoName: String =
+      "flix_ti_bigint"
 
     def handlerTypeInfoName: String =
       "flix_ti_handler"
