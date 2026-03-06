@@ -9,7 +9,8 @@ Inputs (downloaded from unicode.org):
   - UnicodeData.txt              (simple upper/lower/title mappings; general categories; numeric properties)
   - SpecialCasing.txt            (full upper/lower mappings; unconditional only)
   - DerivedCoreProperties.txt    (Cased / Case_Ignorable / Lowercase / Uppercase)
-  - PropList.txt                 (White_Space)
+  - PropList.txt                 (White_Space / Ideographic)
+  - Blocks.txt                   (Unicode block fallback names)
 
 Output:
   runtime/src/unicode_case_tables.zig
@@ -78,7 +79,9 @@ class UnicodeTables:
     letter_ranges: list[Range]
     digit_ranges: list[Range]
     titlecase_ranges: list[Range]
+    alphabetic_ranges: list[Range]
     defined_ranges: list[Range]
+    ideographic_ranges: list[Range]
     mirrored_ranges: list[Range]
 
     # Digit values (BMP only). Uses UnicodeData.txt decimal digit value if present, else digit value.
@@ -87,6 +90,14 @@ class UnicodeTables:
     # Numeric values (BMP only). Integers map to their value; non-integers map to -2.
     numeric_int_value: dict[int, int]  # cp -> int
     numeric_nonint: set[int]  # cp with numeric value but not a nonnegative integer (fractions etc)
+    explicit_names: dict[int, str]  # cp -> UnicodeData name (excluding pseudo names like <control>)
+
+
+@dataclasses.dataclass(frozen=True)
+class Block:
+    start: int
+    end: int
+    name: str
 
 
 _UNICODEDATA_FIRST_RE = re.compile(r",\s*First>\s*$")
@@ -101,12 +112,15 @@ def parse_unicode_data_tables(text: str) -> UnicodeTables:
     letter_ranges: list[Range] = []
     digit_ranges: list[Range] = []
     titlecase_ranges: list[Range] = []
+    alphabetic_ranges: list[Range] = []
     defined_ranges: list[Range] = []
+    ideographic_ranges: list[Range] = []
     mirrored_ranges: list[Range] = []
 
     digit_value: dict[int, int] = {}
     numeric_int_value: dict[int, int] = {}
     numeric_nonint: set[int] = set()
+    explicit_names: dict[int, str] = {}
 
     pending_range_start: int | None = None
     pending_range_cat: str | None = None
@@ -156,6 +170,9 @@ def parse_unicode_data_tables(text: str) -> UnicodeTables:
         if title_hex:
             title[cp] = int(title_hex, 16)
 
+        if name and not (name.startswith("<") and name.endswith(">")):
+            explicit_names[cp] = name
+
         # UnicodeData has a few explicit <..., First>/<..., Last> range pairs.
         if _UNICODEDATA_FIRST_RE.search(name):
             pending_range_start = cp
@@ -193,7 +210,11 @@ def parse_unicode_data_tables(text: str) -> UnicodeTables:
                 numeric_nonint.add(cp)
             else:
                 try:
-                    numeric_int_value[cp] = int(num_str, 10)
+                    value = int(num_str, 10)
+                    if value < 0 or value > 0x7FFFFFFF:
+                        numeric_nonint.add(cp)
+                    else:
+                        numeric_int_value[cp] = value
                 except ValueError:
                     numeric_nonint.add(cp)
 
@@ -208,12 +229,34 @@ def parse_unicode_data_tables(text: str) -> UnicodeTables:
         letter_ranges=merge_ranges(letter_ranges),
         digit_ranges=merge_ranges(digit_ranges),
         titlecase_ranges=merge_ranges(titlecase_ranges),
+        alphabetic_ranges=merge_ranges(alphabetic_ranges),
         defined_ranges=merge_ranges(defined_ranges),
+        ideographic_ranges=merge_ranges(ideographic_ranges),
         mirrored_ranges=merge_ranges(mirrored_ranges),
         digit_value=digit_value,
         numeric_int_value=numeric_int_value,
         numeric_nonint=numeric_nonint,
+        explicit_names=explicit_names,
     )
+
+
+def parse_blocks(text: str) -> list[Block]:
+    blocks: list[Block] = []
+    for raw in text.splitlines():
+        line = strip_comment(raw)
+        if not line or ";" not in line:
+            continue
+        left, right = [p.strip() for p in line.split(";", 1)]
+        if ".." in left:
+            a, b = left.split("..", 1)
+            start = int(a, 16)
+            end = int(b, 16)
+        else:
+            start = int(left, 16)
+            end = start
+        display = right.upper().replace("-", " ")
+        blocks.append(Block(start=start, end=end, name=display))
+    return blocks
 
 
 def parse_property_list(text: str, prop: str) -> list[Range]:
@@ -346,12 +389,15 @@ def main() -> int:
     special_casing = fetch_text(UCD_BASE_URL + "SpecialCasing.txt")
     derived_core = fetch_text(UCD_BASE_URL + "DerivedCoreProperties.txt")
     prop_list = fetch_text(UCD_BASE_URL + "PropList.txt")
+    blocks_txt = fetch_text(UCD_BASE_URL + "Blocks.txt")
 
     tables = parse_unicode_data_tables(unicode_data)
+    blocks = parse_blocks(blocks_txt)
     cased_ranges = parse_property_list(derived_core, "Cased")
     case_ignorable_ranges = parse_property_list(derived_core, "Case_Ignorable")
     lowercase_ranges = parse_property_list(derived_core, "Lowercase")
     uppercase_ranges = parse_property_list(derived_core, "Uppercase")
+    alphabetic_ranges = parse_property_list(derived_core, "Alphabetic")
 
     # Java's Character.isWhitespace differs from Unicode's White_Space property:
     # - Excludes: U+0085, U+00A0, U+2007, U+202F
@@ -359,6 +405,7 @@ def main() -> int:
     whitespace_ranges = parse_property_list(prop_list, "White_Space")
     whitespace_ranges = subtract_codepoints(whitespace_ranges, {0x0085, 0x00A0, 0x2007, 0x202F})
     whitespace_ranges = merge_ranges(whitespace_ranges + [Range(0x001C, 0x001F)])
+    ideographic_ranges = parse_property_list(prop_list, "Ideographic")
 
     lower_full, upper_full = parse_special_casing(special_casing, tables.upper_simple, tables.lower_simple)
 
@@ -378,25 +425,53 @@ def main() -> int:
     ign_flat = [f".{{ .start = {zig_u32(r.start)}, .end = {zig_u32(r.end)} }}" for r in case_ignorable_ranges]
     lower_flat = [f".{{ .start = {zig_u32(r.start)}, .end = {zig_u32(r.end)} }}" for r in lowercase_ranges]
     upper_flat = [f".{{ .start = {zig_u32(r.start)}, .end = {zig_u32(r.end)} }}" for r in uppercase_ranges]
+    alphabetic_flat = [f".{{ .start = {zig_u32(r.start)}, .end = {zig_u32(r.end)} }}" for r in alphabetic_ranges]
 
     letter_flat = [f".{{ .start = {zig_u32(r.start)}, .end = {zig_u32(r.end)} }}" for r in tables.letter_ranges]
     digit_flat = [f".{{ .start = {zig_u32(r.start)}, .end = {zig_u32(r.end)} }}" for r in tables.digit_ranges]
     titlecase_flat = [f".{{ .start = {zig_u32(r.start)}, .end = {zig_u32(r.end)} }}" for r in tables.titlecase_ranges]
     defined_flat = [f".{{ .start = {zig_u32(r.start)}, .end = {zig_u32(r.end)} }}" for r in tables.defined_ranges]
+    ideographic_flat = [f".{{ .start = {zig_u32(r.start)}, .end = {zig_u32(r.end)} }}" for r in ideographic_ranges]
     mirrored_flat = [f".{{ .start = {zig_u32(r.start)}, .end = {zig_u32(r.end)} }}" for r in tables.mirrored_ranges]
     whitespace_flat = [f".{{ .start = {zig_u32(r.start)}, .end = {zig_u32(r.end)} }}" for r in whitespace_ranges]
 
-    # Emit digit/numeric maps (BMP only).
-    digit_items = sorted((k, v) for (k, v) in tables.digit_value.items() if k <= 0xFFFF)
+    # Emit digit/numeric maps.
+    digit_items = sorted(tables.digit_value.items())
     digit_value_from = [zig_u32(k) for (k, _) in digit_items]
     digit_value_to = [str(v) for (_, v) in digit_items]
 
-    numeric_int_items = sorted((k, v) for (k, v) in tables.numeric_int_value.items() if k <= 0xFFFF)
+    numeric_int_items = sorted(tables.numeric_int_value.items())
     numeric_int_from = [zig_u32(k) for (k, _) in numeric_int_items]
     numeric_int_to = [str(v) for (_, v) in numeric_int_items]
 
-    numeric_nonint_keys = sorted(k for k in tables.numeric_nonint if k <= 0xFFFF)
+    numeric_nonint_keys = sorted(tables.numeric_nonint)
     numeric_nonint_from = [zig_u32(k) for k in numeric_nonint_keys]
+
+    # Explicit UnicodeData names.
+    name_items = sorted(tables.explicit_names.items())
+    name_from = [zig_u32(k) for (k, _) in name_items]
+    name_offsets: list[str] = []
+    name_lengths: list[str] = []
+    name_bytes: list[str] = []
+    offset = 0
+    for _, name in name_items:
+        bs = name.encode("ascii")
+        name_offsets.append(zig_u32(offset))
+        name_lengths.append(str(len(bs)))
+        name_bytes.extend(str(b) for b in bs)
+        offset += len(bs)
+
+    # Unicode block fallback names.
+    block_entries: list[str] = []
+    block_name_bytes: list[str] = []
+    block_name_offset = 0
+    for b in blocks:
+        bs = b.name.encode("ascii")
+        block_entries.append(
+            f".{{ .start = {zig_u32(b.start)}, .end = {zig_u32(b.end)}, .name_offset = {zig_u32(block_name_offset)}, .name_len = {len(bs)} }}"
+        )
+        block_name_bytes.extend(str(x) for x in bs)
+        block_name_offset += len(bs)
 
     # Emit special casing as (key -> slice into flat UTF-16 array).
     def build_special_table(m: dict[int, list[int]]):
@@ -419,13 +494,14 @@ def main() -> int:
     out_lines: list[str] = []
     out_lines.append("// This file is @generated by runtime/tools/gen_unicode_case_tables.py")
     out_lines.append(
-        f"// Source: Unicode {UNICODE_VERSION} (UnicodeData.txt, SpecialCasing.txt, DerivedCoreProperties.txt, PropList.txt)"
+        f"// Source: Unicode {UNICODE_VERSION} (UnicodeData.txt, SpecialCasing.txt, DerivedCoreProperties.txt, PropList.txt, Blocks.txt)"
     )
     out_lines.append("")
     out_lines.append('pub const unicode_version: []const u8 = "' + UNICODE_VERSION + '";')
     out_lines.append("")
     out_lines.append("pub const Range = struct { start: u32, end: u32 };")
     out_lines.append("pub const SpecialCase = struct { key: u32, offset: u32, len: u32 };")
+    out_lines.append("pub const UnicodeBlock = struct { start: u32, end: u32, name_offset: u32, name_len: u16 };")
     out_lines.append("")
 
     out_lines.append(format_zig_array("upper_simple_from", "u32", upper_from))
@@ -465,6 +541,12 @@ def main() -> int:
     out_lines.append("};")
     out_lines.append("")
 
+    out_lines.append("pub const alphabetic_ranges = [_]Range{")
+    for s in alphabetic_flat:
+        out_lines.append(f"    {s},")
+    out_lines.append("};")
+    out_lines.append("")
+
     out_lines.append("pub const letter_ranges = [_]Range{")
     for s in letter_flat:
         out_lines.append(f"    {s},")
@@ -495,6 +577,12 @@ def main() -> int:
     out_lines.append("};")
     out_lines.append("")
 
+    out_lines.append("pub const ideographic_ranges = [_]Range{")
+    for s in ideographic_flat:
+        out_lines.append(f"    {s},")
+    out_lines.append("};")
+    out_lines.append("")
+
     out_lines.append("pub const mirrored_ranges = [_]Range{")
     for s in mirrored_flat:
         out_lines.append(f"    {s},")
@@ -512,6 +600,23 @@ def main() -> int:
     out_lines.append("")
 
     out_lines.append(format_zig_array("numeric_nonint_from", "u32", numeric_nonint_from))
+    out_lines.append("")
+
+    out_lines.append(format_zig_array("name_from", "u32", name_from))
+    out_lines.append("")
+    out_lines.append(format_zig_array("name_offsets", "u32", name_offsets))
+    out_lines.append("")
+    out_lines.append(format_zig_array("name_lengths", "u16", name_lengths))
+    out_lines.append("")
+    out_lines.append(format_zig_array("name_bytes", "u8", name_bytes, columns=24))
+    out_lines.append("")
+
+    out_lines.append("pub const unicode_blocks = [_]UnicodeBlock{")
+    for s in block_entries:
+        out_lines.append(f"    {s},")
+    out_lines.append("};")
+    out_lines.append("")
+    out_lines.append(format_zig_array("unicode_block_name_bytes", "u8", block_name_bytes, columns=24))
     out_lines.append("")
 
     def emit_special(name: str, keys: list[int], offs: list[int], lens: list[int], vals: list[int]):

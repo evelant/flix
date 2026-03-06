@@ -97,7 +97,10 @@ class PortableBigIntLlvmNativeRuntimeSuite extends AnyFunSuite {
   }
 
   private def executablePath(outDir: Path): Path =
-    outDir.resolve("llvm").resolve("native").resolve("main")
+    outDir.resolve("llvm").resolve(if (isWindows) "flix-llvm-native.exe" else "flix-llvm-native").toAbsolutePath.normalize()
+
+  private def isWindows: Boolean =
+    System.getProperty("os.name").toLowerCase.contains("win")
 
   private def hasZig: Boolean =
     hasCmd(List("zig", "version"))
@@ -122,4 +125,3 @@ class PortableBigIntLlvmNativeRuntimeSuite extends AnyFunSuite {
     }
   }
 }
-

@@ -334,6 +334,8 @@ const WitString = extern struct {
 
 extern fn flix_sys_sys_log(level: u8, msg: *WitString) void;
 extern fn flix_sys_sys_time_now_ms() i64;
+extern fn flix_sys_sys_get_args(ret: *flix_list_string_t) void;
+extern fn flix_list_string_free(ptr: *flix_list_string_t) void;
 
 // ============================================================================
 // GC Heap (bring-up): non-moving mark/sweep, STW at pollchecks.
@@ -1011,6 +1013,33 @@ fn gcMarkAllRoots(marker: *GcMarker) void {
         }
         g_spawn_roots_mutex.unlock();
     }
+
+    // Live channels (queued message payloads).
+    //
+    // Note: Channels are currently allocated outside the GC heap, so we treat their internal
+    // buffers as additional root sources.
+    if (g_channel_registry_initialized) {
+        g_channel_registry_mutex.lock();
+        var it = g_channel_registry.iterator();
+        while (it.next()) |e| {
+            const chan: *ChannelObj = @ptrFromInt(e.key_ptr.*);
+            // Unbuffered rendezvous slot.
+            if (chan.rv_has_msg) {
+                gcMarkerMarkPayload(marker, chan.rv_payload);
+            }
+            // Buffered ring buffer payloads.
+            if (chan.capacity > 0) {
+                if (chan.buf) |buf| {
+                    var i: usize = 0;
+                    while (i < chan.count) : (i += 1) {
+                        const idx = (chan.head + i) % chan.capacity;
+                        gcMarkerMarkPayload(marker, buf[idx]);
+                    }
+                }
+            }
+        }
+        g_channel_registry_mutex.unlock();
+    }
 }
 
 fn gcMarkSweep(ctx: *FlixCtx) void {
@@ -1641,6 +1670,994 @@ export fn flix_float64_to_string(x: f64) *anyopaque {
 }
 
 // ============================================================================
+// BigInt (portable, bring-up)
+// ============================================================================
+
+const big_int = std.math.big.int;
+const BigIntLimb = std.math.big.Limb;
+const bigint_limb_bits: usize = @typeInfo(BigIntLimb).int.bits;
+
+const FlixBigIntHeader = extern struct {
+    obj: FlixObj,
+    len: u32,
+    positive: u32,
+};
+
+fn flixBigIntHeader(ptr: *anyopaque) *FlixBigIntHeader {
+    return @ptrCast(@alignCast(ptr));
+}
+
+fn flixBigIntLen(ptr: *anyopaque) usize {
+    return @intCast(flixBigIntHeader(ptr).len);
+}
+
+fn flixBigIntLimbs(ptr: *anyopaque) [*]BigIntLimb {
+    const base: [*]u8 = @ptrCast(ptr);
+    return @ptrCast(@alignCast(base + @sizeOf(FlixBigIntHeader)));
+}
+
+fn flixBigIntToConst(ptr: *anyopaque) big_int.Const {
+    const hdr = flixBigIntHeader(ptr);
+    const n: usize = @intCast(hdr.len);
+    const positive: bool = hdr.positive != 0;
+    const limbs = flixBigIntLimbs(ptr)[0..n];
+    return .{ .limbs = limbs, .positive = positive };
+}
+
+fn storeBigIntHeader(ptr: *anyopaque, m: big_int.Mutable) void {
+    const hdr = flixBigIntHeader(ptr);
+    if (m.len > std.math.maxInt(u32)) @panic("bigint too large");
+    hdr.len = @intCast(m.len);
+    const is_zero = (m.len == 1 and m.limbs[0] == 0);
+    hdr.positive = @intFromBool(m.positive or is_zero);
+}
+
+fn allocBigIntWithCapacity(limb_capacity0: usize) *anyopaque {
+    const limb_capacity: usize = if (limb_capacity0 == 0) 1 else limb_capacity0;
+    if (limb_capacity > std.math.maxInt(u32)) @panic("bigint too large");
+    const size_bytes: usize = @sizeOf(FlixBigIntHeader) + limb_capacity * @sizeOf(BigIntLimb);
+    const mem = gcAllocBytes(size_bytes, &flix_ti_bigint);
+    const hdr = flixBigIntHeader(mem);
+    hdr.len = 1;
+    hdr.positive = 1;
+    const limbs = flixBigIntLimbs(mem);
+    limbs[0] = 0;
+    return mem;
+}
+
+fn i32FromBitCount(bits: usize) i32 {
+    if (bits > std.math.maxInt(i32)) return std.math.maxInt(i32);
+    return @intCast(bits);
+}
+
+fn trapDivByZero() noreturn {
+    @trap();
+}
+
+export fn flix_bigint_from_i64(ctx_ptr: *anyopaque, x: i64) *anyopaque {
+    _ = ctx_ptr;
+    const cap: usize = big_int.calcTwosCompLimbCount(@bitSizeOf(i64));
+    const mem = allocBigIntWithCapacity(cap);
+    const limbs = flixBigIntLimbs(mem)[0..cap];
+    const m = big_int.Mutable.init(limbs, x);
+    storeBigIntHeader(mem, m);
+    return mem;
+}
+
+export fn flix_bigint_try_parse(ctx_ptr: *anyopaque, str_ptr: *anyopaque) ?*anyopaque {
+    _ = ctx_ptr;
+    const len: usize = flixStringLen(str_ptr);
+    const units = flixStringCodeUnits(str_ptr);
+
+    var start: usize = 0;
+    while (start < len and units[start] <= 32) : (start += 1) {}
+
+    var end: usize = len;
+    while (end > start and units[end - 1] <= 32) : (end -= 1) {}
+
+    if (start >= end) return null;
+
+    var has_minus: bool = false;
+    if (units[start] == @as(u16, '+')) {
+        start += 1;
+    } else if (units[start] == @as(u16, '-')) {
+        has_minus = true;
+        start += 1;
+    }
+
+    if (start >= end) return null;
+
+    const digits_len: usize = end - start;
+    const out_len: usize = digits_len + @intFromBool(has_minus);
+
+    const buf = rt_alloc.alloc(u8, out_len) catch @panic("oom");
+    defer rt_alloc.free(buf);
+
+    var idx: usize = 0;
+    if (has_minus) {
+        buf[0] = '-';
+        idx = 1;
+    }
+
+    var i: usize = start;
+    while (i < end) : (i += 1) {
+        const cu: u16 = units[i];
+        if (cu > 0x7F) return null;
+        const b: u8 = @intCast(cu);
+        if (b == '_') return null;
+        if (b < '0' or b > '9') return null;
+        buf[idx] = b;
+        idx += 1;
+    }
+
+    const cap: usize = big_int.calcSetStringLimbCount(10, digits_len);
+    const mem = allocBigIntWithCapacity(cap);
+    const limbs = flixBigIntLimbs(mem)[0..cap];
+    var m = big_int.Mutable.init(limbs, 0);
+
+    const tmp_len: usize = big_int.calcSetStringLimbsBufferLen(10, digits_len);
+    const tmp = rt_alloc.alloc(BigIntLimb, tmp_len) catch @panic("oom");
+    defer rt_alloc.free(tmp);
+
+    m.setString(10, buf, tmp, null) catch return null;
+    if (m.eqlZero()) m.positive = true;
+
+    storeBigIntHeader(mem, m);
+    return mem;
+}
+
+export fn flix_bigint_from_string(ctx_ptr: *anyopaque, str_ptr: *anyopaque) *anyopaque {
+    return flix_bigint_try_parse(ctx_ptr, str_ptr) orelse @panic("invalid bigint string");
+}
+
+export fn flix_bigint_to_string(ctx_ptr: *anyopaque, bigint_ptr: *anyopaque) *anyopaque {
+    _ = ctx_ptr;
+    const a = flixBigIntToConst(bigint_ptr);
+    const bytes = a.toStringAlloc(rt_alloc, 10, .lower) catch @panic("oom");
+    defer rt_alloc.free(bytes);
+    return allocFlixStringFromAscii(bytes);
+}
+
+export fn flix_bigint_neg(ctx_ptr: *anyopaque, bigint_ptr: *anyopaque) *anyopaque {
+    _ = ctx_ptr;
+    const a = flixBigIntToConst(bigint_ptr);
+    const cap: usize = a.limbs.len;
+    const mem = allocBigIntWithCapacity(cap);
+    const limbs = flixBigIntLimbs(mem)[0..cap];
+    var r = big_int.Mutable.init(limbs, 0);
+    r.copy(a.negate());
+    storeBigIntHeader(mem, r);
+    return mem;
+}
+
+export fn flix_bigint_not(ctx_ptr: *anyopaque, bigint_ptr: *anyopaque) *anyopaque {
+    _ = ctx_ptr;
+    const a = flixBigIntToConst(bigint_ptr);
+    const cap: usize = a.limbs.len + 1;
+    const mem = allocBigIntWithCapacity(cap);
+    const limbs = flixBigIntLimbs(mem)[0..cap];
+    var r = big_int.Mutable.init(limbs, 0);
+    r.copy(a.negate());
+    r.addScalar(r.toConst(), -1);
+    storeBigIntHeader(mem, r);
+    return mem;
+}
+
+export fn flix_bigint_add(ctx_ptr: *anyopaque, a_ptr: *anyopaque, b_ptr: *anyopaque) *anyopaque {
+    _ = ctx_ptr;
+    const a = flixBigIntToConst(a_ptr);
+    const b = flixBigIntToConst(b_ptr);
+    const cap: usize = @max(a.limbs.len, b.limbs.len) + 1;
+    const mem = allocBigIntWithCapacity(cap);
+    const limbs = flixBigIntLimbs(mem)[0..cap];
+    var r = big_int.Mutable.init(limbs, 0);
+    r.add(a, b);
+    storeBigIntHeader(mem, r);
+    return mem;
+}
+
+export fn flix_bigint_sub(ctx_ptr: *anyopaque, a_ptr: *anyopaque, b_ptr: *anyopaque) *anyopaque {
+    _ = ctx_ptr;
+    const a = flixBigIntToConst(a_ptr);
+    const b = flixBigIntToConst(b_ptr);
+    const cap: usize = @max(a.limbs.len, b.limbs.len) + 1;
+    const mem = allocBigIntWithCapacity(cap);
+    const limbs = flixBigIntLimbs(mem)[0..cap];
+    var r = big_int.Mutable.init(limbs, 0);
+    r.sub(a, b);
+    storeBigIntHeader(mem, r);
+    return mem;
+}
+
+export fn flix_bigint_mul(ctx_ptr: *anyopaque, a_ptr: *anyopaque, b_ptr: *anyopaque) *anyopaque {
+    _ = ctx_ptr;
+    const a = flixBigIntToConst(a_ptr);
+    const b = flixBigIntToConst(b_ptr);
+    const cap: usize = a.limbs.len + b.limbs.len;
+    const mem = allocBigIntWithCapacity(cap);
+    const limbs = flixBigIntLimbs(mem)[0..cap];
+    var r = big_int.Mutable.init(limbs, 0);
+    r.mulNoAlias(a, b, null);
+    storeBigIntHeader(mem, r);
+    return mem;
+}
+
+export fn flix_bigint_div(ctx_ptr: *anyopaque, a_ptr: *anyopaque, b_ptr: *anyopaque) *anyopaque {
+    _ = ctx_ptr;
+    const a = flixBigIntToConst(a_ptr);
+    const b = flixBigIntToConst(b_ptr);
+    if (big_int.Const.eqlZero(b)) trapDivByZero();
+
+    const q_cap: usize = @max(a.limbs.len, 1);
+    const r_cap: usize = @max(b.limbs.len, 1);
+
+    const mem = allocBigIntWithCapacity(q_cap);
+    const q_limbs = flixBigIntLimbs(mem)[0..q_cap];
+    var q = big_int.Mutable.init(q_limbs, 0);
+
+    const r_buf = rt_alloc.alloc(BigIntLimb, r_cap) catch @panic("oom");
+    defer rt_alloc.free(r_buf);
+    var r = big_int.Mutable.init(r_buf, 0);
+
+    const tmp_len: usize = big_int.calcDivLimbsBufferLen(a.limbs.len, b.limbs.len);
+    const tmp = rt_alloc.alloc(BigIntLimb, tmp_len) catch @panic("oom");
+    defer rt_alloc.free(tmp);
+
+    big_int.Mutable.divTrunc(&q, &r, a, b, tmp);
+    storeBigIntHeader(mem, q);
+    return mem;
+}
+
+export fn flix_bigint_rem(ctx_ptr: *anyopaque, a_ptr: *anyopaque, b_ptr: *anyopaque) *anyopaque {
+    _ = ctx_ptr;
+    const a = flixBigIntToConst(a_ptr);
+    const b = flixBigIntToConst(b_ptr);
+    if (big_int.Const.eqlZero(b)) trapDivByZero();
+
+    const q_cap: usize = @max(a.limbs.len, 1);
+    const r_cap: usize = @max(b.limbs.len, 1);
+
+    const mem = allocBigIntWithCapacity(r_cap);
+    const r_limbs = flixBigIntLimbs(mem)[0..r_cap];
+    var r = big_int.Mutable.init(r_limbs, 0);
+
+    const q_buf = rt_alloc.alloc(BigIntLimb, q_cap) catch @panic("oom");
+    defer rt_alloc.free(q_buf);
+    var q = big_int.Mutable.init(q_buf, 0);
+
+    const tmp_len: usize = big_int.calcDivLimbsBufferLen(a.limbs.len, b.limbs.len);
+    const tmp = rt_alloc.alloc(BigIntLimb, tmp_len) catch @panic("oom");
+    defer rt_alloc.free(tmp);
+
+    big_int.Mutable.divTrunc(&q, &r, a, b, tmp);
+    storeBigIntHeader(mem, r);
+    return mem;
+}
+
+fn bigintShiftAbs(shift: i32) usize {
+    const s: i64 = shift;
+    return if (s >= 0) @intCast(s) else @intCast(-s);
+}
+
+export fn flix_bigint_shl(ctx_ptr: *anyopaque, a_ptr: *anyopaque, shift: i32) *anyopaque {
+    const a = flixBigIntToConst(a_ptr);
+
+    const s: i64 = shift;
+    if (s == 0) {
+        const cap: usize = @max(a.limbs.len, 1);
+        const mem = allocBigIntWithCapacity(cap);
+        const limbs = flixBigIntLimbs(mem)[0..cap];
+        var r = big_int.Mutable.init(limbs, 0);
+        r.copy(a);
+        storeBigIntHeader(mem, r);
+        return mem;
+    }
+
+    if (s < 0) {
+        const cap: usize = @max(a.limbs.len, 1);
+        const mem = allocBigIntWithCapacity(cap);
+        const limbs = flixBigIntLimbs(mem)[0..cap];
+        var r = big_int.Mutable.init(limbs, 0);
+        r.shiftRight(a, @intCast(-s));
+        storeBigIntHeader(mem, r);
+        return mem;
+    }
+
+    if (big_int.Const.eqlZero(a)) {
+        return flix_bigint_from_i64(ctx_ptr, 0);
+    }
+
+    const s_abs: usize = @intCast(s);
+    const limb_shift: usize = s_abs / bigint_limb_bits;
+    const cap: usize = a.limbs.len + limb_shift + 1;
+    if (cap > std.math.maxInt(u32)) @trap();
+
+    const mem = allocBigIntWithCapacity(cap);
+    const limbs = flixBigIntLimbs(mem)[0..cap];
+    var r = big_int.Mutable.init(limbs, 0);
+    r.shiftLeft(a, s_abs);
+    storeBigIntHeader(mem, r);
+    return mem;
+}
+
+export fn flix_bigint_shr(ctx_ptr: *anyopaque, a_ptr: *anyopaque, shift: i32) *anyopaque {
+    const a = flixBigIntToConst(a_ptr);
+
+    const s: i64 = shift;
+    if (s == 0) {
+        const cap: usize = @max(a.limbs.len, 1);
+        const mem = allocBigIntWithCapacity(cap);
+        const limbs = flixBigIntLimbs(mem)[0..cap];
+        var r = big_int.Mutable.init(limbs, 0);
+        r.copy(a);
+        storeBigIntHeader(mem, r);
+        return mem;
+    }
+
+    if (s < 0) {
+        if (big_int.Const.eqlZero(a)) {
+            return flix_bigint_from_i64(ctx_ptr, 0);
+        }
+
+        const s_abs: usize = @intCast(-s);
+        const limb_shift: usize = s_abs / bigint_limb_bits;
+        const cap: usize = a.limbs.len + limb_shift + 1;
+        if (cap > std.math.maxInt(u32)) @trap();
+
+        const mem = allocBigIntWithCapacity(cap);
+        const limbs = flixBigIntLimbs(mem)[0..cap];
+        var r = big_int.Mutable.init(limbs, 0);
+        r.shiftLeft(a, s_abs);
+        storeBigIntHeader(mem, r);
+        return mem;
+    }
+
+    const cap: usize = @max(a.limbs.len, 1);
+    const mem = allocBigIntWithCapacity(cap);
+    const limbs = flixBigIntLimbs(mem)[0..cap];
+    var r = big_int.Mutable.init(limbs, 0);
+    r.shiftRight(a, @intCast(s));
+    storeBigIntHeader(mem, r);
+    return mem;
+}
+
+export fn flix_bigint_and(ctx_ptr: *anyopaque, a_ptr: *anyopaque, b_ptr: *anyopaque) *anyopaque {
+    _ = ctx_ptr;
+    const a = flixBigIntToConst(a_ptr);
+    const b = flixBigIntToConst(b_ptr);
+    const cap: usize = @max(a.limbs.len, b.limbs.len) + 1;
+    const mem = allocBigIntWithCapacity(cap);
+    const limbs = flixBigIntLimbs(mem)[0..cap];
+    var r = big_int.Mutable.init(limbs, 0);
+    r.bitAnd(a, b);
+    storeBigIntHeader(mem, r);
+    return mem;
+}
+
+export fn flix_bigint_or(ctx_ptr: *anyopaque, a_ptr: *anyopaque, b_ptr: *anyopaque) *anyopaque {
+    _ = ctx_ptr;
+    const a = flixBigIntToConst(a_ptr);
+    const b = flixBigIntToConst(b_ptr);
+    const cap: usize = @max(a.limbs.len, b.limbs.len) + 1;
+    const mem = allocBigIntWithCapacity(cap);
+    const limbs = flixBigIntLimbs(mem)[0..cap];
+    var r = big_int.Mutable.init(limbs, 0);
+    r.bitOr(a, b);
+    storeBigIntHeader(mem, r);
+    return mem;
+}
+
+export fn flix_bigint_xor(ctx_ptr: *anyopaque, a_ptr: *anyopaque, b_ptr: *anyopaque) *anyopaque {
+    _ = ctx_ptr;
+    const a = flixBigIntToConst(a_ptr);
+    const b = flixBigIntToConst(b_ptr);
+    const cap: usize = @max(a.limbs.len, b.limbs.len) + 1;
+    const mem = allocBigIntWithCapacity(cap);
+    const limbs = flixBigIntLimbs(mem)[0..cap];
+    var r = big_int.Mutable.init(limbs, 0);
+    r.bitXor(a, b);
+    storeBigIntHeader(mem, r);
+    return mem;
+}
+
+export fn flix_bigint_cmp(ctx_ptr: *anyopaque, a_ptr: *anyopaque, b_ptr: *anyopaque) i32 {
+    _ = ctx_ptr;
+    const a = flixBigIntToConst(a_ptr);
+    const b = flixBigIntToConst(b_ptr);
+    return switch (big_int.Const.order(a, b)) {
+        .lt => -1,
+        .eq => 0,
+        .gt => 1,
+    };
+}
+
+export fn flix_bigint_bit_length(ctx_ptr: *anyopaque, a_ptr: *anyopaque) i32 {
+    _ = ctx_ptr;
+    const a = flixBigIntToConst(a_ptr);
+    if (big_int.Const.eqlZero(a)) return 0;
+    if (a.positive) {
+        return i32FromBitCount(a.bitCountAbs());
+    }
+    const bits = a.bitCountTwosComp();
+    return i32FromBitCount(bits - 1);
+}
+
+export fn flix_bigint_hash(ctx_ptr: *anyopaque, a_ptr: *anyopaque) i32 {
+    _ = ctx_ptr;
+    const a = flixBigIntToConst(a_ptr);
+    if (big_int.Const.eqlZero(a)) return 0;
+
+    var h: u32 = 0;
+    if (comptime bigint_limb_bits == 32) {
+        var i: usize = a.limbs.len;
+        while (i > 0) : (i -= 1) {
+            const w: u32 = @intCast(a.limbs[i - 1]);
+            h = h *% 31 +% w;
+        }
+    } else if (comptime bigint_limb_bits == 64) {
+        var i: usize = a.limbs.len;
+        while (i > 0) : (i -= 1) {
+            const limb: u64 = @intCast(a.limbs[i - 1]);
+            const hi: u32 = @intCast(limb >> 32);
+            const lo: u32 = @intCast(limb & 0xFFFF_FFFF);
+
+            if (i == a.limbs.len) {
+                if (hi != 0) {
+                    h = h *% 31 +% hi;
+                    h = h *% 31 +% lo;
+                } else {
+                    h = h *% 31 +% lo;
+                }
+            } else {
+                h = h *% 31 +% hi;
+                h = h *% 31 +% lo;
+            }
+        }
+    } else {
+        @panic("unsupported bigint limb size");
+    }
+
+    if (!a.positive) {
+        h = 0 -% h;
+    }
+    return @bitCast(h);
+}
+
+// ============================================================================
+// BigDecimal (portable, bring-up)
+// ============================================================================
+
+const FlixBigDecimalHeader = extern struct {
+    obj: FlixObj,
+    scale: i32,
+    reserved: i32,
+    unscaled: *anyopaque,
+};
+
+const BigDecimalRoundMode = enum {
+    ceil,
+    floor,
+    half_even,
+};
+
+fn flixBigDecimalHeader(ptr: *anyopaque) *FlixBigDecimalHeader {
+    return @ptrCast(@alignCast(ptr));
+}
+
+fn flixBigDecimalScale(ptr: *anyopaque) i32 {
+    return flixBigDecimalHeader(ptr).scale;
+}
+
+fn flixBigDecimalUnscaled(ptr: *anyopaque) *anyopaque {
+    return flixBigDecimalHeader(ptr).unscaled;
+}
+
+fn allocBigDecimal(unscaled_ptr: *anyopaque, scale: i32) *anyopaque {
+    const mem = gcAllocBytes(@sizeOf(FlixBigDecimalHeader), &flix_ti_bigdecimal);
+    const hdr = flixBigDecimalHeader(mem);
+    hdr.scale = scale;
+    hdr.reserved = 0;
+    hdr.unscaled = unscaled_ptr;
+    return mem;
+}
+
+export fn flix_trace_bigdecimal(ctx_ptr: *anyopaque, obj_ptr: *anyopaque) void {
+    const ctx: *FlixCtx = requireCtx(ctx_ptr);
+    const marker = ctx.gc_marker orelse return;
+    gcMarkerMarkPayload(marker, payloadFromPtr(flixBigDecimalUnscaled(obj_ptr)));
+}
+
+fn tryAllocBigIntFromDecimalBytes(bytes: []const u8) ?*anyopaque {
+    if (bytes.len == 0) return null;
+    const digits_len: usize = if (bytes[0] == '-') bytes.len - 1 else bytes.len;
+    if (digits_len == 0) return null;
+
+    const cap: usize = big_int.calcSetStringLimbCount(10, digits_len);
+    const mem = allocBigIntWithCapacity(cap);
+    const limbs = flixBigIntLimbs(mem)[0..cap];
+    var m = big_int.Mutable.init(limbs, 0);
+
+    const tmp_len: usize = big_int.calcSetStringLimbsBufferLen(10, digits_len);
+    const tmp = rt_alloc.alloc(BigIntLimb, tmp_len) catch @panic("oom");
+    defer rt_alloc.free(tmp);
+
+    m.setString(10, bytes, tmp, null) catch return null;
+    if (m.eqlZero()) m.positive = true;
+
+    storeBigIntHeader(mem, m);
+    return mem;
+}
+
+fn bigIntPow10(ctx_ptr: *anyopaque, n: usize) *anyopaque {
+    if (n == 0) return flix_bigint_from_i64(ctx_ptr, 1);
+    const buf = rt_alloc.alloc(u8, n + 1) catch @panic("oom");
+    defer rt_alloc.free(buf);
+    buf[0] = '1';
+    @memset(buf[1..], '0');
+    return tryAllocBigIntFromDecimalBytes(buf) orelse @panic("invalid pow10");
+}
+
+fn bigIntIsZero(ptr: *anyopaque) bool {
+    return big_int.Const.eqlZero(flixBigIntToConst(ptr));
+}
+
+fn bigIntSignum(ptr: *anyopaque) i32 {
+    const a = flixBigIntToConst(ptr);
+    if (big_int.Const.eqlZero(a)) return 0;
+    return if (a.positive) 1 else -1;
+}
+
+fn bigIntAbsPtr(ctx_ptr: *anyopaque, ptr: *anyopaque) *anyopaque {
+    return if (bigIntSignum(ptr) < 0) flix_bigint_neg(ctx_ptr, ptr) else ptr;
+}
+
+fn bigIntAbsDigitsAlloc(ptr: *anyopaque) []u8 {
+    const bytes = flixBigIntToConst(ptr).toStringAlloc(rt_alloc, 10, .lower) catch @panic("oom");
+    if (bytes.len > 0 and bytes[0] == '-') {
+        const out = rt_alloc.alloc(u8, bytes.len - 1) catch @panic("oom");
+        @memcpy(out, bytes[1..]);
+        rt_alloc.free(bytes);
+        return out;
+    }
+    return bytes;
+}
+
+fn bigIntGcd(ctx_ptr: *anyopaque, a_ptr: *anyopaque, b_ptr: *anyopaque) *anyopaque {
+    const zero = flix_bigint_from_i64(ctx_ptr, 0);
+    var x = bigIntAbsPtr(ctx_ptr, a_ptr);
+    var y = bigIntAbsPtr(ctx_ptr, b_ptr);
+    while (flix_bigint_cmp(ctx_ptr, y, zero) != 0) {
+        const r = flix_bigint_rem(ctx_ptr, x, y);
+        x = y;
+        y = r;
+    }
+    return x;
+}
+
+fn i32FromCount(n: usize) i32 {
+    if (n > std.math.maxInt(i32)) return std.math.maxInt(i32);
+    return @intCast(n);
+}
+
+fn bigDecimalSignum(ptr: *anyopaque) i32 {
+    return bigIntSignum(flixBigDecimalUnscaled(ptr));
+}
+
+fn bigDecimalScaleDiff(scale_hi: i32, scale_lo: i32) usize {
+    const diff: i64 = @as(i64, scale_hi) - @as(i64, scale_lo);
+    if (diff < 0) @panic("negative scale diff");
+    return @intCast(diff);
+}
+
+fn bigDecimalAlignUnscaled(ctx_ptr: *anyopaque, bigint_ptr: *anyopaque, from_scale: i32, to_scale: i32) *anyopaque {
+    if (from_scale == to_scale) return bigint_ptr;
+    const diff = bigDecimalScaleDiff(to_scale, from_scale);
+    const pow10 = bigIntPow10(ctx_ptr, diff);
+    return flix_bigint_mul(ctx_ptr, bigint_ptr, pow10);
+}
+
+fn bigDecimalCompare(ctx_ptr: *anyopaque, a_ptr: *anyopaque, b_ptr: *anyopaque) i32 {
+    const scale_a = flixBigDecimalScale(a_ptr);
+    const scale_b = flixBigDecimalScale(b_ptr);
+    const unscaled_a = flixBigDecimalUnscaled(a_ptr);
+    const unscaled_b = flixBigDecimalUnscaled(b_ptr);
+
+    if (scale_a == scale_b) {
+        return flix_bigint_cmp(ctx_ptr, unscaled_a, unscaled_b);
+    }
+
+    if (scale_a > scale_b) {
+        const aligned_b = bigDecimalAlignUnscaled(ctx_ptr, unscaled_b, scale_b, scale_a);
+        return flix_bigint_cmp(ctx_ptr, unscaled_a, aligned_b);
+    } else {
+        const aligned_a = bigDecimalAlignUnscaled(ctx_ptr, unscaled_a, scale_a, scale_b);
+        return flix_bigint_cmp(ctx_ptr, aligned_a, unscaled_b);
+    }
+}
+
+fn bigDecimalSetScaleZero(ctx_ptr: *anyopaque, bigdec_ptr: *anyopaque, mode: BigDecimalRoundMode) *anyopaque {
+    const scale = flixBigDecimalScale(bigdec_ptr);
+    const unscaled = flixBigDecimalUnscaled(bigdec_ptr);
+
+    if (scale == 0) return allocBigDecimal(unscaled, 0);
+
+    if (scale < 0) {
+        const pow10 = bigIntPow10(ctx_ptr, @intCast(-@as(i64, scale)));
+        const scaled = flix_bigint_mul(ctx_ptr, unscaled, pow10);
+        return allocBigDecimal(scaled, 0);
+    }
+
+    const divisor = bigIntPow10(ctx_ptr, @intCast(@as(i64, scale)));
+    var q = flix_bigint_div(ctx_ptr, unscaled, divisor);
+    const r = flix_bigint_rem(ctx_ptr, unscaled, divisor);
+    if (bigIntIsZero(r)) return allocBigDecimal(q, 0);
+
+    switch (mode) {
+        .ceil => {
+            if (bigDecimalSignum(bigdec_ptr) > 0) {
+                q = flix_bigint_add(ctx_ptr, q, flix_bigint_from_i64(ctx_ptr, 1));
+            }
+        },
+        .floor => {
+            if (bigDecimalSignum(bigdec_ptr) < 0) {
+                q = flix_bigint_sub(ctx_ptr, q, flix_bigint_from_i64(ctx_ptr, 1));
+            }
+        },
+        .half_even => {
+            const abs_r = bigIntAbsPtr(ctx_ptr, r);
+            const twice_abs_r = flix_bigint_add(ctx_ptr, abs_r, abs_r);
+            const cmp_half = flix_bigint_cmp(ctx_ptr, twice_abs_r, divisor);
+            if (cmp_half > 0) {
+                if (bigDecimalSignum(bigdec_ptr) < 0) {
+                    q = flix_bigint_sub(ctx_ptr, q, flix_bigint_from_i64(ctx_ptr, 1));
+                } else {
+                    q = flix_bigint_add(ctx_ptr, q, flix_bigint_from_i64(ctx_ptr, 1));
+                }
+            } else if (cmp_half == 0) {
+                const rem2 = flix_bigint_rem(ctx_ptr, q, flix_bigint_from_i64(ctx_ptr, 2));
+                if (!bigIntIsZero(rem2)) {
+                    if (bigDecimalSignum(bigdec_ptr) < 0) {
+                        q = flix_bigint_sub(ctx_ptr, q, flix_bigint_from_i64(ctx_ptr, 1));
+                    } else {
+                        q = flix_bigint_add(ctx_ptr, q, flix_bigint_from_i64(ctx_ptr, 1));
+                    }
+                }
+            }
+        },
+    }
+
+    return allocBigDecimal(q, 0);
+}
+
+fn bigDecimalPlainStringAlloc(ptr: *anyopaque) []u8 {
+    const sign = bigDecimalSignum(ptr);
+    const scale = flixBigDecimalScale(ptr);
+    const digits = bigIntAbsDigitsAlloc(flixBigDecimalUnscaled(ptr));
+    defer rt_alloc.free(digits);
+
+    if (scale == 0) {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(rt_alloc);
+        if (sign < 0) out.append(rt_alloc, '-') catch @panic("oom");
+        out.appendSlice(rt_alloc, digits) catch @panic("oom");
+        return out.toOwnedSlice(rt_alloc) catch @panic("oom");
+    }
+
+    if (scale < 0) {
+        if (sign == 0) return rt_alloc.dupe(u8, "0") catch @panic("oom");
+        const zeros: usize = @intCast(-@as(i64, scale));
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(rt_alloc);
+        if (sign < 0) out.append(rt_alloc, '-') catch @panic("oom");
+        out.appendSlice(rt_alloc, digits) catch @panic("oom");
+        out.appendNTimes(rt_alloc, '0', zeros) catch @panic("oom");
+        return out.toOwnedSlice(rt_alloc) catch @panic("oom");
+    }
+
+    const insertion_point: i64 = @as(i64, @intCast(digits.len)) - @as(i64, scale);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(rt_alloc);
+    if (insertion_point > 0) {
+        if (sign < 0) out.append(rt_alloc, '-') catch @panic("oom");
+        out.appendSlice(rt_alloc, digits[0..@intCast(insertion_point)]) catch @panic("oom");
+        out.append(rt_alloc, '.') catch @panic("oom");
+        out.appendSlice(rt_alloc, digits[@intCast(insertion_point)..]) catch @panic("oom");
+    } else if (insertion_point == 0) {
+        if (sign < 0) out.appendSlice(rt_alloc, "-0.") catch @panic("oom") else out.appendSlice(rt_alloc, "0.") catch @panic("oom");
+        out.appendSlice(rt_alloc, digits) catch @panic("oom");
+    } else {
+        if (sign < 0) out.appendSlice(rt_alloc, "-0.") catch @panic("oom") else out.appendSlice(rt_alloc, "0.") catch @panic("oom");
+        out.appendNTimes(rt_alloc, '0', @intCast(-insertion_point)) catch @panic("oom");
+        out.appendSlice(rt_alloc, digits) catch @panic("oom");
+    }
+    return out.toOwnedSlice(rt_alloc) catch @panic("oom");
+}
+
+fn bigDecimalStringAlloc(ptr: *anyopaque) []u8 {
+    const sign = bigDecimalSignum(ptr);
+    const scale = flixBigDecimalScale(ptr);
+    const digits = bigIntAbsDigitsAlloc(flixBigDecimalUnscaled(ptr));
+    defer rt_alloc.free(digits);
+
+    const adjusted_exp: i64 = @as(i64, @intCast(digits.len)) - 1 - @as(i64, scale);
+    if (scale >= 0 and adjusted_exp >= -6) {
+        return bigDecimalPlainStringAlloc(ptr);
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(rt_alloc);
+    if (sign < 0) out.append(rt_alloc, '-') catch @panic("oom");
+    out.append(rt_alloc, digits[0]) catch @panic("oom");
+    if (digits.len > 1) {
+        out.append(rt_alloc, '.') catch @panic("oom");
+        out.appendSlice(rt_alloc, digits[1..]) catch @panic("oom");
+    }
+    out.append(rt_alloc, 'E') catch @panic("oom");
+    if (adjusted_exp >= 0) out.append(rt_alloc, '+') catch @panic("oom") else out.append(rt_alloc, '-') catch @panic("oom");
+    const exp_abs: i64 = if (adjusted_exp < 0) -adjusted_exp else adjusted_exp;
+    const exp_str = std.fmt.allocPrint(rt_alloc, "{d}", .{exp_abs}) catch @panic("oom");
+    defer rt_alloc.free(exp_str);
+    out.appendSlice(rt_alloc, exp_str) catch @panic("oom");
+    return out.toOwnedSlice(rt_alloc) catch @panic("oom");
+}
+
+export fn flix_bigdec_try_parse(ctx_ptr: *anyopaque, str_ptr: *anyopaque) ?*anyopaque {
+    _ = ctx_ptr;
+    const len: usize = flixStringLen(str_ptr);
+    const units = flixStringCodeUnits(str_ptr);
+
+    var start: usize = 0;
+    while (start < len and units[start] <= 32) : (start += 1) {}
+
+    var end: usize = len;
+    while (end > start and units[end - 1] <= 32) : (end -= 1) {}
+    if (start >= end) return null;
+
+    var neg: bool = false;
+    if (units[start] == @as(u16, '+')) {
+        start += 1;
+    } else if (units[start] == @as(u16, '-')) {
+        neg = true;
+        start += 1;
+    }
+    if (start >= end) return null;
+
+    var digits: std.ArrayList(u8) = .empty;
+    defer digits.deinit(rt_alloc);
+    var frac_digits: i64 = 0;
+    var saw_digit = false;
+    var saw_dot = false;
+    var i: usize = start;
+    while (i < end) : (i += 1) {
+        const cu: u16 = units[i];
+        if (cu > 0x7F) return null;
+        const b: u8 = @intCast(cu);
+        if (b >= '0' and b <= '9') {
+            digits.append(rt_alloc, b) catch @panic("oom");
+            saw_digit = true;
+            if (saw_dot) frac_digits += 1;
+            continue;
+        }
+        if (b == '.') {
+            if (saw_dot) return null;
+            saw_dot = true;
+            continue;
+        }
+        break;
+    }
+
+    if (!saw_digit) return null;
+
+    var exponent: i64 = 0;
+    if (i < end) {
+        const cu: u16 = units[i];
+        if (cu > 0x7F) return null;
+        const b: u8 = @intCast(cu);
+        if (b != 'e' and b != 'E') return null;
+        i += 1;
+        if (i >= end) return null;
+
+        var exp_neg = false;
+        const sign_cu: u16 = units[i];
+        if (sign_cu > 0x7F) return null;
+        const sign_b: u8 = @intCast(sign_cu);
+        if (sign_b == '+') {
+            i += 1;
+        } else if (sign_b == '-') {
+            exp_neg = true;
+            i += 1;
+        }
+        if (i >= end) return null;
+
+        var exp_digits = false;
+        while (i < end) : (i += 1) {
+            const exp_cu: u16 = units[i];
+            if (exp_cu > 0x7F) return null;
+            const exp_b: u8 = @intCast(exp_cu);
+            if (exp_b < '0' or exp_b > '9') return null;
+            exponent = exponent * 10 + (exp_b - '0');
+            exp_digits = true;
+        }
+        if (!exp_digits) return null;
+        if (exp_neg) exponent = -exponent;
+    }
+
+    if (i != end) return null;
+
+    const scale64: i64 = frac_digits - exponent;
+    if (scale64 < std.math.minInt(i32) or scale64 > std.math.maxInt(i32)) return null;
+
+    const digits_slice = digits.items;
+    if (digits_slice.len == 0) return null;
+
+    const has_nonzero = blk: {
+        for (digits_slice) |d| {
+            if (d != '0') break :blk true;
+        }
+        break :blk false;
+    };
+
+    const unscaled_buf = rt_alloc.alloc(u8, digits_slice.len + @intFromBool(neg and has_nonzero)) catch @panic("oom");
+    defer rt_alloc.free(unscaled_buf);
+
+    var out_i: usize = 0;
+    if (neg and has_nonzero) {
+        unscaled_buf[0] = '-';
+        out_i = 1;
+    }
+    @memcpy(unscaled_buf[out_i..], digits_slice);
+
+    const unscaled = tryAllocBigIntFromDecimalBytes(unscaled_buf) orelse return null;
+    return allocBigDecimal(unscaled, @intCast(scale64));
+}
+
+export fn flix_bigdec_from_string(ctx_ptr: *anyopaque, str_ptr: *anyopaque) *anyopaque {
+    return flix_bigdec_try_parse(ctx_ptr, str_ptr) orelse @panic("invalid bigdecimal string");
+}
+
+export fn flix_bigdec_to_string(ctx_ptr: *anyopaque, bigdec_ptr: *anyopaque) *anyopaque {
+    _ = ctx_ptr;
+    const bytes = bigDecimalStringAlloc(bigdec_ptr);
+    defer rt_alloc.free(bytes);
+    return allocFlixStringFromAscii(bytes);
+}
+
+export fn flix_bigdec_to_plain_string(ctx_ptr: *anyopaque, bigdec_ptr: *anyopaque) *anyopaque {
+    _ = ctx_ptr;
+    const bytes = bigDecimalPlainStringAlloc(bigdec_ptr);
+    defer rt_alloc.free(bytes);
+    return allocFlixStringFromAscii(bytes);
+}
+
+export fn flix_bigdec_neg(ctx_ptr: *anyopaque, bigdec_ptr: *anyopaque) *anyopaque {
+    const unscaled = flixBigDecimalUnscaled(bigdec_ptr);
+    const negated = flix_bigint_neg(ctx_ptr, unscaled);
+    return allocBigDecimal(negated, flixBigDecimalScale(bigdec_ptr));
+}
+
+export fn flix_bigdec_add(ctx_ptr: *anyopaque, a_ptr: *anyopaque, b_ptr: *anyopaque) *anyopaque {
+    const scale_a = flixBigDecimalScale(a_ptr);
+    const scale_b = flixBigDecimalScale(b_ptr);
+    const out_scale = @max(scale_a, scale_b);
+    const ua = bigDecimalAlignUnscaled(ctx_ptr, flixBigDecimalUnscaled(a_ptr), scale_a, out_scale);
+    const ub = bigDecimalAlignUnscaled(ctx_ptr, flixBigDecimalUnscaled(b_ptr), scale_b, out_scale);
+    const sum = flix_bigint_add(ctx_ptr, ua, ub);
+    return allocBigDecimal(sum, out_scale);
+}
+
+export fn flix_bigdec_sub(ctx_ptr: *anyopaque, a_ptr: *anyopaque, b_ptr: *anyopaque) *anyopaque {
+    const scale_a = flixBigDecimalScale(a_ptr);
+    const scale_b = flixBigDecimalScale(b_ptr);
+    const out_scale = @max(scale_a, scale_b);
+    const ua = bigDecimalAlignUnscaled(ctx_ptr, flixBigDecimalUnscaled(a_ptr), scale_a, out_scale);
+    const ub = bigDecimalAlignUnscaled(ctx_ptr, flixBigDecimalUnscaled(b_ptr), scale_b, out_scale);
+    const diff = flix_bigint_sub(ctx_ptr, ua, ub);
+    return allocBigDecimal(diff, out_scale);
+}
+
+export fn flix_bigdec_mul(ctx_ptr: *anyopaque, a_ptr: *anyopaque, b_ptr: *anyopaque) *anyopaque {
+    const scale64: i64 = @as(i64, flixBigDecimalScale(a_ptr)) + @as(i64, flixBigDecimalScale(b_ptr));
+    if (scale64 < std.math.minInt(i32) or scale64 > std.math.maxInt(i32)) @panic("bigdecimal scale overflow");
+    const unscaled = flix_bigint_mul(ctx_ptr, flixBigDecimalUnscaled(a_ptr), flixBigDecimalUnscaled(b_ptr));
+    return allocBigDecimal(unscaled, @intCast(scale64));
+}
+
+fn flixBigDecDivExact(ctx_ptr: *anyopaque, a_ptr: *anyopaque, b_ptr: *anyopaque) *anyopaque {
+    const divisor_unscaled = flixBigDecimalUnscaled(b_ptr);
+    if (bigIntIsZero(divisor_unscaled)) return flix_bigdec_from_string(ctx_ptr, allocFlixStringFromAscii("0"));
+
+    var num = flixBigDecimalUnscaled(a_ptr);
+    var den = divisor_unscaled;
+
+    const gcd = bigIntGcd(ctx_ptr, num, den);
+    num = flix_bigint_div(ctx_ptr, num, gcd);
+    den = flix_bigint_div(ctx_ptr, den, gcd);
+
+    const zero = flix_bigint_from_i64(ctx_ptr, 0);
+    if (flix_bigint_cmp(ctx_ptr, den, zero) < 0) {
+        num = flix_bigint_neg(ctx_ptr, num);
+        den = flix_bigint_neg(ctx_ptr, den);
+    }
+
+    const two = flix_bigint_from_i64(ctx_ptr, 2);
+    const five = flix_bigint_from_i64(ctx_ptr, 5);
+    const one = flix_bigint_from_i64(ctx_ptr, 1);
+
+    var twos: usize = 0;
+    var fives: usize = 0;
+    var den_term = den;
+    while (bigIntIsZero(flix_bigint_rem(ctx_ptr, den_term, two))) {
+        den_term = flix_bigint_div(ctx_ptr, den_term, two);
+        twos += 1;
+    }
+    while (bigIntIsZero(flix_bigint_rem(ctx_ptr, den_term, five))) {
+        den_term = flix_bigint_div(ctx_ptr, den_term, five);
+        fives += 1;
+    }
+    if (flix_bigint_cmp(ctx_ptr, den_term, one) != 0) {
+        @panic("non-terminating bigdecimal division");
+    }
+
+    const k: usize = @max(twos, fives);
+    const scale64: i64 = @as(i64, flixBigDecimalScale(a_ptr)) - @as(i64, flixBigDecimalScale(b_ptr)) + @as(i64, @intCast(k));
+    if (scale64 < std.math.minInt(i32) or scale64 > std.math.maxInt(i32)) @panic("bigdecimal scale overflow");
+
+    const scaled_num = if (k == 0) num else flix_bigint_mul(ctx_ptr, num, bigIntPow10(ctx_ptr, k));
+    const unscaled = flix_bigint_div(ctx_ptr, scaled_num, den);
+    return allocBigDecimal(unscaled, @intCast(scale64));
+}
+
+export fn flix_bigdec_div(ctx_ptr: *anyopaque, a_ptr: *anyopaque, b_ptr: *anyopaque) *anyopaque {
+    return flixBigDecDivExact(ctx_ptr, a_ptr, b_ptr);
+}
+
+export fn flix_bigdec_cmp(ctx_ptr: *anyopaque, a_ptr: *anyopaque, b_ptr: *anyopaque) i32 {
+    return bigDecimalCompare(ctx_ptr, a_ptr, b_ptr);
+}
+
+export fn flix_bigdec_hash(ctx_ptr: *anyopaque, a_ptr: *anyopaque) i32 {
+    const bigint_hash = flix_bigint_hash(ctx_ptr, flixBigDecimalUnscaled(a_ptr));
+    const h: u32 = @as(u32, @bitCast(bigint_hash)) *% 31 +% @as(u32, @bitCast(flixBigDecimalScale(a_ptr)));
+    return @bitCast(h);
+}
+
+export fn flix_bigdec_scale(ctx_ptr: *anyopaque, a_ptr: *anyopaque) i32 {
+    _ = ctx_ptr;
+    return flixBigDecimalScale(a_ptr);
+}
+
+export fn flix_bigdec_precision(ctx_ptr: *anyopaque, a_ptr: *anyopaque) i32 {
+    _ = ctx_ptr;
+    const digits = bigIntAbsDigitsAlloc(flixBigDecimalUnscaled(a_ptr));
+    defer rt_alloc.free(digits);
+    return i32FromCount(digits.len);
+}
+
+export fn flix_bigdec_ceil(ctx_ptr: *anyopaque, a_ptr: *anyopaque) *anyopaque {
+    return bigDecimalSetScaleZero(ctx_ptr, a_ptr, .ceil);
+}
+
+export fn flix_bigdec_floor(ctx_ptr: *anyopaque, a_ptr: *anyopaque) *anyopaque {
+    return bigDecimalSetScaleZero(ctx_ptr, a_ptr, .floor);
+}
+
+export fn flix_bigdec_round(ctx_ptr: *anyopaque, a_ptr: *anyopaque) *anyopaque {
+    return bigDecimalSetScaleZero(ctx_ptr, a_ptr, .half_even);
+}
+
+export fn flix_bigdec_to_bigint(ctx_ptr: *anyopaque, a_ptr: *anyopaque) *anyopaque {
+    const scale = flixBigDecimalScale(a_ptr);
+    const unscaled = flixBigDecimalUnscaled(a_ptr);
+    if (scale == 0) return unscaled;
+    if (scale < 0) {
+        const pow10 = bigIntPow10(ctx_ptr, @intCast(-@as(i64, scale)));
+        return flix_bigint_mul(ctx_ptr, unscaled, pow10);
+    }
+    const pow10 = bigIntPow10(ctx_ptr, @intCast(@as(i64, scale)));
+    return flix_bigint_div(ctx_ptr, unscaled, pow10);
+}
+
+// ============================================================================
 // Regex (bring-up)
 // ============================================================================
 
@@ -1801,8 +2818,16 @@ fn unicodeIsWhitespace(cp: u32) bool {
     return inRanges(cp, unicode_case.whitespace_ranges[0..]);
 }
 
+fn unicodeIsAlphabetic(cp: u32) bool {
+    return inRanges(cp, unicode_case.alphabetic_ranges[0..]);
+}
+
 fn unicodeIsDefined(cp: u32) bool {
     return inRanges(cp, unicode_case.defined_ranges[0..]);
+}
+
+fn unicodeIsIdeographic(cp: u32) bool {
+    return inRanges(cp, unicode_case.ideographic_ranges[0..]);
 }
 
 fn unicodeIsMirrored(cp: u32) bool {
@@ -1824,6 +2849,58 @@ fn unicodeNumericValue(cp: u32) i32 {
         return -2;
     }
     return -1;
+}
+
+fn unicodeDirectName(cp: u32) ?[]const u8 {
+    if (lookupIndex(cp, unicode_case.name_from[0..])) |idx| {
+        const offset: usize = @intCast(unicode_case.name_offsets[idx]);
+        const len: usize = unicode_case.name_lengths[idx];
+        return unicode_case.name_bytes[offset .. offset + len];
+    }
+    return null;
+}
+
+fn unicodeBlockName(cp: u32) ?[]const u8 {
+    var lo: usize = 0;
+    var hi: usize = unicode_case.unicode_blocks.len;
+    while (lo < hi) {
+        const mid: usize = lo + (hi - lo) / 2;
+        const block = unicode_case.unicode_blocks[mid];
+        if (cp < block.start) {
+            hi = mid;
+        } else if (cp > block.end) {
+            lo = mid + 1;
+        } else {
+            const offset: usize = @intCast(block.name_offset);
+            const len: usize = block.name_len;
+            return unicode_case.unicode_block_name_bytes[offset .. offset + len];
+        }
+    }
+    return null;
+}
+
+fn allocCodePointName(ctx_ptr: *anyopaque, cp: u32) ?*anyopaque {
+    _ = ctx_ptr;
+    if (cp > 0x10FFFF or !unicodeIsDefined(cp)) return null;
+    if (unicodeDirectName(cp)) |name| {
+        return allocFlixStringFromAscii(name);
+    }
+
+    const hex = std.fmt.allocPrint(rt_alloc, "{X}", .{cp}) catch @panic("oom");
+    defer rt_alloc.free(hex);
+
+    if (unicodeBlockName(cp)) |block_name| {
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(rt_alloc);
+        out.appendSlice(rt_alloc, block_name) catch @panic("oom");
+        out.append(rt_alloc, ' ') catch @panic("oom");
+        out.appendSlice(rt_alloc, hex) catch @panic("oom");
+        const bytes = out.toOwnedSlice(rt_alloc) catch @panic("oom");
+        defer rt_alloc.free(bytes);
+        return allocFlixStringFromAscii(bytes);
+    }
+
+    return allocFlixStringFromAscii(hex);
 }
 
 const DecodedCpAt = struct { cp: u32, len: usize };
@@ -2049,6 +3126,125 @@ export fn flix_char_get_numeric_value(ch: i32) i32 {
     if (cp >= 0xFF41 and cp <= 0xFF5A) return @intCast(cp - 0xFF41 + 10);
 
     return unicodeNumericValue(cp);
+}
+
+export fn flix_codepoint_is_letter(cp: i32) bool {
+    if (cp < 0) return false;
+    const ucp: u32 = @intCast(cp);
+    if (ucp > 0x10FFFF) return false;
+    return unicodeIsLetter(ucp);
+}
+
+export fn flix_codepoint_is_digit(cp: i32) bool {
+    if (cp < 0) return false;
+    const ucp: u32 = @intCast(cp);
+    if (ucp > 0x10FFFF) return false;
+    return unicodeIsDigit(ucp);
+}
+
+export fn flix_codepoint_is_lower_case(cp: i32) bool {
+    if (cp < 0) return false;
+    const ucp: u32 = @intCast(cp);
+    if (ucp > 0x10FFFF) return false;
+    return unicodeIsLowerCase(ucp);
+}
+
+export fn flix_codepoint_is_upper_case(cp: i32) bool {
+    if (cp < 0) return false;
+    const ucp: u32 = @intCast(cp);
+    if (ucp > 0x10FFFF) return false;
+    return unicodeIsUpperCase(ucp);
+}
+
+export fn flix_codepoint_is_title_case(cp: i32) bool {
+    if (cp < 0) return false;
+    const ucp: u32 = @intCast(cp);
+    if (ucp > 0x10FFFF) return false;
+    return unicodeIsTitleCase(ucp);
+}
+
+export fn flix_codepoint_is_whitespace(cp: i32) bool {
+    if (cp < 0) return false;
+    const ucp: u32 = @intCast(cp);
+    if (ucp > 0x10FFFF) return false;
+    return unicodeIsWhitespace(ucp);
+}
+
+export fn flix_codepoint_is_alphabetic(cp: i32) bool {
+    if (cp < 0) return false;
+    const ucp: u32 = @intCast(cp);
+    if (ucp > 0x10FFFF) return false;
+    return unicodeIsAlphabetic(ucp);
+}
+
+export fn flix_codepoint_is_defined(cp: i32) bool {
+    if (cp < 0) return false;
+    const ucp: u32 = @intCast(cp);
+    if (ucp > 0x10FFFF) return false;
+    return unicodeIsDefined(ucp);
+}
+
+export fn flix_codepoint_is_ideographic(cp: i32) bool {
+    if (cp < 0) return false;
+    const ucp: u32 = @intCast(cp);
+    if (ucp > 0x10FFFF) return false;
+    return unicodeIsIdeographic(ucp);
+}
+
+export fn flix_codepoint_is_iso_control(cp: i32) bool {
+    if (cp < 0) return false;
+    const ucp: u32 = @intCast(cp);
+    if (ucp > 0x10FFFF) return false;
+    return (ucp <= 0x1F) or (ucp >= 0x7F and ucp <= 0x9F);
+}
+
+export fn flix_codepoint_is_mirrored(cp: i32) bool {
+    if (cp < 0) return false;
+    const ucp: u32 = @intCast(cp);
+    if (ucp > 0x10FFFF) return false;
+    return unicodeIsMirrored(ucp);
+}
+
+export fn flix_codepoint_to_lower_case(cp: i32) i32 {
+    if (cp < 0) return cp;
+    const ucp: u32 = @intCast(cp);
+    if (ucp > 0x10FFFF) return cp;
+    return @intCast(unicodeToLowerSimple(ucp));
+}
+
+export fn flix_codepoint_to_upper_case(cp: i32) i32 {
+    if (cp < 0) return cp;
+    const ucp: u32 = @intCast(cp);
+    if (ucp > 0x10FFFF) return cp;
+    return @intCast(unicodeToUpperSimple(ucp));
+}
+
+export fn flix_codepoint_to_title_case(cp: i32) i32 {
+    if (cp < 0) return cp;
+    const ucp: u32 = @intCast(cp);
+    if (ucp > 0x10FFFF) return cp;
+    const title = unicodeToTitleSimple(ucp);
+    return if (title != ucp) @intCast(title) else @intCast(unicodeToUpperSimple(ucp));
+}
+
+export fn flix_codepoint_get_name(ctx_ptr: *anyopaque, cp: i32) ?*anyopaque {
+    if (cp < 0) return null;
+    return allocCodePointName(ctx_ptr, @intCast(cp));
+}
+
+export fn flix_codepoint_get_numeric_value(cp: i32) i32 {
+    if (cp < 0) return -1;
+    const ucp: u32 = @intCast(cp);
+    if (ucp > 0x10FFFF) return -1;
+
+    if (ucp >= 0x0030 and ucp <= 0x0039) return @intCast(ucp - 0x0030);
+    if (ucp >= 0x0041 and ucp <= 0x005A) return @intCast(ucp - 0x0041 + 10);
+    if (ucp >= 0x0061 and ucp <= 0x007A) return @intCast(ucp - 0x0061 + 10);
+    if (ucp >= 0xFF10 and ucp <= 0xFF19) return @intCast(ucp - 0xFF10);
+    if (ucp >= 0xFF21 and ucp <= 0xFF3A) return @intCast(ucp - 0xFF21 + 10);
+    if (ucp >= 0xFF41 and ucp <= 0xFF5A) return @intCast(ucp - 0xFF41 + 10);
+
+    return unicodeNumericValue(ucp);
 }
 
 export fn flix_char_digit(ch: i32, radix: i32) i32 {
@@ -2707,11 +3903,25 @@ export fn flix_regex_split(ctx: *anyopaque, region_ptr0: ?*anyopaque, rgx_ptr: *
 // Channels (bring-up)
 // ============================================================================
 
+const ChannelWaiter = struct {
+    task_id: u64,
+    susp_handle: i64,
+};
+
 const ChannelObj = struct {
     capacity: usize,
     mutex: RtMutex = .{},
     not_empty: RtCondition = .{},
     not_full: RtCondition = .{},
+
+    // Cooperative (wasm) wait queues.
+    //
+    // These store blocked task ids + their suspension handles (the put payload is stored
+    // inside the suspension object args).
+    wait_getters: std.ArrayListUnmanaged(ChannelWaiter) = .{},
+    wait_getters_head: usize = 0,
+    wait_putters: std.ArrayListUnmanaged(ChannelWaiter) = .{},
+    wait_putters_head: usize = 0,
 
     // Buffered channel state (capacity > 0).
     buf: ?[]i64 = null,
@@ -2724,12 +3934,68 @@ const ChannelObj = struct {
     rv_payload: i64 = 0,
 };
 
+// Internal (wasm-only) suspension tags for cooperative channel ops.
+const WasmChanEffSymId: i64 = -2;
+const WasmChanOpGet: i64 = 1;
+const WasmChanOpPut: i64 = 2;
+
+// Registered live channels (GC root source for queued payloads).
+var g_channel_registry_initialized: bool = false;
+var g_channel_registry_mutex: RtMutex = .{};
+var g_channel_registry: std.AutoHashMap(usize, u8) = undefined;
+
+fn ensureChannelRegistryInitialized() void {
+    if (g_channel_registry_initialized) return;
+    g_channel_registry_mutex.lock();
+    defer g_channel_registry_mutex.unlock();
+    if (g_channel_registry_initialized) return;
+    g_channel_registry = std.AutoHashMap(usize, u8).init(rt_alloc);
+    g_channel_registry_initialized = true;
+}
+
+fn registerChannel(chan: *ChannelObj) void {
+    ensureChannelRegistryInitialized();
+    g_channel_registry_mutex.lock();
+    defer g_channel_registry_mutex.unlock();
+    g_channel_registry.put(@intFromPtr(chan), 0) catch @panic("oom");
+}
+
+fn deregisterChannel(chan: *ChannelObj) void {
+    if (!g_channel_registry_initialized) return;
+    g_channel_registry_mutex.lock();
+    defer g_channel_registry_mutex.unlock();
+    _ = g_channel_registry.remove(@intFromPtr(chan));
+}
+
+fn channelQueueAppend(list: *std.ArrayListUnmanaged(ChannelWaiter), w: ChannelWaiter) void {
+    list.append(rt_alloc, w) catch @panic("oom");
+}
+
+fn channelQueuePop(list: *std.ArrayListUnmanaged(ChannelWaiter), head: *usize) ?ChannelWaiter {
+    if (head.* >= list.items.len) return null;
+    const w = list.items[head.*];
+    head.* += 1;
+
+    // Compact occasionally to avoid unbounded growth from head advancement.
+    if (head.* > 64 and head.* * 2 >= list.items.len) {
+        const rem = list.items.len - head.*;
+        if (rem > 0) {
+            std.mem.copyForwards(ChannelWaiter, list.items[0..rem], list.items[head.* .. list.items.len]);
+        }
+        list.items.len = rem;
+        head.* = 0;
+    }
+
+    return w;
+}
+
 fn channelInit(capacity: usize) *ChannelObj {
     const obj = rt_alloc.create(ChannelObj) catch @panic("oom");
     obj.* = .{ .capacity = capacity };
     if (capacity > 0) {
         obj.buf = rt_alloc.alloc(i64, capacity) catch @panic("oom");
     }
+    registerChannel(obj);
     return obj;
 }
 
@@ -2741,6 +4007,15 @@ export fn flix_channel_new(capacity: i32) *anyopaque {
 export fn flix_channel_put(chan_ptr: *anyopaque, payload: i64) i64 {
     const chan: *ChannelObj = @ptrCast(@alignCast(chan_ptr));
     const ctx_opt = current_ctx;
+
+    // If we block (buffer full / unbuffered rendezvous), the payload may be the only reference
+    // to a GC object. Since the collector does not scan the Zig stack, root the payload explicitly.
+    var payload_root: i64 = payload;
+    if (ctx_opt) |ctx| {
+        flix_gc_push_root_value_i64(@ptrCast(ctx), @ptrCast(&payload_root));
+        defer flix_gc_pop_roots(@ptrCast(ctx), 1);
+    }
+
     chan.mutex.lock();
     defer chan.mutex.unlock();
 
@@ -2753,7 +4028,7 @@ export fn flix_channel_put(chan_ptr: *anyopaque, payload: i64) i64 {
             chan.mutex.lock();
             if (ctx_opt) |ctx| ctx.blocked.store(false, .release);
         }
-        chan.rv_payload = payload;
+        chan.rv_payload = payload_root;
         chan.rv_has_msg = true;
         chan.not_empty.signal();
 
@@ -2778,7 +4053,7 @@ export fn flix_channel_put(chan_ptr: *anyopaque, payload: i64) i64 {
         if (ctx_opt) |ctx| ctx.blocked.store(false, .release);
     }
 
-    buf[chan.tail] = payload;
+    buf[chan.tail] = payload_root;
     chan.tail = (chan.tail + 1) % chan.capacity;
     chan.count += 1;
     chan.not_empty.signal();
@@ -2823,6 +4098,192 @@ export fn flix_channel_get(chan_ptr: *anyopaque) i64 {
     return payload;
 }
 
+fn allocWasmChannelSuspension(op_index: i64, args: []const i64) *anyopaque {
+    const slots_total: usize = 5 + args.len;
+    const size_bytes: usize = @sizeOf(FlixObj) + slots_total * @sizeOf(i64);
+    const mem = gcAllocBytes(size_bytes, &flix_ti_suspension);
+    const slots: [*]i64 = objPayloadSlots(mem);
+
+    slots[0] = WasmChanEffSymId;
+    slots[1] = op_index;
+    slots[2] = 0; // prefix frames (filled in by codegen when returning the suspension)
+    slots[3] = 0; // resumption = null (resume yields resumePayload directly)
+    slots[4] = @intCast(args.len);
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        slots[5 + i] = args[i];
+    }
+    return mem;
+}
+
+fn wasmChannelRegisterWaiter(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, susp_handle: i64) void {
+    const susp_ptr = flix_handle_get(ctx_rep.flix_ctx, susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    if (slots[0] != WasmChanEffSymId) return;
+
+    const op_index: i64 = slots[1];
+    const argc: i64 = slots[4];
+    if (argc < 1) return;
+
+    const chan_ptr = ptrFromPayload(slots[5]);
+    const chan: *ChannelObj = @ptrCast(@alignCast(chan_ptr));
+
+    switch (op_index) {
+        WasmChanOpGet => channelQueueAppend(&chan.wait_getters, .{ .task_id = task_id, .susp_handle = susp_handle }),
+        WasmChanOpPut => channelQueueAppend(&chan.wait_putters, .{ .task_id = task_id, .susp_handle = susp_handle }),
+        else => {},
+    }
+}
+
+fn wasmChannelPopValidWaiter(ctx_rep: *exports_flix_runtime_runtime_ctx_t, chan: *ChannelObj, want_putter: bool) ?ChannelWaiter {
+    const list = if (want_putter) &chan.wait_putters else &chan.wait_getters;
+    const head = if (want_putter) &chan.wait_putters_head else &chan.wait_getters_head;
+
+    while (true) {
+        const w = channelQueuePop(list, head) orelse return null;
+        const task_ptr = ctx_rep.tasks.getPtr(w.task_id) orelse continue;
+        switch (task_ptr.state) {
+            .Blocked => |st| {
+                if (st.susp_handle != w.susp_handle) continue;
+                return w;
+            },
+            else => continue,
+        }
+    }
+}
+
+fn wasmResumeTaskOk(ctx_rep: *exports_flix_runtime_runtime_ctx_t, w: ChannelWaiter, resume_payload: i64) void {
+    const task_ptr = ctx_rep.tasks.getPtr(w.task_id) orelse return;
+    switch (task_ptr.state) {
+        .Blocked => |st| {
+            if (st.susp_handle != w.susp_handle) return;
+        },
+        else => return,
+    }
+
+    const resume_handle = flix_handle_new_i64(ctx_rep.flix_ctx, resume_payload);
+    task_ptr.state = .{ .ReadyResumeOk = .{ .susp_handle = w.susp_handle, .resume_handle = resume_handle } };
+    taskQueuePush(ctx_rep, w.task_id);
+}
+
+fn wasmChannelPutterPayload(ctx_rep: *exports_flix_runtime_runtime_ctx_t, w: ChannelWaiter, chan_bits: i64) i64 {
+    const susp_ptr = flix_handle_get(ctx_rep.flix_ctx, w.susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    // args: [chan_ptr_bits, payload]
+    if (slots[0] != WasmChanEffSymId or slots[1] != WasmChanOpPut) return 0;
+    if (slots[4] != 2) return 0;
+    if (slots[5] != chan_bits) return 0;
+    return slots[6];
+}
+
+fn wasmChannelTryPut(ctx_rep: *exports_flix_runtime_runtime_ctx_t, chan: *ChannelObj, chan_bits: i64, payload: i64) bool {
+    _ = chan_bits;
+    if (chan.capacity == 0) {
+        if (wasmChannelPopValidWaiter(ctx_rep, chan, false)) |w| {
+            wasmResumeTaskOk(ctx_rep, w, payload);
+            return true;
+        }
+        return false;
+    }
+
+    // Buffered channel.
+    if (chan.count < chan.capacity) {
+        // Deliver directly to a blocked getter if the buffer is empty.
+        if (chan.count == 0) {
+            if (wasmChannelPopValidWaiter(ctx_rep, chan, false)) |w| {
+                wasmResumeTaskOk(ctx_rep, w, payload);
+                return true;
+            }
+        }
+
+        const buf = chan.buf orelse @panic("missing buffer");
+        buf[chan.tail] = payload;
+        chan.tail = (chan.tail + 1) % chan.capacity;
+        chan.count += 1;
+
+        // Best-effort: if we somehow have a blocked getter, hand off the oldest buffered payload.
+        if (wasmChannelPopValidWaiter(ctx_rep, chan, false)) |w| {
+            const p = buf[chan.head];
+            chan.head = (chan.head + 1) % chan.capacity;
+            chan.count -= 1;
+            wasmResumeTaskOk(ctx_rep, w, p);
+        }
+
+        return true;
+    }
+
+    return false;
+}
+
+fn wasmChannelTryGet(ctx_rep: *exports_flix_runtime_runtime_ctx_t, chan: *ChannelObj, chan_bits: i64) ?i64 {
+    if (chan.capacity == 0) {
+        if (wasmChannelPopValidWaiter(ctx_rep, chan, true)) |w| {
+            const p = wasmChannelPutterPayload(ctx_rep, w, chan_bits);
+            wasmResumeTaskOk(ctx_rep, w, 0);
+            return p;
+        }
+        return null;
+    }
+
+    // Buffered channel.
+    if (chan.count == 0) return null;
+
+    const buf = chan.buf orelse @panic("missing buffer");
+    const payload = buf[chan.head];
+    chan.head = (chan.head + 1) % chan.capacity;
+    chan.count -= 1;
+
+    // If a putter is blocked on a full buffer, enqueue its payload now that we have space.
+    if (chan.count < chan.capacity) {
+        if (wasmChannelPopValidWaiter(ctx_rep, chan, true)) |w| {
+            const p = wasmChannelPutterPayload(ctx_rep, w, chan_bits);
+            buf[chan.tail] = p;
+            chan.tail = (chan.tail + 1) % chan.capacity;
+            chan.count += 1;
+            wasmResumeTaskOk(ctx_rep, w, 0);
+        }
+    }
+
+    return payload;
+}
+
+export fn flix_channel_put_resumable(ctx: *anyopaque, chan_ptr: *anyopaque, payload: i64) FlixResult {
+    _ = ctx;
+    const chan: *ChannelObj = @ptrCast(@alignCast(chan_ptr));
+    if (!is_wasm) {
+        _ = flix_channel_put(chan_ptr, payload);
+        return FlixResult{ .tag = RESULT_TAG_VALUE, .payload = 0 };
+    }
+
+    const ctx_rep = current_wit_ctx orelse @panic("flix_channel_put_resumable: missing wasm WIT context");
+    const chan_bits = payloadFromPtr(chan_ptr);
+    if (wasmChannelTryPut(ctx_rep, chan, chan_bits, payload)) {
+        return FlixResult{ .tag = RESULT_TAG_VALUE, .payload = 0 };
+    }
+
+    const susp_ptr = allocWasmChannelSuspension(WasmChanOpPut, &.{ chan_bits, payload });
+    return FlixResult{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
+}
+
+export fn flix_channel_get_resumable(ctx: *anyopaque, chan_ptr: *anyopaque) FlixResult {
+    _ = ctx;
+    const chan: *ChannelObj = @ptrCast(@alignCast(chan_ptr));
+    if (!is_wasm) {
+        const payload = flix_channel_get(chan_ptr);
+        return FlixResult{ .tag = RESULT_TAG_VALUE, .payload = payload };
+    }
+
+    const ctx_rep = current_wit_ctx orelse @panic("flix_channel_get_resumable: missing wasm WIT context");
+    const chan_bits = payloadFromPtr(chan_ptr);
+    if (wasmChannelTryGet(ctx_rep, chan, chan_bits)) |payload| {
+        return FlixResult{ .tag = RESULT_TAG_VALUE, .payload = payload };
+    }
+
+    const susp_ptr = allocWasmChannelSuspension(WasmChanOpGet, &.{chan_bits});
+    return FlixResult{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
+}
+
 // ============================================================================
 // IO + Spawn (bring-up)
 // ============================================================================
@@ -2845,7 +4306,7 @@ export fn flix_init(argc: i32, argv: *anyopaque) void {
     }
 }
 
-fn writeAscii(fd: enum { stdout, stderr }, s_ptr: *anyopaque, newline: bool) void {
+fn writeText(fd: enum { stdout, stderr }, s_ptr: *anyopaque, newline: bool) void {
     if (is_wasm) {
         // Browser/WASI: route to host logging via WIT (`flix:sys/sys@0.1.0#log`).
         const level: u8 = switch (fd) {
@@ -2869,11 +4330,10 @@ fn writeAscii(fd: enum { stdout, stderr }, s_ptr: *anyopaque, newline: bool) voi
         }
         return;
     } else {
-        // Native: write to stdout/stderr.
-        const z = flixStringToAsciiZ(s_ptr);
-        defer c.free(@ptrCast(z.ptr));
+        // Native: emit UTF-8 so console output matches JVM/wasm behavior.
+        const slice = flixStringToUtf8Alloc(rt_alloc, s_ptr);
+        defer rt_alloc.free(slice);
 
-        const slice = z[0..z.len];
         const file = switch (fd) {
             .stdout => std.fs.File.stdout(),
             .stderr => std.fs.File.stderr(),
@@ -2893,22 +4353,22 @@ fn writeAscii(fd: enum { stdout, stderr }, s_ptr: *anyopaque, newline: bool) voi
 }
 
 export fn flix_print(s_ptr: *anyopaque) i64 {
-    writeAscii(.stdout, s_ptr, false);
+    writeText(.stdout, s_ptr, false);
     return 0;
 }
 
 export fn flix_eprint(s_ptr: *anyopaque) i64 {
-    writeAscii(.stderr, s_ptr, false);
+    writeText(.stderr, s_ptr, false);
     return 0;
 }
 
 export fn flix_println(s_ptr: *anyopaque) i64 {
-    writeAscii(.stdout, s_ptr, true);
+    writeText(.stdout, s_ptr, true);
     return 0;
 }
 
 export fn flix_eprintln(s_ptr: *anyopaque) i64 {
-    writeAscii(.stderr, s_ptr, true);
+    writeText(.stderr, s_ptr, true);
     return 0;
 }
 
@@ -2981,6 +4441,37 @@ fn stubMsg(op: []const u8) *anyopaque {
 }
 
 export fn flix_env_get_args(ctx: *anyopaque, region_ptr0: ?*anyopaque) *anyopaque {
+    if (is_wasm) {
+        var args: flix_list_string_t = .{ .ptr = undefined, .len = 0 };
+        flix_sys_sys_get_args(&args);
+        defer flix_list_string_free(&args);
+
+        if (args.len == 0) {
+            return allocFlixArrayFromPtrPayloadsInRegion(ctx, region_ptr0, &[_]*anyopaque{});
+        }
+
+        const n: usize = args.len;
+        const size_bytes_i64: i64 = @intCast(@sizeOf(FlixArrayHeader) + n * @sizeOf(i64));
+
+        const mem = flix_region_alloc_flex(ctx, region_ptr0, &flix_ti_array_ptr, size_bytes_i64);
+        const header: *FlixArrayHeader = @ptrCast(@alignCast(mem));
+        header.len = @intCast(n);
+        header.elem_size = @intCast(@sizeOf(i64));
+
+        const slots_ptr: [*]i64 = flixArraySlots(mem);
+
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const arg = args.ptr[i];
+            const bytes = arg.ptr[0..arg.len];
+            const s_ptr = allocFlixStringFromUtf8Lossy(bytes);
+            flix_store_ptr(ctx, @ptrCast(&slots_ptr[i]), payloadFromPtr(s_ptr));
+        }
+
+        flix_region_remember_ptr_array(ctx, region_ptr0, @ptrCast(&slots_ptr[0]), @intCast(n));
+        return mem;
+    }
+
     if (g_argc <= 1 or g_argv == null) {
         return allocFlixArrayFromPtrPayloadsInRegion(ctx, region_ptr0, &[_]*anyopaque{});
     }
@@ -4861,7 +6352,7 @@ export fn flix_exn_report_ptr(exn: *anyopaque) void {
     var buf: [128]u8 = undefined;
     const header = std.fmt.bufPrint(&buf, "Uncaught Flix exception (kind_id={}):\n", .{kind_id}) catch "Uncaught Flix exception:\n";
     if (is_wasm) {
-        writeAscii(.stderr, allocFlixStringFromAscii(header), false);
+        writeText(.stderr, allocFlixStringFromAscii(header), false);
     } else {
         std.fs.File.stderr().writeAll(header) catch {};
     }
@@ -4869,7 +6360,7 @@ export fn flix_exn_report_ptr(exn: *anyopaque) void {
     const trace_bits: i64 = slots[3];
     if (trace_bits == 0) {
         if (is_wasm) {
-            writeAscii(.stderr, allocFlixStringFromAscii("  (no trace)"), true);
+            writeText(.stderr, allocFlixStringFromAscii("  (no trace)"), true);
         } else {
             std.fs.File.stderr().writeAll("  (no trace)\n") catch {};
         }
@@ -4886,11 +6377,11 @@ export fn flix_exn_report_ptr(exn: *anyopaque) void {
         if (frame_bits == 0) continue;
         const frame_ptr = ptrFromPayload(frame_bits);
         if (is_wasm) {
-            writeAscii(.stderr, allocFlixStringFromAscii("  at "), false);
+            writeText(.stderr, allocFlixStringFromAscii("  at "), false);
         } else {
             std.fs.File.stderr().writeAll("  at ") catch {};
         }
-        writeAscii(.stderr, frame_ptr, true);
+        writeText(.stderr, frame_ptr, true);
     }
 }
 
@@ -4907,19 +6398,19 @@ export fn flix_suspension_report_ptr(susp: *anyopaque) void {
     const op_name = flix_op_name(eff_sym_id, op_index);
 
     if (is_wasm) {
-        writeAscii(.stderr, allocFlixStringFromAscii("Unhandled Flix suspension ("), false);
+        writeText(.stderr, allocFlixStringFromAscii("Unhandled Flix suspension ("), false);
         if (eff_name) |eff_cstr| {
-            writeAscii(.stderr, allocFlixStringFromAscii(std.mem.span(eff_cstr)), false);
+            writeText(.stderr, allocFlixStringFromAscii(std.mem.span(eff_cstr)), false);
             if (op_name) |op_cstr| {
-                writeAscii(.stderr, allocFlixStringFromAscii("."), false);
-                writeAscii(.stderr, allocFlixStringFromAscii(std.mem.span(op_cstr)), false);
+                writeText(.stderr, allocFlixStringFromAscii("."), false);
+                writeText(.stderr, allocFlixStringFromAscii(std.mem.span(op_cstr)), false);
             }
-            writeAscii(.stderr, allocFlixStringFromAscii(", "), false);
+            writeText(.stderr, allocFlixStringFromAscii(", "), false);
         }
 
         var buf: [160]u8 = undefined;
         const tail = std.fmt.bufPrint(&buf, "effSymId={}, opIndex={}, argc={}):\n", .{ eff_sym_id, op_index, arg_count }) catch "):\n";
-        writeAscii(.stderr, allocFlixStringFromAscii(tail), false);
+        writeText(.stderr, allocFlixStringFromAscii(tail), false);
     } else {
         std.fs.File.stderr().writeAll("Unhandled Flix suspension (") catch {};
         if (eff_name) |eff_cstr| {
@@ -5013,6 +6504,8 @@ const FlixTypeInfo = extern struct {
 extern const flix_ti_array_prim: FlixTypeInfo;
 extern const flix_ti_array_ptr: FlixTypeInfo;
 extern const flix_ti_string: FlixTypeInfo;
+extern const flix_ti_bigint: FlixTypeInfo;
+extern const flix_ti_bigdecimal: FlixTypeInfo;
 extern const flix_ti_suspension: FlixTypeInfo;
 
 const FlixObj = if (@sizeOf(usize) == 4) extern struct {
@@ -6363,7 +7856,7 @@ fn witBuildEnvListFromPairs(pairs_ptr: *anyopaque) exports_flix_runtime_runtime_
 
 fn witReqUnknown(eff_id: i64, op_id: i64) exports_flix_runtime_runtime_op_request_t {
     return .{
-        .tag = 44, // `unknown`
+        .tag = 45, // `unknown`
         .val = .{ .unknown = .{ .eff_id = @intCast(eff_id), .op_id = @intCast(op_id) } },
     };
 }
@@ -6453,6 +7946,19 @@ fn taskMakeSuspensionForHost(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_
     return exports_flix_runtime_runtime_suspension_new(rep);
 }
 
+fn taskHandleSuspension(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, susp_handle: i64) ?exports_flix_runtime_runtime_own_suspension_t {
+    const susp_ptr = flix_handle_get(ctx_rep.flix_ctx, susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    if (slots[0] == WasmChanEffSymId) {
+        const op_index: i64 = slots[1];
+        if (op_index == WasmChanOpGet or op_index == WasmChanOpPut) {
+            wasmChannelRegisterWaiter(ctx_rep, task_id, susp_handle);
+            return null;
+        }
+    }
+    return taskMakeSuspensionForHost(ctx_rep, task_id, susp_handle);
+}
+
 fn withTaskRegion(task: *Task, f: fn () void) void {
     const saved = current_region;
     current_region = task.region;
@@ -6498,8 +8004,7 @@ fn runTaskOnce(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, t: *T
                             // Task owns this suspension handle.
                             taskReleaseArgs(ctx_rep.flix_ctx, t);
                             t.state = .{ .Blocked = .{ .susp_handle = r.payload } };
-                            const own = taskMakeSuspensionForHost(ctx_rep, task_id, r.payload);
-                            return own;
+                            return taskHandleSuspension(ctx_rep, task_id, r.payload);
                         },
                         else => @panic("unexpected result tag from flix_wasm_invoke_def"),
                     }
@@ -6532,8 +8037,7 @@ fn runTaskOnce(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, t: *T
                             const susp_ptr = ptrFromPayload(r0.payload);
                             const h = flix_handle_new(ctx_rep.flix_ctx, susp_ptr);
                             t.state = .{ .Blocked = .{ .susp_handle = h } };
-                            const own = taskMakeSuspensionForHost(ctx_rep, task_id, h);
-                            return own;
+                            return taskHandleSuspension(ctx_rep, task_id, h);
                         },
                         else => @panic("unexpected result tag from thunk invocation"),
                     }
@@ -6561,8 +8065,7 @@ fn runTaskOnce(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, t: *T
                 },
                 RESULT_TAG_SUSPENSION => {
                     t.state = .{ .Blocked = .{ .susp_handle = r.payload } };
-                    const own = taskMakeSuspensionForHost(ctx_rep, task_id, r.payload);
-                    return own;
+                    return taskHandleSuspension(ctx_rep, task_id, r.payload);
                 },
                 else => @panic("unexpected result tag from flix_wasm_resume_ok_def"),
             }
@@ -6588,8 +8091,7 @@ fn runTaskOnce(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, t: *T
                 },
                 RESULT_TAG_SUSPENSION => {
                     t.state = .{ .Blocked = .{ .susp_handle = r.payload } };
-                    const own = taskMakeSuspensionForHost(ctx_rep, task_id, r.payload);
-                    return own;
+                    return taskHandleSuspension(ctx_rep, task_id, r.payload);
                 },
                 else => @panic("unexpected result tag from flix_wasm_resume_throw_def"),
             }
@@ -7225,6 +8727,15 @@ export fn exports_flix_runtime_runtime_suspension_request(ctx: exports_flix_runt
             }
         },
 
+        45 => { // console-readln
+            if (arg_count != 0 and arg_count != 1) {
+                ret.* = witReqUnknown(eff_sym, op_index);
+                return;
+            }
+            ret.* = std.mem.zeroes(exports_flix_runtime_runtime_op_request_t);
+            ret.tag = 44;
+        },
+
         else => ret.* = witReqUnknown(eff_sym, op_index),
     }
 }
@@ -7247,6 +8758,13 @@ export fn exports_flix_runtime_runtime_resume_throw(ctx: exports_flix_runtime_ru
 export fn exports_flix_runtime_runtime_resume_timer_sleep(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t) void {
     if (!is_wasm) @panic("resume-timer-sleep: wasm-only");
     const h = makeHandleForI64(ctx.flix_ctx, 0); // Unit
+    resumeTaskWithHandle(ctx, s, h, false);
+}
+
+export fn exports_flix_runtime_runtime_resume_console_readln_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, line: *flix_string_t) void {
+    if (!is_wasm) @panic("resume-console-readln-ok: wasm-only");
+    const str_ptr = flixStringFromWit(line);
+    const h = makeHandleForPtr(ctx.flix_ctx, str_ptr);
     resumeTaskWithHandle(ctx, s, h, false);
 }
 

@@ -200,6 +200,40 @@ class PortableStdlibLlvmNativeRuntimeSuite extends AnyFunSuite {
     }
   }
 
+  test("portable-unicode-print-llvm-native") {
+    assume(hasZig, "zig not found on PATH (skipping LLVM-native unicode print test)")
+
+    val driverFile = Files.createTempFile("flix-portable-llvm-native-unicode-print-", ".flix")
+    val outDir = Files.createTempDirectory("flix-llvm-native-unicode-print-")
+    try {
+      Files.writeString(driverFile, unicodePrintDriverSource, StandardCharsets.UTF_8)
+
+      val flix = new Flix()
+      flix.setOptions(TestOptions.copy(outputPath = outDir))
+      implicit val sctx: SecurityContext = SecurityContext.Unrestricted
+
+      flix.addFile(driverFile)
+
+      val (optRoot, errors) = flix.check()
+      if (errors.nonEmpty) {
+        fail(CompilationMessage.formatAll(errors)(flix.getFormatter, optRoot))
+      }
+
+      flix.codeGen(optRoot.get)
+
+      val (exit, output) = runExecutable(executablePath(outDir))
+      if (exit != 0) {
+        fail(s"LLVM-native unicode print driver failed with exit $exit:\n$output")
+      }
+      if (output.trim != "Weather: 12.5°C") {
+        fail(s"Expected UTF-8 console output, but got:\n$output")
+      }
+    } finally {
+      Files.deleteIfExists(driverFile)
+      deleteRecursive(outDir)
+    }
+  }
+
   private def mkPortableDriverSource(): String = {
     val flix = new Flix()
     flix.setOptions(TestOptions)
@@ -285,6 +319,12 @@ class PortableStdlibLlvmNativeRuntimeSuite extends AnyFunSuite {
       |    %%PRINTLN%%("gc-stress: done");
       |    ()
       |}
+      |""".stripMargin
+
+  private val unicodePrintDriverSource: String =
+    """
+      |def main(): Unit \ IO =
+      |    println("Weather: 12.5°C")
       |""".stripMargin
 
   private def runExecutable(executable: Path): (Int, String) =

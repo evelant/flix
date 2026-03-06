@@ -285,6 +285,15 @@ pub mod BigInt {
         }
 
     ///
+    /// Convert `x` to a `BigDecimal`.
+    ///
+    pub def toBigDecimal(x: BigInt): BigDecimal =
+        match BigDecimal.fromString(toString(x)) {
+            case Some(v) => v
+            case None => bug!("BigInt.toBigDecimal: unexpected parse failure.")
+        }
+
+    ///
     /// Helper function for the `clamp` conversion functions.
     ///
     def clamp(min: {min = BigInt}, max: {max = BigInt}, x: BigInt): BigInt =

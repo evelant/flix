@@ -8,7 +8,14 @@
 
 export function log(level, msg) {
   // `level` is a WIT enum lifted as a string, e.g. "info".
-  console.log(`[flix:${level}] ${msg}`);
+  //
+  // Keep `info` unadorned to preserve `println`-style output semantics across targets.
+  // (The Flix portable stdlib currently uses `info` for user-facing console output.)
+  if (level === "info") {
+    console.log(String(msg));
+  } else {
+    console.log(`[flix:${level}] ${msg}`);
+  }
 }
 
 export function timeNowMs() {
@@ -31,6 +38,17 @@ export function randomBytes(len) {
     bytes[i] = (i * 31) & 0xff;
   }
   return bytes;
+}
+
+export function getArgs() {
+  // WIT expects `list<string>`, lifted as `string[]` by jco.
+  //
+  // Default to `[]` unless the host explicitly configures args.
+  const args = globalThis.__flix_args;
+  if (Array.isArray(args)) {
+    return args.map((x) => String(x));
+  }
+  return [];
 }
 
 export function hasCapability(cap) {
@@ -60,4 +78,3 @@ export function hasCapability(cap) {
       return false;
   }
 }
-

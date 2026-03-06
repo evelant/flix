@@ -5,6 +5,23 @@ use wasmtime::Store;
 
 use crate::bindings::exports::flix::runtime::runtime::{Guest, IoError, OpRequest, Suspension};
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum OpStatus {
+    Completed,
+    Pending,
+}
+
+#[derive(Debug)]
+pub struct PendingIo;
+
+impl std::fmt::Display for PendingIo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "pending io")
+    }
+}
+
+impl std::error::Error for PendingIo {}
+
 pub trait OpHandler<T> {
     fn handle_op(
         &mut self,
@@ -38,6 +55,7 @@ impl FlixRunner {
     where
         H: OpHandler<T>,
     {
+        let mut pending: Vec<Suspension> = Vec::new();
         loop {
             if let Some(outcome) = rt
                 .call_poll_task(&mut *store, ctx, task_id)
@@ -46,36 +64,30 @@ impl FlixRunner {
                 return Ok(outcome);
             }
 
+            // Best-effort: make progress on pending suspensions first.
+            pending = self.retry_pending(store, rt, ctx, pending, handler)?;
+
             let suspensions = rt
                 .call_sched_step(&mut *store, ctx, self.budget)
                 .context("sched-step failed")?;
-
-            if suspensions.is_empty() {
-                thread::yield_now();
-                continue;
-            }
 
             for s in suspensions {
                 let req = rt
                     .call_suspension_request(&mut *store, ctx, s)
                     .context("suspension-request failed")?;
 
-                if let Err(e) = self.handle_one(&mut *store, rt, ctx, s, req, handler) {
-                    // Best-effort: resume with an `Other` IO error if possible.
-                    let msg = e.to_string();
-                    let err = IoError {
-                        kind_code: 14,
-                        msg,
-                    };
-
-                    let req2 = rt
-                        .call_suspension_request(&mut *store, ctx, s)
-                        .context("suspension-request failed (error fallback)")?;
-
-                    if let Err(e2) = resume_io_err(&mut *store, rt, ctx, s, req2, &err) {
-                        return Err(e2).context(e);
-                    }
+                match self.handle_one(&mut *store, rt, ctx, s, req, handler) {
+                    Ok(OpStatus::Completed) => {}
+                    Ok(OpStatus::Pending) => pending.push(s),
+                    Err(e) => self.resume_best_effort_err(store, rt, ctx, s, e)?,
                 }
+            }
+
+            // If we have pending I/O, yield a bit to avoid busy-spinning.
+            if pending.is_empty() {
+                thread::yield_now();
+            } else {
+                thread::sleep(Duration::from_millis(1));
             }
         }
     }
@@ -88,7 +100,7 @@ impl FlixRunner {
         suspension: Suspension,
         req: OpRequest,
         handler: &mut H,
-    ) -> Result<()>
+    ) -> Result<OpStatus>
     where
         H: OpHandler<T>,
     {
@@ -96,10 +108,71 @@ impl FlixRunner {
             OpRequest::TimerSleep(r) => {
                 thread::sleep(Duration::from_millis(r.ms));
                 rt.call_resume_timer_sleep(store, ctx, suspension)?;
-                Ok(())
+                Ok(OpStatus::Completed)
             }
-            other => handler.handle_op(store, rt, ctx, suspension, other),
+            other => match handler.handle_op(store, rt, ctx, suspension, other) {
+                Ok(()) => Ok(OpStatus::Completed),
+                Err(e) if e.downcast_ref::<PendingIo>().is_some() => Ok(OpStatus::Pending),
+                Err(e) => Err(e),
+            },
         }
+    }
+
+    fn retry_pending<T, H>(
+        &self,
+        store: &mut Store<T>,
+        rt: &Guest,
+        ctx: crate::bindings::exports::flix::runtime::runtime::Ctx,
+        pending: Vec<Suspension>,
+        handler: &mut H,
+    ) -> Result<Vec<Suspension>>
+    where
+        H: OpHandler<T>,
+    {
+        if pending.is_empty() {
+            return Ok(pending);
+        }
+
+        let mut next = Vec::with_capacity(pending.len());
+        for s in pending {
+            let req = rt
+                .call_suspension_request(&mut *store, ctx, s)
+                .context("suspension-request failed (pending)")?;
+
+            match self.handle_one(&mut *store, rt, ctx, s, req, handler) {
+                Ok(OpStatus::Completed) => {}
+                Ok(OpStatus::Pending) => next.push(s),
+                Err(e) => self.resume_best_effort_err(store, rt, ctx, s, e)?,
+            }
+        }
+
+        Ok(next)
+    }
+
+    fn resume_best_effort_err<T>(
+        &self,
+        store: &mut Store<T>,
+        rt: &Guest,
+        ctx: crate::bindings::exports::flix::runtime::runtime::Ctx,
+        suspension: Suspension,
+        e: anyhow::Error,
+    ) -> Result<()> {
+        // Best-effort: resume with an `Other` IO error if possible.
+        let msg = e.to_string();
+        let err = IoError {
+            kind_code: 14,
+            msg,
+        };
+
+        let req2 = rt
+            .call_suspension_request(&mut *store, ctx, suspension)
+            .context("suspension-request failed (error fallback)")?;
+
+        if let Err(e2) = resume_io_err(&mut *store, rt, ctx, suspension, req2, &err) {
+            return Err(e2).context(e);
+        }
+
+        Ok(())
     }
 }
 
@@ -164,7 +237,7 @@ pub fn resume_io_err<T>(
         OpRequest::TcpServerLocalPort(_) => rt.call_resume_tcp_server_local_port_err(store, ctx, suspension, err)?,
         OpRequest::TcpServerClose(_) => rt.call_resume_tcp_server_close_err(store, ctx, suspension, err)?,
 
-        OpRequest::Unknown(_) | OpRequest::TimerSleep(_) => {
+        OpRequest::ConsoleReadln | OpRequest::Unknown(_) | OpRequest::TimerSleep(_) => {
             // No typed IoError resumer. Leave it un-resumed and let the error surface.
             anyhow::bail!("cannot resume IoError for request kind")
         }

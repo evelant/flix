@@ -43,6 +43,12 @@ pub struct CancelledPayload[_: Eff] {
 
 pub type alias Cancelled = CancelledPayload[Static]
 
+///
+/// A designated arithmetic payload for portable exceptions.
+///
+/// This is used for runtime arithmetic failures that do not have a natural total return value,
+/// e.g. non-terminating exact `BigDecimal` division.
+///
 pub mod Exn {
 
     ///

@@ -143,6 +143,7 @@ object JvmName {
   val ArrayBlockingQueue: JvmName = JvmName(JavaUtilConcurrent, "ArrayBlockingQueue")
   val BigDecimal: JvmName = JvmName(JavaMath, "BigDecimal")
   val BigInteger: JvmName = JvmName(JavaMath, "BigInteger")
+  val RoundingMode: JvmName = JvmName(JavaMath, "RoundingMode")
   val BlockingQueue: JvmName = JvmName(JavaUtilConcurrent, "BlockingQueue")
   val Boolean: JvmName = JvmName(JavaLang, "Boolean")
   val Byte: JvmName = JvmName(JavaLang, "Byte")

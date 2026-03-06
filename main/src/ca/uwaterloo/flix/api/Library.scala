@@ -239,11 +239,22 @@ object Library {
   private val StandardLibraryPortableOverlay = List(
     "portable/Clock.flix" -> LocalResource.get("/src/library/portable/Clock.flix"),
     "portable/Random.flix" -> LocalResource.get("/src/library/portable/Random.flix"),
+    "portable/BigDecimal.flix" -> LocalResource.get("/src/library/portable/BigDecimal.flix"),
     "portable/BigInt.flix" -> LocalResource.get("/src/library/portable/BigInt.flix"),
+    "portable/CharacterSet.flix" -> LocalResource.get("/src/library/portable/CharacterSet.flix"),
+    "portable/CodePoint.flix" -> LocalResource.get("/src/library/portable/CodePoint.flix"),
+    "portable/DecodingReader.flix" -> LocalResource.get("/src/library/portable/DecodingReader.flix"),
+    "portable/EncodingWriter.flix" -> LocalResource.get("/src/library/portable/EncodingWriter.flix"),
+    "portable/Float32.flix" -> LocalResource.get("/src/library/portable/Float32.flix"),
+    "portable/Float64.flix" -> LocalResource.get("/src/library/portable/Float64.flix"),
     "portable/FileRead.flix" -> LocalResource.get("/src/library/portable/FileRead.flix"),
     "portable/FileReadWithResult.flix" -> LocalResource.get("/src/library/portable/FileReadWithResult.flix"),
     "portable/FileWrite.flix" -> LocalResource.get("/src/library/portable/FileWrite.flix"),
     "portable/FileWriteWithResult.flix" -> LocalResource.get("/src/library/portable/FileWriteWithResult.flix"),
+    "portable/Int8.flix" -> LocalResource.get("/src/library/portable/Int8.flix"),
+    "portable/Int16.flix" -> LocalResource.get("/src/library/portable/Int16.flix"),
+    "portable/Int32.flix" -> LocalResource.get("/src/library/portable/Int32.flix"),
+    "portable/Int64.flix" -> LocalResource.get("/src/library/portable/Int64.flix"),
   )
 
   val StandardLibraryPortable: List[(String, String)] =

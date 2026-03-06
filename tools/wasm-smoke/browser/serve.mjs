@@ -3,7 +3,7 @@ import * as http from "node:http";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const ROOT_DIR = fileURLToPath(new URL("../../..", import.meta.url));
+const ROOT_DIR = path.resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -74,4 +74,3 @@ server.listen(port, "127.0.0.1", () => {
   console.log(`[wasm-smoke] serving ${ROOT_DIR} at http://127.0.0.1:${port}/`);
   console.log(`[wasm-smoke] open: http://127.0.0.1:${port}/tools/wasm-smoke/browser/opfs.html`);
 });
-

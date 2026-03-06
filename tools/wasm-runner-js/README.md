@@ -60,3 +60,28 @@ And a TCP handler set is available in:
 And a process handler set is available in:
 
 - `tools/wasm-runner-js/node-process-handlers.mjs`
+
+## Browser Harness
+
+To execute a transpiled component in a real browser:
+
+1. Serve the repo root (adds COOP/COEP headers for future threads work):
+
+   ```bash
+   PORT=8000 node tools/wasm-smoke/browser/serve.mjs
+   ```
+
+2. Open the runner page with query params:
+
+   - `component`: URL path to `flix-llvm-wasm.component.js`
+   - `exports`: URL path to `flix_wasm_exports.json`
+
+Example (using `build/llvm`):
+
+```text
+http://127.0.0.1:8000/tools/wasm-runner-js/browser/run_component.html?component=/build/llvm/wasm/js/flix-llvm-wasm.component.js&exports=/build/llvm/flix_wasm_exports.json
+```
+
+For headless Chrome runs (used by the Scala browser runtime suite), see:
+
+- `tools/wasm-runner-js/browser/run_headless_chrome.mjs`

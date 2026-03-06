@@ -58,6 +58,9 @@ object OpPrinter {
     case op: Int16Op => printInt16Op(op)
     case op: Int32Op => printInt32Op(op)
     case op: Int64Op => printInt64Op(op)
+    case op: BigIntOp => printBigIntOp(op)
+    case op: BigDecimalOp => printBigDecimalOp(op)
+    case op: CodePointOp => printCodePointOp(op)
     case op: StringOp => printStringOp(op)
     case op: ParseOp => printParseOp(op)
     case op: StringBuilderOp => printStringBuilderOp(op)
@@ -225,6 +228,59 @@ object OpPrinter {
     case Int64Op.And => plus
   }
 
+  private def printBigIntOp(op: BigIntOp): String = op match {
+    case BigIntOp.Not => not
+    case BigIntOp.Or => or
+    case BigIntOp.Add => plus
+    case BigIntOp.Sub => minus
+    case BigIntOp.Mul => mul
+    case BigIntOp.Div => div
+    case BigIntOp.Neg => neg
+    case BigIntOp.Rem => rem
+    case BigIntOp.Xor => xor
+    case BigIntOp.Shl => shl
+    case BigIntOp.Shr => shr
+    case BigIntOp.And => and
+    case BigIntOp.Cmp => "bigIntCompare"
+    case BigIntOp.BitLength => "bigIntBitLength"
+    case BigIntOp.FromInt64 => "bigIntFromInt64"
+  }
+
+  private def printBigDecimalOp(op: BigDecimalOp): String = op match {
+    case BigDecimalOp.Neg => neg
+    case BigDecimalOp.Add => plus
+    case BigDecimalOp.Sub => minus
+    case BigDecimalOp.Mul => mul
+    case BigDecimalOp.Div => div
+    case BigDecimalOp.Cmp => "bigDecimalCompare"
+    case BigDecimalOp.Scale => "bigDecimalScale"
+    case BigDecimalOp.Precision => "bigDecimalPrecision"
+    case BigDecimalOp.Ceil => "bigDecimalCeil"
+    case BigDecimalOp.Floor => "bigDecimalFloor"
+    case BigDecimalOp.Round => "bigDecimalRound"
+    case BigDecimalOp.ToBigInt => "bigDecimalToBigInt"
+    case BigDecimalOp.ToPlainString => "bigDecimalToPlainString"
+  }
+
+  private def printCodePointOp(op: CodePointOp): String = op match {
+    case CodePointOp.IsLetter => "codePointIsLetter"
+    case CodePointOp.IsDigit => "codePointIsDigit"
+    case CodePointOp.IsLowerCase => "codePointIsLowerCase"
+    case CodePointOp.IsUpperCase => "codePointIsUpperCase"
+    case CodePointOp.IsTitleCase => "codePointIsTitleCase"
+    case CodePointOp.IsWhitespace => "codePointIsWhitespace"
+    case CodePointOp.IsAlphabetic => "codePointIsAlphabetic"
+    case CodePointOp.IsDefined => "codePointIsDefined"
+    case CodePointOp.IsIdeographic => "codePointIsIdeographic"
+    case CodePointOp.IsISOControl => "codePointIsISOControl"
+    case CodePointOp.IsMirrored => "codePointIsMirrored"
+    case CodePointOp.ToLowerCase => "codePointToLowerCase"
+    case CodePointOp.ToUpperCase => "codePointToUpperCase"
+    case CodePointOp.ToTitleCase => "codePointToTitleCase"
+    case CodePointOp.GetName => "codePointGetName"
+    case CodePointOp.GetNumericValue => "codePointGetNumericValue"
+  }
+
   private def printStringOp(op: StringOp): String = op match {
     case StringOp.Concat => plus
     case StringOp.Length => "stringLength"
@@ -241,6 +297,8 @@ object OpPrinter {
     case ParseOp.Int64FromString => "int64FromString"
     case ParseOp.Float32FromString => "float32FromString"
     case ParseOp.Float64FromString => "float64FromString"
+    case ParseOp.BigIntFromString => "bigIntFromString"
+    case ParseOp.BigDecimalFromString => "bigDecimalFromString"
     case ParseOp.Int32Parse => "int32Parse"
     case ParseOp.Int64Parse => "int64Parse"
   }
@@ -295,6 +353,8 @@ object OpPrinter {
     case ToStringOp.Int16ToString => "int16ToString"
     case ToStringOp.Int32ToString => "int32ToString"
     case ToStringOp.Int64ToString => "int64ToString"
+    case ToStringOp.BigIntToString => "bigIntToString"
+    case ToStringOp.BigDecimalToString => "bigDecimalToString"
   }
 
   private def printConvertOp(op: ConvertOp): String = op match {
@@ -408,6 +468,8 @@ object OpPrinter {
     case HashOp.Int16Hash => "int16Hash"
     case HashOp.Int32Hash => "int32Hash"
     case HashOp.Int64Hash => "int64Hash"
+    case HashOp.BigIntHash => "bigIntHash"
+    case HashOp.BigDecimalHash => "bigDecimalHash"
     case HashOp.StringHash => "stringHash"
   }
 

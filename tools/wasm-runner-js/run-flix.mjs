@@ -27,6 +27,8 @@ options:
   --defId <u64>                        Run this def-id instead of selecting 'isMain'
   --symbol <sym>                       Run the def with this symbol (requires --exports)
   --arg <value>                        Add a positional argument (typed via manifest params)
+  --argv <string>                      Add a program argv entry (visible via Env.getArgs)
+  --stdinLine <string>                 Queue a line for Console.readln (may be repeated)
   --rootDir <dir>                      Root dir for Node filesystem handlers (default: cwd)
   --budget <u32>                       Scheduler budget per step (default: 100)
   --maxRedirects <u32>                 HTTP redirect limit (default: 20)
@@ -65,6 +67,22 @@ function parseArgs(argv) {
         if (v == null) usage(2);
         if (!Array.isArray(out.arg)) out.arg = [];
         out.arg.push(v);
+        i++;
+        break;
+      }
+      case "--argv": {
+        const v = argv[i + 1];
+        if (v == null) usage(2);
+        if (!Array.isArray(out.argv)) out.argv = [];
+        out.argv.push(v);
+        i++;
+        break;
+      }
+      case "--stdinLine": {
+        const v = argv[i + 1];
+        if (v == null) usage(2);
+        if (!Array.isArray(out.stdinLine)) out.stdinLine = [];
+        out.stdinLine.push(v);
         i++;
         break;
       }
@@ -181,6 +199,12 @@ const args = parseArgs(process.argv.slice(2));
 
 const jsPath = path.resolve(args.js);
 const jsUrl = pathToFileURL(jsPath).href;
+
+// Provide program argv entries to the default `flix:sys/sys` host implementation.
+globalThis.__flix_args = Array.isArray(args.argv) ? args.argv : [];
+
+// Provide stdin lines to the default runner (`console-readln` suspension handler).
+globalThis.__flix_stdin_lines = Array.isArray(args.stdinLine) ? args.stdinLine : [];
 
 const exportsPath =
   args.exports ??

@@ -123,6 +123,20 @@ export class FlixRunner {
         this.runtime.resumeTimerSleep(ctx, suspension);
         return;
       }
+      case "console-readln": {
+        const lines = globalThis.__flix_stdin_lines;
+        let line = "";
+        if (Array.isArray(lines) && lines.length > 0) {
+          const next = lines.shift();
+          line = typeof next === "string" ? next : String(next);
+        }
+        // Normalize accidental line terminators to match `readln` semantics.
+        if (line.endsWith("\n")) line = line.slice(0, -1);
+        if (line.endsWith("\r")) line = line.slice(0, -1);
+
+        this.runtime.resumeConsoleReadlnOk(ctx, suspension, line);
+        return;
+      }
       case "http-request": {
         await this._handleHttpRequest(ctx, suspension, req.val);
         return;

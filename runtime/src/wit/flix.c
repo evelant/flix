@@ -14,6 +14,9 @@ extern int64_t __wasm_import_flix_sys_sys_time_now_ms(void);
 __attribute__((__import_module__("flix:sys/sys@0.1.0"), __import_name__("random-bytes")))
 extern void __wasm_import_flix_sys_sys_random_bytes(int32_t, uint8_t *);
 
+__attribute__((__import_module__("flix:sys/sys@0.1.0"), __import_name__("get-args")))
+extern void __wasm_import_flix_sys_sys_get_args(uint8_t *);
+
 __attribute__((__import_module__("flix:sys/sys@0.1.0"), __import_name__("has-capability")))
 extern int32_t __wasm_import_flix_sys_sys_has_capability(int32_t);
 
@@ -374,8 +377,12 @@ void __wasm_export_exports_flix_runtime_runtime_suspension_request_post_return(u
     case 44: {
       break;
     }
+    case 45: {
+      break;
+    }
   }
 }
+
 
 
 
@@ -499,6 +506,17 @@ void flix_list_u8_free(flix_list_u8_t *ptr) {
   if (list_len > 0) {
     uint8_t *list_ptr = ptr->ptr;
     for (size_t i = 0; i < list_len; i++) {
+    }
+    free(list_ptr);
+  }
+}
+
+void flix_list_string_free(flix_list_string_t *ptr) {
+  size_t list_len = ptr->len;
+  if (list_len > 0) {
+    flix_string_t *list_ptr = ptr->ptr;
+    for (size_t i = 0; i < list_len; i++) {
+      flix_string_free(&list_ptr[i]);
     }
     free(list_ptr);
   }
@@ -733,17 +751,6 @@ void exports_flix_runtime_runtime_process_env_var_free(exports_flix_runtime_runt
   flix_string_free(&ptr->value);
 }
 
-void flix_list_string_free(flix_list_string_t *ptr) {
-  size_t list_len = ptr->len;
-  if (list_len > 0) {
-    flix_string_t *list_ptr = ptr->ptr;
-    for (size_t i = 0; i < list_len; i++) {
-      flix_string_free(&list_ptr[i]);
-    }
-    free(list_ptr);
-  }
-}
-
 void exports_flix_runtime_runtime_list_process_env_var_free(exports_flix_runtime_runtime_list_process_env_var_t *ptr) {
   size_t list_len = ptr->len;
   if (list_len > 0) {
@@ -756,7 +763,6 @@ void exports_flix_runtime_runtime_list_process_env_var_free(exports_flix_runtime
 }
 
 void exports_flix_runtime_runtime_process_exec_req_free(exports_flix_runtime_runtime_process_exec_req_t *ptr) {
-  flix_list_string_free(&ptr->argv);
   flix_option_string_free(&ptr->cwd);
   exports_flix_runtime_runtime_list_process_env_var_free(&ptr->env);
 }
@@ -920,7 +926,7 @@ void exports_flix_runtime_runtime_op_request_free(exports_flix_runtime_runtime_o
     case 43: {
       break;
     }
-    case 44: {
+    case 45: {
       break;
     }
   }
@@ -1005,6 +1011,14 @@ void flix_sys_sys_random_bytes(uint32_t len, flix_list_u8_t *ret) {
   uint8_t *ptr = (uint8_t *) &ret_area;
   __wasm_import_flix_sys_sys_random_bytes((int32_t) (len), ptr);
   *ret = (flix_list_u8_t) { (uint8_t*)(*((uint8_t **) (ptr + 0))), (*((size_t*) (ptr + sizeof(void*)))) };
+}
+
+void flix_sys_sys_get_args(flix_list_string_t *ret) {
+  __attribute__((__aligned__(sizeof(void*))))
+  uint8_t ret_area[(2*sizeof(void*))];
+  uint8_t *ptr = (uint8_t *) &ret_area;
+  __wasm_import_flix_sys_sys_get_args(ptr);
+  *ret = (flix_list_string_t) { (flix_string_t*)(*((uint8_t **) (ptr + 0))), (*((size_t*) (ptr + sizeof(void*)))) };
 }
 
 bool flix_sys_sys_has_capability(flix_sys_sys_capability_t cap) {
@@ -1445,10 +1459,14 @@ uint8_t * __wasm_export_exports_flix_runtime_runtime_suspension_request(int32_t 
       break;
     }
     case 44: {
-      const exports_flix_runtime_runtime_unknown_req_t *payload48 = &(ret).val.unknown;
       *((int8_t*)(ptr + 0)) = 44;
-      *((int64_t*)(ptr + 8)) = (int64_t) ((*payload48).eff_id);
-      *((int64_t*)(ptr + 16)) = (int64_t) ((*payload48).op_id);
+      break;
+    }
+    case 45: {
+      const exports_flix_runtime_runtime_unknown_req_t *payload49 = &(ret).val.unknown;
+      *((int8_t*)(ptr + 0)) = 45;
+      *((int64_t*)(ptr + 8)) = (int64_t) ((*payload49).eff_id);
+      *((int64_t*)(ptr + 16)) = (int64_t) ((*payload49).op_id);
       break;
     }
   }
@@ -1468,6 +1486,12 @@ void __wasm_export_exports_flix_runtime_runtime_resume_throw(int32_t arg, int32_
 __attribute__((__export_name__("flix:runtime/runtime@0.1.0#resume-timer-sleep")))
 void __wasm_export_exports_flix_runtime_runtime_resume_timer_sleep(int32_t arg, int32_t arg0) {
   exports_flix_runtime_runtime_resume_timer_sleep(((exports_flix_runtime_runtime_ctx_t*) arg), (exports_flix_runtime_runtime_own_suspension_t) { arg0 });
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#resume-console-readln-ok")))
+void __wasm_export_exports_flix_runtime_runtime_resume_console_readln_ok(int32_t arg, int32_t arg0, uint8_t * arg1, size_t arg2) {
+  flix_string_t arg3 = (flix_string_t) { (uint8_t*)(arg1), (arg2) };
+  exports_flix_runtime_runtime_resume_console_readln_ok(((exports_flix_runtime_runtime_ctx_t*) arg), (exports_flix_runtime_runtime_own_suspension_t) { arg0 }, &arg3);
 }
 
 __attribute__((__export_name__("flix:runtime/runtime@0.1.0#resume-http-ok")))

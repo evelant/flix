@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -12,7 +12,7 @@ use wasmtime::Store;
 use crate::bindings::exports::flix::runtime::runtime::{
     Guest, HttpHeader, HttpResponse, IoError, OpRequest, Suspension,
 };
-use crate::runner::OpHandler;
+use crate::runner::{OpHandler, PendingIo};
 
 const KIND_ALREADY_EXISTS: i32 = 0;
 const KIND_INVALID_PATH: i32 = 3;
@@ -282,6 +282,7 @@ fn normalize_exit_code(status: std::process::ExitStatus) -> i32 {
 pub struct StdHostHandlers {
     fs_root: PathBuf,
     fs_tmp_base: PathBuf,
+    stdin_lines: VecDeque<String>,
     next_process_id: u64,
     processes: HashMap<u64, ProcessState>,
     tcp: TcpState,
@@ -295,12 +296,17 @@ impl StdHostHandlers {
         Self {
             fs_root,
             fs_tmp_base,
+            stdin_lines: VecDeque::new(),
             next_process_id: 9000,
             processes: HashMap::new(),
             tcp: TcpState::new(),
             tcp_connect_timeout: Duration::from_millis(2000),
             tcp_io_timeout: Duration::from_millis(2000),
         }
+    }
+
+    pub fn push_stdin_line(&mut self, line: String) {
+        self.stdin_lines.push_back(line);
     }
 
     fn file_path(&self, requested: &str) -> Result<PathBuf, IoError> {
@@ -351,6 +357,18 @@ impl<T> OpHandler<T> for StdHostHandlers {
                         body: "hello".to_string(),
                     },
                 )?;
+                Ok(())
+            }
+
+            OpRequest::ConsoleReadln => {
+                let mut line = self.stdin_lines.pop_front().unwrap_or_default();
+                if line.ends_with('\n') {
+                    line.pop();
+                }
+                if line.ends_with('\r') {
+                    line.pop();
+                }
+                rt.call_resume_console_readln_ok(store, ctx, suspension, &line)?;
                 Ok(())
             }
 
@@ -1175,11 +1193,20 @@ impl<T> OpHandler<T> for StdHostHandlers {
                 };
 
                 let mut buf = vec![0u8; r.max_bytes as usize];
+                if let Err(e) = stream.set_nonblocking(true) {
+                    rt.call_resume_tcp_socket_read_err(store, ctx, suspension, &tcp_io_error_from(e))?;
+                    return Ok(());
+                }
                 match stream.read(&mut buf) {
                     Ok(0) => rt.call_resume_tcp_socket_read_ok(store, ctx, suspension, &[])?,
                     Ok(n) => rt.call_resume_tcp_socket_read_ok(store, ctx, suspension, &buf[..n])?,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        let _ = stream.set_nonblocking(false);
+                        return Err(PendingIo.into());
+                    }
                     Err(e) => rt.call_resume_tcp_socket_read_err(store, ctx, suspension, &tcp_io_error_from(e))?,
                 }
+                let _ = stream.set_nonblocking(false);
                 Ok(())
             }
             OpRequest::TcpSocketWrite(r) => {
@@ -1225,6 +1252,10 @@ impl<T> OpHandler<T> for StdHostHandlers {
                 let addr = SocketAddr::new(ip, r.port);
                 match TcpListener::bind(addr) {
                     Ok(l) => {
+                        if let Err(e) = l.set_nonblocking(true) {
+                            rt.call_resume_tcp_server_bind_err(store, ctx, suspension, &tcp_io_error_from(e))?;
+                            return Ok(());
+                        }
                         let id = self.tcp.alloc_server_id();
                         self.tcp.servers.insert(id, l);
                         rt.call_resume_tcp_server_bind_ok(store, ctx, suspension, id)?;
@@ -1253,6 +1284,9 @@ impl<T> OpHandler<T> for StdHostHandlers {
                         let id = self.tcp.alloc_socket_id();
                         self.tcp.sockets.insert(id, s);
                         rt.call_resume_tcp_server_accept_ok(store, ctx, suspension, id)?;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        return Err(PendingIo.into());
                     }
                     Err(e) => rt.call_resume_tcp_server_accept_err(store, ctx, suspension, &tcp_io_error_from(e))?,
                 }

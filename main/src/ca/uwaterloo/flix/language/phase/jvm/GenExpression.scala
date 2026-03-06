@@ -250,9 +250,46 @@ object GenExpression {
             mv.visitInsn(LNEG)
 
           case BigIntOp.Neg =>
-            compileExpr(exp)
-            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "negate",
-              mkDescriptor()(JvmName.BigInteger.toTpe).toDescriptor, false)
+            compileBigIntUnaryOp(BigIntOp.Neg, exp)
+
+          case BigIntOp.Not =>
+            compileBigIntUnaryOp(BigIntOp.Not, exp)
+
+          case BigIntOp.BitLength =>
+            compileBigIntUnaryOp(BigIntOp.BitLength, exp)
+
+          case BigIntOp.FromInt64 =>
+            compileBigIntUnaryOp(BigIntOp.FromInt64, exp)
+
+          case BigDecimalOp.Neg =>
+            compileBigDecimalUnaryOp(BigDecimalOp.Neg, exp)
+
+          case BigDecimalOp.Scale =>
+            compileBigDecimalUnaryOp(BigDecimalOp.Scale, exp)
+
+          case BigDecimalOp.Precision =>
+            compileBigDecimalUnaryOp(BigDecimalOp.Precision, exp)
+
+          case BigDecimalOp.Ceil =>
+            compileBigDecimalUnaryOp(BigDecimalOp.Ceil, exp)
+
+          case BigDecimalOp.Floor =>
+            compileBigDecimalUnaryOp(BigDecimalOp.Floor, exp)
+
+          case BigDecimalOp.Round =>
+            compileBigDecimalUnaryOp(BigDecimalOp.Round, exp)
+
+          case BigDecimalOp.ToBigInt =>
+            compileBigDecimalUnaryOp(BigDecimalOp.ToBigInt, exp)
+
+          case BigDecimalOp.ToPlainString =>
+            compileBigDecimalUnaryOp(BigDecimalOp.ToPlainString, exp)
+
+          case CodePointOp.GetName =>
+            compileCodePointGetName(exp)
+
+          case op: CodePointOp =>
+            compileCodePointUnaryOp(op, exp)
 
           case Int8Op.Not | Int16Op.Not | Int32Op.Not =>
             compileExpr(exp)
@@ -264,21 +301,6 @@ object GenExpression {
             mv.visitInsn(ICONST_M1)
             mv.visitInsn(I2L)
             mv.visitInsn(LXOR)
-
-          case BigIntOp.Not =>
-            compileExpr(exp)
-            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "not",
-              mkDescriptor()(JvmName.BigInteger.toTpe).toDescriptor, false)
-
-          case BigIntOp.BitLength =>
-            compileExpr(exp)
-            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "bitLength",
-              mkDescriptor()(BackendType.Int32).toDescriptor, false)
-
-          case BigIntOp.FromInt64 =>
-            compileExpr(exp)
-            mv.visitMethodInsn(INVOKESTATIC, JvmName.BigInteger.toInternalName, "valueOf",
-              mkDescriptor(BackendType.Int64)(JvmName.BigInteger.toTpe).toDescriptor, false)
 
           case ToStringOp.CharToString =>
             compileExpr(exp)
@@ -316,9 +338,10 @@ object GenExpression {
               mkDescriptor(BackendType.Int64)(BackendType.String).toDescriptor, false)
 
           case ToStringOp.BigIntToString =>
-            compileExpr(exp)
-            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "toString",
-              mkDescriptor()(BackendType.String).toDescriptor, false)
+            compileBigIntToString(exp)
+
+          case ToStringOp.BigDecimalToString =>
+            compileBigDecimalToString(exp)
 
           case op: ConvertOp =>
             compileExpr(exp)
@@ -656,41 +679,10 @@ object GenExpression {
             mv.visitLabel(after)
 
           case ParseOp.BigIntFromString =>
-            import BytecodeInstructions.*
-            val SimpleType.Tuple(elmTypes) = tpe
-            val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+            compileBigIntFromString(exp, tpe)
 
-            val tryStart = new Label()
-            val tryEnd = new Label()
-            val handlerStart = new Label()
-            val after = new Label()
-
-            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, JvmName.NumberFormatException.toInternalName)
-
-            mv.visitLabel(tryStart)
-            NEW(tupleType.jvmName)
-            DUP()
-            pushBool(true)
-            NEW(JvmName.BigInteger)
-            DUP()
-            compileExpr(exp)
-            mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.String.toInternalName, "strip",
-              mkDescriptor()(BackendType.String).toDescriptor, false)
-            INVOKESPECIAL(ClassConstants.BigInteger.Constructor)
-            INVOKESPECIAL(tupleType.Constructor)
-            mv.visitLabel(tryEnd)
-            mv.visitJumpInsn(GOTO, after)
-
-            mv.visitLabel(handlerStart)
-            POP()
-            NEW(tupleType.jvmName)
-            DUP()
-            pushBool(false)
-            mv.visitFieldInsn(org.objectweb.asm.Opcodes.GETSTATIC, JvmName.BigInteger.toInternalName, "ZERO", JvmName.BigInteger.toDescriptor)
-            INVOKESPECIAL(tupleType.Constructor)
-            mv.visitJumpInsn(GOTO, after)
-
-            mv.visitLabel(after)
+          case ParseOp.BigDecimalFromString =>
+            compileBigDecimalFromString(exp, tpe)
 
           case ParseOp.Int32Parse =>
             import BytecodeInstructions.*
@@ -1359,9 +1351,10 @@ object GenExpression {
               mkDescriptor(BackendType.Int64)(BackendType.Int32).toDescriptor, false)
 
           case HashOp.BigIntHash =>
-            compileExpr(exp)
-            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "hashCode",
-              mkDescriptor()(BackendType.Int32).toDescriptor, false)
+            compileBigIntHash(exp)
+
+          case HashOp.BigDecimalHash =>
+            compileBigDecimalHash(exp)
 
           case HashOp.StringHash =>
             compileExpr(exp)
@@ -4074,70 +4067,52 @@ object GenExpression {
             mv.visitInsn(D2L) // Convert to long
 
           case BigIntOp.Add =>
-            compileExpr(exp1)
-            compileExpr(exp2)
-            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "add",
-              mkDescriptor(JvmName.BigInteger.toTpe)(JvmName.BigInteger.toTpe).toDescriptor, false)
+            compileBigIntBinaryOp(BigIntOp.Add, exp1, exp2)
 
           case BigIntOp.Sub =>
-            compileExpr(exp1)
-            compileExpr(exp2)
-            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "subtract",
-              mkDescriptor(JvmName.BigInteger.toTpe)(JvmName.BigInteger.toTpe).toDescriptor, false)
+            compileBigIntBinaryOp(BigIntOp.Sub, exp1, exp2)
 
           case BigIntOp.Mul =>
-            compileExpr(exp1)
-            compileExpr(exp2)
-            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "multiply",
-              mkDescriptor(JvmName.BigInteger.toTpe)(JvmName.BigInteger.toTpe).toDescriptor, false)
+            compileBigIntBinaryOp(BigIntOp.Mul, exp1, exp2)
 
           case BigIntOp.Div =>
-            compileExpr(exp1)
-            compileExpr(exp2)
-            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "divide",
-              mkDescriptor(JvmName.BigInteger.toTpe)(JvmName.BigInteger.toTpe).toDescriptor, false)
+            compileBigIntBinaryOp(BigIntOp.Div, exp1, exp2)
 
           case BigIntOp.Rem =>
-            compileExpr(exp1)
-            compileExpr(exp2)
-            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "remainder",
-              mkDescriptor(JvmName.BigInteger.toTpe)(JvmName.BigInteger.toTpe).toDescriptor, false)
+            compileBigIntBinaryOp(BigIntOp.Rem, exp1, exp2)
 
           case BigIntOp.Shl =>
-            compileExpr(exp1)
-            compileExpr(exp2)
-            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "shiftLeft",
-              mkDescriptor(BackendType.Int32)(JvmName.BigInteger.toTpe).toDescriptor, false)
+            compileBigIntBinaryOp(BigIntOp.Shl, exp1, exp2)
 
           case BigIntOp.Shr =>
-            compileExpr(exp1)
-            compileExpr(exp2)
-            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "shiftRight",
-              mkDescriptor(BackendType.Int32)(JvmName.BigInteger.toTpe).toDescriptor, false)
+            compileBigIntBinaryOp(BigIntOp.Shr, exp1, exp2)
 
           case BigIntOp.And =>
-            compileExpr(exp1)
-            compileExpr(exp2)
-            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "and",
-              mkDescriptor(JvmName.BigInteger.toTpe)(JvmName.BigInteger.toTpe).toDescriptor, false)
+            compileBigIntBinaryOp(BigIntOp.And, exp1, exp2)
 
           case BigIntOp.Or =>
-            compileExpr(exp1)
-            compileExpr(exp2)
-            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "or",
-              mkDescriptor(JvmName.BigInteger.toTpe)(JvmName.BigInteger.toTpe).toDescriptor, false)
+            compileBigIntBinaryOp(BigIntOp.Or, exp1, exp2)
 
           case BigIntOp.Xor =>
-            compileExpr(exp1)
-            compileExpr(exp2)
-            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "xor",
-              mkDescriptor(JvmName.BigInteger.toTpe)(JvmName.BigInteger.toTpe).toDescriptor, false)
+            compileBigIntBinaryOp(BigIntOp.Xor, exp1, exp2)
 
           case BigIntOp.Cmp =>
-            compileExpr(exp1)
-            compileExpr(exp2)
-            mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "compareTo",
-              mkDescriptor(JvmName.BigInteger.toTpe)(BackendType.Int32).toDescriptor, false)
+            compileBigIntBinaryOp(BigIntOp.Cmp, exp1, exp2)
+
+          case BigDecimalOp.Add =>
+            compileBigDecimalBinaryOp(BigDecimalOp.Add, exp1, exp2)
+
+          case BigDecimalOp.Sub =>
+            compileBigDecimalBinaryOp(BigDecimalOp.Sub, exp1, exp2)
+
+          case BigDecimalOp.Mul =>
+            compileBigDecimalBinaryOp(BigDecimalOp.Mul, exp1, exp2)
+
+          case BigDecimalOp.Div =>
+            compileBigDecimalBinaryOp(BigDecimalOp.Div, exp1, exp2)
+
+          case BigDecimalOp.Cmp =>
+            compileBigDecimalBinaryOp(BigDecimalOp.Cmp, exp1, exp2)
 
           case Int8Op.And | Int16Op.And | Int32Op.And =>
             compileExpr(exp1)
@@ -6747,6 +6722,308 @@ object GenExpression {
     mv.visitInsn(opcode)
     mv.visitJumpInsn(cmpOpcode, condElse)
     visitComparisonEpilogue(mv, condElse, condEnd)
+  }
+
+  private def compileBigIntUnaryOp(op: BigIntOp, exp: Expr)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    compileExpr(exp)
+    op match {
+      case BigIntOp.Neg =>
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "negate",
+          mkDescriptor()(JvmName.BigInteger.toTpe).toDescriptor, false)
+      case BigIntOp.Not =>
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "not",
+          mkDescriptor()(JvmName.BigInteger.toTpe).toDescriptor, false)
+      case BigIntOp.BitLength =>
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "bitLength",
+          mkDescriptor()(BackendType.Int32).toDescriptor, false)
+      case BigIntOp.FromInt64 =>
+        mv.visitMethodInsn(INVOKESTATIC, JvmName.BigInteger.toInternalName, "valueOf",
+          mkDescriptor(BackendType.Int64)(JvmName.BigInteger.toTpe).toDescriptor, false)
+      case _ =>
+        throw InternalCompilerException(s"Unexpected BigInt unary op: '$op'.", SourceLocation.Unknown)
+    }
+  }
+
+  private def compileBigIntToString(exp: Expr)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    compileExpr(exp)
+    mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "toString",
+      mkDescriptor()(BackendType.String).toDescriptor, false)
+  }
+
+  private def compileBigIntFromString(exp: Expr, tpe: SimpleType)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    import BytecodeInstructions.*
+    val SimpleType.Tuple(elmTypes) = tpe
+    val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+    val tryStart = new Label()
+    val tryEnd = new Label()
+    val handlerStart = new Label()
+    val after = new Label()
+
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, JvmName.NumberFormatException.toInternalName)
+
+    mv.visitLabel(tryStart)
+    NEW(tupleType.jvmName)
+    DUP()
+    pushBool(true)
+    NEW(JvmName.BigInteger)
+    DUP()
+    compileExpr(exp)
+    mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.String.toInternalName, "strip",
+      mkDescriptor()(BackendType.String).toDescriptor, false)
+    INVOKESPECIAL(ClassConstants.BigInteger.Constructor)
+    INVOKESPECIAL(tupleType.Constructor)
+    mv.visitLabel(tryEnd)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerStart)
+    POP()
+    NEW(tupleType.jvmName)
+    DUP()
+    pushBool(false)
+    mv.visitFieldInsn(org.objectweb.asm.Opcodes.GETSTATIC, JvmName.BigInteger.toInternalName, "ZERO", JvmName.BigInteger.toDescriptor)
+    INVOKESPECIAL(tupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(after)
+  }
+
+  private def compileBigIntHash(exp: Expr)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    compileExpr(exp)
+    mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "hashCode",
+      mkDescriptor()(BackendType.Int32).toDescriptor, false)
+  }
+
+  private def compileBigIntBinaryOp(op: BigIntOp, exp1: Expr, exp2: Expr)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    compileExpr(exp1)
+    compileExpr(exp2)
+    op match {
+      case BigIntOp.Add =>
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "add",
+          mkDescriptor(JvmName.BigInteger.toTpe)(JvmName.BigInteger.toTpe).toDescriptor, false)
+      case BigIntOp.Sub =>
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "subtract",
+          mkDescriptor(JvmName.BigInteger.toTpe)(JvmName.BigInteger.toTpe).toDescriptor, false)
+      case BigIntOp.Mul =>
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "multiply",
+          mkDescriptor(JvmName.BigInteger.toTpe)(JvmName.BigInteger.toTpe).toDescriptor, false)
+      case BigIntOp.Div =>
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "divide",
+          mkDescriptor(JvmName.BigInteger.toTpe)(JvmName.BigInteger.toTpe).toDescriptor, false)
+      case BigIntOp.Rem =>
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "remainder",
+          mkDescriptor(JvmName.BigInteger.toTpe)(JvmName.BigInteger.toTpe).toDescriptor, false)
+      case BigIntOp.Shl =>
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "shiftLeft",
+          mkDescriptor(BackendType.Int32)(JvmName.BigInteger.toTpe).toDescriptor, false)
+      case BigIntOp.Shr =>
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "shiftRight",
+          mkDescriptor(BackendType.Int32)(JvmName.BigInteger.toTpe).toDescriptor, false)
+      case BigIntOp.And =>
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "and",
+          mkDescriptor(JvmName.BigInteger.toTpe)(JvmName.BigInteger.toTpe).toDescriptor, false)
+      case BigIntOp.Or =>
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "or",
+          mkDescriptor(JvmName.BigInteger.toTpe)(JvmName.BigInteger.toTpe).toDescriptor, false)
+      case BigIntOp.Xor =>
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "xor",
+          mkDescriptor(JvmName.BigInteger.toTpe)(JvmName.BigInteger.toTpe).toDescriptor, false)
+      case BigIntOp.Cmp =>
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigInteger.toInternalName, "compareTo",
+          mkDescriptor(JvmName.BigInteger.toTpe)(BackendType.Int32).toDescriptor, false)
+      case _ =>
+        throw InternalCompilerException(s"Unexpected BigInt binary op: '$op'.", SourceLocation.Unknown)
+    }
+  }
+
+  private def compileBigDecimalUnaryOp(op: BigDecimalOp, exp: Expr)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    compileExpr(exp)
+    op match {
+      case BigDecimalOp.Neg =>
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigDecimal.toInternalName, "negate",
+          mkDescriptor()(JvmName.BigDecimal.toTpe).toDescriptor, false)
+      case BigDecimalOp.Scale =>
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigDecimal.toInternalName, "scale",
+          mkDescriptor()(BackendType.Int32).toDescriptor, false)
+      case BigDecimalOp.Precision =>
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigDecimal.toInternalName, "precision",
+          mkDescriptor()(BackendType.Int32).toDescriptor, false)
+      case BigDecimalOp.Ceil =>
+        BytecodeInstructions.pushInt(0)
+        mv.visitFieldInsn(GETSTATIC, JvmName.RoundingMode.toInternalName, "CEILING", JvmName.RoundingMode.toDescriptor)
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigDecimal.toInternalName, "setScale",
+          mkDescriptor(BackendType.Int32, JvmName.RoundingMode.toTpe)(JvmName.BigDecimal.toTpe).toDescriptor, false)
+      case BigDecimalOp.Floor =>
+        BytecodeInstructions.pushInt(0)
+        mv.visitFieldInsn(GETSTATIC, JvmName.RoundingMode.toInternalName, "FLOOR", JvmName.RoundingMode.toDescriptor)
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigDecimal.toInternalName, "setScale",
+          mkDescriptor(BackendType.Int32, JvmName.RoundingMode.toTpe)(JvmName.BigDecimal.toTpe).toDescriptor, false)
+      case BigDecimalOp.Round =>
+        BytecodeInstructions.pushInt(0)
+        mv.visitFieldInsn(GETSTATIC, JvmName.RoundingMode.toInternalName, "HALF_EVEN", JvmName.RoundingMode.toDescriptor)
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigDecimal.toInternalName, "setScale",
+          mkDescriptor(BackendType.Int32, JvmName.RoundingMode.toTpe)(JvmName.BigDecimal.toTpe).toDescriptor, false)
+      case BigDecimalOp.ToBigInt =>
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigDecimal.toInternalName, "toBigInteger",
+          mkDescriptor()(JvmName.BigInteger.toTpe).toDescriptor, false)
+      case BigDecimalOp.ToPlainString =>
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigDecimal.toInternalName, "toPlainString",
+          mkDescriptor()(BackendType.String).toDescriptor, false)
+      case _ =>
+        throw InternalCompilerException(s"Unexpected BigDecimal unary op: '$op'.", SourceLocation.Unknown)
+    }
+  }
+
+  private def compileBigDecimalToString(exp: Expr)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    compileExpr(exp)
+    mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigDecimal.toInternalName, "toString",
+      mkDescriptor()(BackendType.String).toDescriptor, false)
+  }
+
+  private def compileBigDecimalFromString(exp: Expr, tpe: SimpleType)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    import BytecodeInstructions.*
+    val SimpleType.Tuple(elmTypes) = tpe
+    val tupleType = BackendObjType.Tuple(elmTypes.map(BackendType.toBackendType))
+
+    val tryStart = new Label()
+    val tryEnd = new Label()
+    val handlerStart = new Label()
+    val after = new Label()
+
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, JvmName.NumberFormatException.toInternalName)
+
+    mv.visitLabel(tryStart)
+    NEW(tupleType.jvmName)
+    DUP()
+    pushBool(true)
+    NEW(JvmName.BigDecimal)
+    DUP()
+    compileExpr(exp)
+    mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, JvmName.String.toInternalName, "strip",
+      mkDescriptor()(BackendType.String).toDescriptor, false)
+    INVOKESPECIAL(ClassConstants.BigDecimal.Constructor)
+    INVOKESPECIAL(tupleType.Constructor)
+    mv.visitLabel(tryEnd)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerStart)
+    POP()
+    NEW(tupleType.jvmName)
+    DUP()
+    pushBool(false)
+    mv.visitFieldInsn(org.objectweb.asm.Opcodes.GETSTATIC, JvmName.BigDecimal.toInternalName, "ZERO", JvmName.BigDecimal.toDescriptor)
+    INVOKESPECIAL(tupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(after)
+  }
+
+  private def compileBigDecimalHash(exp: Expr)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    compileExpr(exp)
+    mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigDecimal.toInternalName, "hashCode",
+      mkDescriptor()(BackendType.Int32).toDescriptor, false)
+  }
+
+  private def compileBigDecimalBinaryOp(op: BigDecimalOp, exp1: Expr, exp2: Expr)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    compileExpr(exp1)
+    compileExpr(exp2)
+    op match {
+      case BigDecimalOp.Add =>
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigDecimal.toInternalName, "add",
+          mkDescriptor(JvmName.BigDecimal.toTpe)(JvmName.BigDecimal.toTpe).toDescriptor, false)
+      case BigDecimalOp.Sub =>
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigDecimal.toInternalName, "subtract",
+          mkDescriptor(JvmName.BigDecimal.toTpe)(JvmName.BigDecimal.toTpe).toDescriptor, false)
+      case BigDecimalOp.Mul =>
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigDecimal.toInternalName, "multiply",
+          mkDescriptor(JvmName.BigDecimal.toTpe)(JvmName.BigDecimal.toTpe).toDescriptor, false)
+      case BigDecimalOp.Div =>
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigDecimal.toInternalName, "divide",
+          mkDescriptor(JvmName.BigDecimal.toTpe)(JvmName.BigDecimal.toTpe).toDescriptor, false)
+      case BigDecimalOp.Cmp =>
+        mv.visitMethodInsn(INVOKEVIRTUAL, JvmName.BigDecimal.toInternalName, "compareTo",
+          mkDescriptor(JvmName.BigDecimal.toTpe)(BackendType.Int32).toDescriptor, false)
+      case _ =>
+        throw InternalCompilerException(s"Unexpected BigDecimal binary op: '$op'.", SourceLocation.Unknown)
+    }
+  }
+
+  private def compileCodePointUnaryOp(op: CodePointOp, exp: Expr)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    compileExpr(exp)
+    op match {
+      case CodePointOp.IsLetter =>
+        mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "isLetter",
+          mkDescriptor(BackendType.Int32)(BackendType.Bool).toDescriptor, false)
+      case CodePointOp.IsDigit =>
+        mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "isDigit",
+          mkDescriptor(BackendType.Int32)(BackendType.Bool).toDescriptor, false)
+      case CodePointOp.IsLowerCase =>
+        mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "isLowerCase",
+          mkDescriptor(BackendType.Int32)(BackendType.Bool).toDescriptor, false)
+      case CodePointOp.IsUpperCase =>
+        mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "isUpperCase",
+          mkDescriptor(BackendType.Int32)(BackendType.Bool).toDescriptor, false)
+      case CodePointOp.IsTitleCase =>
+        mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "isTitleCase",
+          mkDescriptor(BackendType.Int32)(BackendType.Bool).toDescriptor, false)
+      case CodePointOp.IsWhitespace =>
+        mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "isWhitespace",
+          mkDescriptor(BackendType.Int32)(BackendType.Bool).toDescriptor, false)
+      case CodePointOp.IsAlphabetic =>
+        mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "isAlphabetic",
+          mkDescriptor(BackendType.Int32)(BackendType.Bool).toDescriptor, false)
+      case CodePointOp.IsDefined =>
+        mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "isDefined",
+          mkDescriptor(BackendType.Int32)(BackendType.Bool).toDescriptor, false)
+      case CodePointOp.IsIdeographic =>
+        mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "isIdeographic",
+          mkDescriptor(BackendType.Int32)(BackendType.Bool).toDescriptor, false)
+      case CodePointOp.IsISOControl =>
+        mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "isISOControl",
+          mkDescriptor(BackendType.Int32)(BackendType.Bool).toDescriptor, false)
+      case CodePointOp.IsMirrored =>
+        mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "isMirrored",
+          mkDescriptor(BackendType.Int32)(BackendType.Bool).toDescriptor, false)
+      case CodePointOp.ToLowerCase =>
+        mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "toLowerCase",
+          mkDescriptor(BackendType.Int32)(BackendType.Int32).toDescriptor, false)
+      case CodePointOp.ToUpperCase =>
+        mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "toUpperCase",
+          mkDescriptor(BackendType.Int32)(BackendType.Int32).toDescriptor, false)
+      case CodePointOp.ToTitleCase =>
+        mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "toTitleCase",
+          mkDescriptor(BackendType.Int32)(BackendType.Int32).toDescriptor, false)
+      case CodePointOp.GetNumericValue =>
+        mv.visitMethodInsn(INVOKESTATIC, JvmName.Character.toInternalName, "getNumericValue",
+          mkDescriptor(BackendType.Int32)(BackendType.Int32).toDescriptor, false)
+      case _ =>
+        throw InternalCompilerException(s"Unexpected CodePoint unary op: '$op'.", SourceLocation.Unknown)
+    }
+  }
+
+  private def compileCodePointGetName(exp: Expr)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    import BytecodeInstructions.*
+
+    val tryStart = new Label()
+    val tryEnd = new Label()
+    val handlerStart = new Label()
+    val after = new Label()
+
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, JvmName.Exception.toInternalName)
+
+    mv.visitLabel(tryStart)
+    compileExpr(exp)
+    mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESTATIC, JvmName.Character.toInternalName, "getName",
+      mkDescriptor(BackendType.Int32)(BackendType.String).toDescriptor, false)
+    mv.visitLabel(tryEnd)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerStart)
+    POP()
+    ACONST_NULL()
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(after)
   }
 
   /**

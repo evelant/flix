@@ -849,6 +849,108 @@ object SemanticOp {
   }
 
   /**
+    * BigDecimal operators.
+    *
+    * These operators exist to allow a portable stdlib implementation without JVM interop.
+    */
+  sealed trait BigDecimalOp extends SemanticOp
+
+  object BigDecimalOp {
+
+    /**
+      * Negation.
+      */
+    case object Neg extends BigDecimalOp with UnaryOp
+
+    /**
+      * Addition.
+      */
+    case object Add extends BigDecimalOp with BinaryOp
+
+    /**
+      * Subtraction.
+      */
+    case object Sub extends BigDecimalOp with BinaryOp
+
+    /**
+      * Multiplication.
+      */
+    case object Mul extends BigDecimalOp with BinaryOp
+
+    /**
+      * Exact division.
+      */
+    case object Div extends BigDecimalOp with BinaryOp
+
+    /**
+      * Compares two BigDecimals, returning -1, 0, or 1.
+      */
+    case object Cmp extends BigDecimalOp with BinaryOp
+
+    /**
+      * Returns the scale of the BigDecimal.
+      */
+    case object Scale extends BigDecimalOp with UnaryOp
+
+    /**
+      * Returns the precision of the BigDecimal.
+      */
+    case object Precision extends BigDecimalOp with UnaryOp
+
+    /**
+      * Rounds toward positive infinity to scale 0.
+      */
+    case object Ceil extends BigDecimalOp with UnaryOp
+
+    /**
+      * Rounds toward negative infinity to scale 0.
+      */
+    case object Floor extends BigDecimalOp with UnaryOp
+
+    /**
+      * Rounds to the nearest integer using HALF_EVEN to scale 0.
+      */
+    case object Round extends BigDecimalOp with UnaryOp
+
+    /**
+      * Converts the value to a BigInt by truncating toward zero.
+      */
+    case object ToBigInt extends BigDecimalOp with UnaryOp
+
+    /**
+      * Formats without exponent notation.
+      */
+    case object ToPlainString extends BigDecimalOp with UnaryOp
+
+  }
+
+  /**
+    * CodePoint operators.
+    *
+    * These operators exist to allow a portable stdlib implementation without JVM interop.
+    */
+  sealed trait CodePointOp extends SemanticOp
+
+  object CodePointOp {
+    case object IsLetter extends CodePointOp with UnaryOp
+    case object IsDigit extends CodePointOp with UnaryOp
+    case object IsLowerCase extends CodePointOp with UnaryOp
+    case object IsUpperCase extends CodePointOp with UnaryOp
+    case object IsTitleCase extends CodePointOp with UnaryOp
+    case object IsWhitespace extends CodePointOp with UnaryOp
+    case object IsAlphabetic extends CodePointOp with UnaryOp
+    case object IsDefined extends CodePointOp with UnaryOp
+    case object IsIdeographic extends CodePointOp with UnaryOp
+    case object IsISOControl extends CodePointOp with UnaryOp
+    case object IsMirrored extends CodePointOp with UnaryOp
+    case object ToLowerCase extends CodePointOp with UnaryOp
+    case object ToUpperCase extends CodePointOp with UnaryOp
+    case object ToTitleCase extends CodePointOp with UnaryOp
+    case object GetName extends CodePointOp with UnaryOp
+    case object GetNumericValue extends CodePointOp with UnaryOp
+  }
+
+  /**
     * String Operators.
     */
   sealed trait StringOp extends SemanticOp
@@ -930,6 +1032,11 @@ object SemanticOp {
       * Parses the given string as a BigInt, returning (success, value).
       */
     case object BigIntFromString extends ParseOp with UnaryOp
+
+    /**
+      * Parses the given string as a BigDecimal, returning (success, value).
+      */
+    case object BigDecimalFromString extends ParseOp with UnaryOp
 
     /**
       * Parses the given (radix, string) tuple as an Int32, returning (success, value).
@@ -1173,6 +1280,8 @@ object SemanticOp {
     case object Int64ToString extends ToStringOp with UnaryOp
 
     case object BigIntToString extends ToStringOp with UnaryOp
+
+    case object BigDecimalToString extends ToStringOp with UnaryOp
 
   }
 
@@ -1567,6 +1676,8 @@ object SemanticOp {
     case object Int64Hash extends HashOp with UnaryOp
 
     case object BigIntHash extends HashOp with UnaryOp
+
+    case object BigDecimalHash extends HashOp with UnaryOp
 
     case object StringHash extends HashOp with UnaryOp
 

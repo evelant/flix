@@ -107,6 +107,48 @@ class PortableStdlibLlvmWasmRuntimeSuite extends AnyFunSuite {
     }
   }
 
+  test("portable-unicode-print-llvm-wasm") {
+    assume(hasZig, "zig not found on PATH (skipping LLVM-wasm unicode print test)")
+    assume(hasWasmTools, "wasm-tools not found on PATH (skipping LLVM-wasm unicode print test)")
+    assume(hasJco, "jco not found on PATH (skipping LLVM-wasm unicode print test)")
+    assume(hasNode, "node not found on PATH (skipping LLVM-wasm unicode print test)")
+
+    val driverFile = Files.createTempFile("flix-portable-llvm-wasm-unicode-print-", ".flix")
+    val outDir = Files.createTempDirectory("flix-llvm-wasm-unicode-print-")
+    val sandboxDir = Files.createTempDirectory("flix-llvm-wasm-unicode-print-sandbox-")
+    try {
+      Files.writeString(driverFile, unicodePrintDriverSource, StandardCharsets.UTF_8)
+
+      val flix = new Flix()
+      flix.setOptions(TestOptions.copy(outputPath = outDir))
+      implicit val sctx: SecurityContext = SecurityContext.Unrestricted
+
+      flix.addFile(driverFile)
+
+      val (optRoot, errors) = flix.check()
+      if (errors.nonEmpty) {
+        fail(CompilationMessage.formatAll(errors)(flix.getFormatter, optRoot))
+      }
+
+      flix.codeGen(optRoot.get)
+
+      val componentJs = outDir.resolve("llvm").resolve("wasm").resolve("js").resolve("flix-llvm-wasm.component.js")
+      val exportsManifest = outDir.resolve("llvm").resolve("flix_wasm_exports.json")
+
+      val (exit, output) = runNode(componentJs, exportsManifest, sandboxDir)
+      if (exit != 0) {
+        fail(s"LLVM-wasm unicode print driver failed with exit $exit:\n$output")
+      }
+      if (output.trim != "Weather: 12.5°C") {
+        fail(s"Expected UTF-8 console output, but got:\n$output")
+      }
+    } finally {
+      Files.deleteIfExists(driverFile)
+      deleteRecursive(outDir)
+      deleteRecursive(sandboxDir)
+    }
+  }
+
   private def mkPortableDriverSource(): String = {
     val flix = new Flix()
     flix.setOptions(TestOptions)
@@ -184,4 +226,10 @@ class PortableStdlibLlvmWasmRuntimeSuite extends AnyFunSuite {
       stream.close()
     }
   }
+
+  private val unicodePrintDriverSource: String =
+    """
+      |def main(): Unit \ IO =
+      |    println("Weather: 12.5°C")
+      |""".stripMargin
 }

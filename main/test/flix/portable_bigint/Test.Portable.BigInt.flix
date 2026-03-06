@@ -1,5 +1,8 @@
 mod Test.Portable.BigInt {
 
+    def assertTrue(cond: Bool, msg: String): Unit =
+        if (cond) () else bug!(msg)
+
     @Test
     def fromStringOk01(): Unit =
         match BigInt.fromString("  +123  ") {
@@ -24,8 +27,7 @@ mod Test.Portable.BigInt {
     @Test
     def toStringRoundtrip01(): Unit = {
         let x = BigInt.leftShift(1ii, 64i32);
-        if (BigInt.toString(x) != "18446744073709551616")
-            bug!("unexpected BigInt.toString output.");
+        let _ = assertTrue(BigInt.toString(x) == "18446744073709551616", "unexpected BigInt.toString output.");
         match BigInt.fromString(BigInt.toString(x)) {
             case Some(y) if y == x => ()
             case _ => bug!("expected BigInt roundtrip to succeed.")
@@ -34,63 +36,63 @@ mod Test.Portable.BigInt {
 
     @Test
     def arith01(): Unit = {
-        if (1ii + 2ii != 3ii) bug!("add failed.");
-        if (10ii - 3ii != 7ii) bug!("sub failed.");
-        if (7ii * 6ii != 42ii) bug!("mul failed.");
+        let _ = assertTrue(1ii + 2ii == 3ii, "add failed.");
+        let _ = assertTrue(10ii - 3ii == 7ii, "sub failed.");
+        let _ = assertTrue(7ii * 6ii == 42ii, "mul failed.");
         ()
     }
 
     @Test
     def divRem01(): Unit = {
-        if (10ii / 3ii != 3ii) bug!("div failed.");
-        if (BigInt.remainder(10ii, 3ii) != 1ii) bug!("rem failed.");
+        let _ = assertTrue(10ii / 3ii == 3ii, "div failed.");
+        let _ = assertTrue(BigInt.remainder(10ii, 3ii) == 1ii, "rem failed.");
 
-        if (-7ii / 3ii != -2ii) bug!("neg div failed.");
-        if (BigInt.remainder(-7ii, 3ii) != -1ii) bug!("neg rem failed.");
+        let _ = assertTrue(-7ii / 3ii == -2ii, "neg div failed.");
+        let _ = assertTrue(BigInt.remainder(-7ii, 3ii) == -1ii, "neg rem failed.");
 
-        if (7ii / -3ii != -2ii) bug!("neg divisor div failed.");
-        if (BigInt.remainder(7ii, -3ii) != 1ii) bug!("neg divisor rem failed.");
+        let _ = assertTrue(7ii / -3ii == -2ii, "neg divisor div failed.");
+        let _ = assertTrue(BigInt.remainder(7ii, -3ii) == 1ii, "neg divisor rem failed.");
         ()
     }
 
     @Test
     def shift01(): Unit = {
-        if (BigInt.leftShift(1ii, 32i32) != 4294967296ii) bug!("shl failed.");
-        if (BigInt.leftShift(1ii, -1i32) != 0ii) bug!("shl negative failed.");
-        if (BigInt.rightShift(1ii, -1i32) != 2ii) bug!("shr negative failed.");
-        if (BigInt.rightShift(-1ii, 1i32) != -1ii) bug!("shr sign-ext failed.");
+        let _ = assertTrue(BigInt.leftShift(1ii, 32i32) == 4294967296ii, "shl failed.");
+        let _ = assertTrue(BigInt.leftShift(1ii, -1i32) == 0ii, "shl negative failed.");
+        let _ = assertTrue(BigInt.rightShift(1ii, -1i32) == 2ii, "shr negative failed.");
+        let _ = assertTrue(BigInt.rightShift(-1ii, 1i32) == -1ii, "shr sign-ext failed.");
         ()
     }
 
     @Test
     def bitwise01(): Unit = {
-        if (BigInt.bitwiseNot(0ii) != -1ii) bug!("not failed.");
-        if (BigInt.bitwiseNot(-1ii) != 0ii) bug!("not -1 failed.");
-        if (BigInt.bitwiseAnd(-1ii, 255ii) != 255ii) bug!("and failed.");
-        if (BigInt.bitwiseOr(1ii, 2ii) != 3ii) bug!("or failed.");
-        if (BigInt.bitwiseXor(1ii, 3ii) != 2ii) bug!("xor failed.");
+        let _ = assertTrue(BigInt.bitwiseNot(0ii) == -1ii, "not failed.");
+        let _ = assertTrue(BigInt.bitwiseNot(-1ii) == 0ii, "not -1 failed.");
+        let _ = assertTrue(BigInt.bitwiseAnd(-1ii, 255ii) == 255ii, "and failed.");
+        let _ = assertTrue(BigInt.bitwiseOr(1ii, 2ii) == 3ii, "or failed.");
+        let _ = assertTrue(BigInt.bitwiseXor(1ii, 3ii) == 2ii, "xor failed.");
         ()
     }
 
     @Test
     def bitLength01(): Unit = {
-        if (BigInt.log2(0ii) != 0i32) bug!("bitLength(0) failed.");
-        if (BigInt.log2(1ii) != 1i32) bug!("bitLength(1) failed.");
-        if (BigInt.log2(2ii) != 2i32) bug!("bitLength(2) failed.");
-        if (BigInt.log2(-1ii) != 0i32) bug!("bitLength(-1) failed.");
-        if (BigInt.log2(-2ii) != 1i32) bug!("bitLength(-2) failed.");
-        if (BigInt.log2(-3ii) != 2i32) bug!("bitLength(-3) failed.");
-        if (BigInt.log2(BigInt.leftShift(1ii, 32i32)) != 33i32) bug!("bitLength(2^32) failed.");
+        let _ = assertTrue(BigInt.log2(0ii) == 0i32, "bitLength(0) failed.");
+        let _ = assertTrue(BigInt.log2(1ii) == 1i32, "bitLength(1) failed.");
+        let _ = assertTrue(BigInt.log2(2ii) == 2i32, "bitLength(2) failed.");
+        let _ = assertTrue(BigInt.log2(-1ii) == 0i32, "bitLength(-1) failed.");
+        let _ = assertTrue(BigInt.log2(-2ii) == 1i32, "bitLength(-2) failed.");
+        let _ = assertTrue(BigInt.log2(-3ii) == 2i32, "bitLength(-3) failed.");
+        let _ = assertTrue(BigInt.log2(BigInt.leftShift(1ii, 32i32)) == 33i32, "bitLength(2^32) failed.");
         ()
     }
 
     @Test
     def hash01(): Unit = {
-        if (Hash.hash(0ii) != 0i32) bug!("hash(0) failed.");
-        if (Hash.hash(1ii) != 1i32) bug!("hash(1) failed.");
-        if (Hash.hash(-1ii) != -1i32) bug!("hash(-1) failed.");
-        if (Hash.hash(BigInt.leftShift(1ii, 32i32)) != 31i32) bug!("hash(2^32) failed.");
-        if (Hash.hash(BigInt.leftShift(1ii, 64i32)) != 961i32) bug!("hash(2^64) failed.");
+        let _ = assertTrue(Hash.hash(0ii) == 0i32, "hash(0) failed.");
+        let _ = assertTrue(Hash.hash(1ii) == 1i32, "hash(1) failed.");
+        let _ = assertTrue(Hash.hash(-1ii) == -1i32, "hash(-1) failed.");
+        let _ = assertTrue(Hash.hash(BigInt.leftShift(1ii, 32i32)) == 31i32, "hash(2^32) failed.");
+        let _ = assertTrue(Hash.hash(BigInt.leftShift(1ii, 64i32)) == 961i32, "hash(2^64) failed.");
         ()
     }
 
@@ -109,4 +111,3 @@ mod Test.Portable.BigInt {
     }
 
 }
-

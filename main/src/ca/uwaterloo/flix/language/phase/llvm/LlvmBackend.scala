@@ -147,6 +147,23 @@ object LlvmBackend {
         Decl.DeclareFun(Type.I32, "flix_bigint_cmp", List(Type.Ptr, Type.Ptr, Type.Ptr)),
         Decl.DeclareFun(Type.I32, "flix_bigint_bit_length", List(Type.Ptr, Type.Ptr)),
         Decl.DeclareFun(Type.I32, "flix_bigint_hash", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigdec_from_string", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigdec_try_parse", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigdec_to_string", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigdec_to_plain_string", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigdec_neg", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigdec_add", List(Type.Ptr, Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigdec_sub", List(Type.Ptr, Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigdec_mul", List(Type.Ptr, Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigdec_div", List(Type.Ptr, Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.I32, "flix_bigdec_cmp", List(Type.Ptr, Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.I32, "flix_bigdec_hash", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.I32, "flix_bigdec_scale", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.I32, "flix_bigdec_precision", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigdec_ceil", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigdec_floor", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigdec_round", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_bigdec_to_bigint", List(Type.Ptr, Type.Ptr)),
         Decl.DeclareFun(Type.I32, "flix_char_to_lower_case", List(Type.I32)),
         Decl.DeclareFun(Type.I32, "flix_char_to_upper_case", List(Type.I32)),
         Decl.DeclareFun(Type.I32, "flix_char_to_title_case", List(Type.I32)),
@@ -165,6 +182,22 @@ object LlvmBackend {
         Decl.DeclareFun(Type.I32, "flix_char_to_code_point", List(Type.I32, Type.I32)),
         Decl.DeclareFun(Type.I32, "flix_char_get_numeric_value", List(Type.I32)),
         Decl.DeclareFun(Type.I32, "flix_char_digit", List(Type.I32, Type.I32)),
+        Decl.DeclareFun(Type.I1, "flix_codepoint_is_letter", List(Type.I32)),
+        Decl.DeclareFun(Type.I1, "flix_codepoint_is_digit", List(Type.I32)),
+        Decl.DeclareFun(Type.I1, "flix_codepoint_is_lower_case", List(Type.I32)),
+        Decl.DeclareFun(Type.I1, "flix_codepoint_is_upper_case", List(Type.I32)),
+        Decl.DeclareFun(Type.I1, "flix_codepoint_is_title_case", List(Type.I32)),
+        Decl.DeclareFun(Type.I1, "flix_codepoint_is_whitespace", List(Type.I32)),
+        Decl.DeclareFun(Type.I1, "flix_codepoint_is_alphabetic", List(Type.I32)),
+        Decl.DeclareFun(Type.I1, "flix_codepoint_is_defined", List(Type.I32)),
+        Decl.DeclareFun(Type.I1, "flix_codepoint_is_ideographic", List(Type.I32)),
+        Decl.DeclareFun(Type.I1, "flix_codepoint_is_iso_control", List(Type.I32)),
+        Decl.DeclareFun(Type.I1, "flix_codepoint_is_mirrored", List(Type.I32)),
+        Decl.DeclareFun(Type.I32, "flix_codepoint_to_lower_case", List(Type.I32)),
+        Decl.DeclareFun(Type.I32, "flix_codepoint_to_upper_case", List(Type.I32)),
+        Decl.DeclareFun(Type.I32, "flix_codepoint_to_title_case", List(Type.I32)),
+        Decl.DeclareFun(Type.Ptr, "flix_codepoint_get_name", List(Type.Ptr, Type.I32)),
+        Decl.DeclareFun(Type.I32, "flix_codepoint_get_numeric_value", List(Type.I32)),
         Decl.DeclareFun(Type.Ptr, "flix_string_to_lower_case", List(Type.Ptr, Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_string_to_upper_case", List(Type.Ptr, Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_regex_compile", List(Type.Ptr)),
@@ -292,6 +325,7 @@ object LlvmBackend {
         Decl.DeclareFun(Type.Void, "flix_gc_pop_roots", List(Type.Ptr, Type.I64)),
         Decl.DeclareFun(Type.Void, "flix_gc_pollcheck", List(Type.Ptr)),
         Decl.DeclareFun(Type.Void, "flix_trace_ptr_array", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Void, "flix_trace_bigdecimal", List(Type.Ptr, Type.Ptr)),
         Decl.DeclareFun(Type.Void, "flix_trace_handler", List(Type.Ptr, Type.Ptr)),
         Decl.DeclareFun(Type.Void, "flix_trace_suspension", List(Type.Ptr, Type.Ptr)),
         Decl.DeclareFun(Type.I1, "flix_cancel_requested", List(Type.Ptr)),
@@ -419,6 +453,19 @@ object LlvmBackend {
           sizeBytes = 0L,
           ptrOffs = Nil,
           trace = None,
+          invoke = None,
+          apply = None,
+          copy = None
+        )
+      )
+
+      val bigDecimalSpecs = List(
+        TypeInfoSpec(
+          name = LlvmNames.bigDecimalTypeInfoName,
+          ptrOffsName = s"${LlvmNames.bigDecimalTypeInfoName}_ptr_offs",
+          sizeBytes = 0L,
+          ptrOffs = Nil,
+          trace = Some("flix_trace_bigdecimal"),
           invoke = None,
           apply = None,
           copy = None
@@ -640,7 +687,7 @@ object LlvmBackend {
           )
         }
 
-	      val typeInfoSpecs = (arraySpecs ::: stringSpecs ::: bigIntSpecs ::: effectInternalSpecs ::: closureSpecs ::: thunkSpecs ::: kSpecs ::: thunkApplyCloSpecs ::: lazySpecs ::: tupleSpecs ::: tagSpecs ::: structSpecs ::: recordSpecs ::: frameSpecs).sortBy(_.name)
+	      val typeInfoSpecs = (arraySpecs ::: stringSpecs ::: bigIntSpecs ::: bigDecimalSpecs ::: effectInternalSpecs ::: closureSpecs ::: thunkSpecs ::: kSpecs ::: thunkApplyCloSpecs ::: lazySpecs ::: tupleSpecs ::: tagSpecs ::: structSpecs ::: recordSpecs ::: frameSpecs).sortBy(_.name)
 
       val ptrOffsGlobals = typeInfoSpecs.collect {
         case spec if spec.ptrOffs.nonEmpty =>
@@ -693,6 +740,7 @@ object LlvmBackend {
               spec.name == LlvmNames.arrayPtrTypeInfoName ||
               spec.name == LlvmNames.stringTypeInfoName ||
               spec.name == LlvmNames.bigIntTypeInfoName ||
+              spec.name == LlvmNames.bigDecimalTypeInfoName ||
               spec.name == LlvmNames.handlerTypeInfoName ||
               spec.name == LlvmNames.suspensionTypeInfoName)
               LlvmIr.GlobalDef.Linkage.External
@@ -1956,6 +2004,30 @@ object LlvmBackend {
         case _ => ()
       }
 
+      def recordBackendTuple(op: AtomicOp): Unit = op match {
+        case AtomicOp.Unary(SemanticOp.ParseOp.Int8FromString) =>
+          tpes += SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int8))
+        case AtomicOp.Unary(SemanticOp.ParseOp.Int16FromString) =>
+          tpes += SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int16))
+        case AtomicOp.Unary(SemanticOp.ParseOp.Int32FromString) =>
+          tpes += SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int32))
+        case AtomicOp.Unary(SemanticOp.ParseOp.Int64FromString) =>
+          tpes += SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int64))
+        case AtomicOp.Unary(SemanticOp.ParseOp.Float32FromString) =>
+          tpes += SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Float32))
+        case AtomicOp.Unary(SemanticOp.ParseOp.Float64FromString) =>
+          tpes += SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Float64))
+        case AtomicOp.Unary(SemanticOp.ParseOp.BigIntFromString) =>
+          tpes += SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.BigInt))
+        case AtomicOp.Unary(SemanticOp.ParseOp.BigDecimalFromString) =>
+          tpes += SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.BigDecimal))
+        case AtomicOp.Unary(SemanticOp.ParseOp.Int32Parse) =>
+          tpes += SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int32))
+        case AtomicOp.Unary(SemanticOp.ParseOp.Int64Parse) =>
+          tpes += SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int64))
+        case _ => ()
+      }
+
       def visitExp(e: Expr): Unit = e match {
         case Expr.Cst(_, _) => record(e.tpe)
         case Expr.Var(_, _, _) => record(e.tpe)
@@ -1984,8 +2056,9 @@ object LlvmBackend {
         case Expr.JumpTo(_, _, _, _) =>
           record(e.tpe)
 
-        case Expr.ApplyAtomic(_, exps, _, _, _, _) =>
+        case Expr.ApplyAtomic(op, exps, _, _, _, _) =>
           record(e.tpe)
+          recordBackendTuple(op)
           exps.foreach(visitExp)
 
         case Expr.ApplyClo(e1, e2, _, _, _, _, _) =>
@@ -4799,6 +4872,12 @@ object LlvmBackend {
             tmp
         }
 
+      case Constant.BigDecimal(lit) =>
+        val strPtr = emitConstant(Constant.Str(lit.toString), ctxPtr, fb)
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigdec_from_string", List(ctxPtr, strPtr)))
+        tmp
+
       case Constant.Float32(lit) =>
         Value.Float32Const(java.lang.Float.floatToRawIntBits(lit))
 
@@ -6190,6 +6269,134 @@ object LlvmBackend {
         fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigint_from_i64", List(ctxPtr, castValue(x, Type.I64, fb))))
         tmp
 
+      case SemanticOp.BigDecimalOp.Neg =>
+        val tmp = freshTmp(Type.Ptr)
+        val bigdecPtr = castValue(x, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigdec_neg", List(ctxPtr, bigdecPtr)))
+        tmp
+
+      case SemanticOp.BigDecimalOp.Scale =>
+        val tmp = freshTmp(Type.I32)
+        val bigdecPtr = castValue(x, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.I32, "flix_bigdec_scale", List(ctxPtr, bigdecPtr)))
+        tmp
+
+      case SemanticOp.BigDecimalOp.Precision =>
+        val tmp = freshTmp(Type.I32)
+        val bigdecPtr = castValue(x, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.I32, "flix_bigdec_precision", List(ctxPtr, bigdecPtr)))
+        tmp
+
+      case SemanticOp.BigDecimalOp.Ceil =>
+        val tmp = freshTmp(Type.Ptr)
+        val bigdecPtr = castValue(x, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigdec_ceil", List(ctxPtr, bigdecPtr)))
+        tmp
+
+      case SemanticOp.BigDecimalOp.Floor =>
+        val tmp = freshTmp(Type.Ptr)
+        val bigdecPtr = castValue(x, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigdec_floor", List(ctxPtr, bigdecPtr)))
+        tmp
+
+      case SemanticOp.BigDecimalOp.Round =>
+        val tmp = freshTmp(Type.Ptr)
+        val bigdecPtr = castValue(x, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigdec_round", List(ctxPtr, bigdecPtr)))
+        tmp
+
+      case SemanticOp.BigDecimalOp.ToBigInt =>
+        val tmp = freshTmp(Type.Ptr)
+        val bigdecPtr = castValue(x, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigdec_to_bigint", List(ctxPtr, bigdecPtr)))
+        tmp
+
+      case SemanticOp.BigDecimalOp.ToPlainString =>
+        val tmp = freshTmp(Type.Ptr)
+        val bigdecPtr = castValue(x, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigdec_to_plain_string", List(ctxPtr, bigdecPtr)))
+        tmp
+
+      case SemanticOp.CodePointOp.IsLetter =>
+        val tmp = freshTmp(Type.I1)
+        fb.current.emitAssign(tmp, Op.Call(Type.I1, "flix_codepoint_is_letter", List(castValue(x, Type.I32, fb))))
+        tmp
+
+      case SemanticOp.CodePointOp.IsDigit =>
+        val tmp = freshTmp(Type.I1)
+        fb.current.emitAssign(tmp, Op.Call(Type.I1, "flix_codepoint_is_digit", List(castValue(x, Type.I32, fb))))
+        tmp
+
+      case SemanticOp.CodePointOp.IsLowerCase =>
+        val tmp = freshTmp(Type.I1)
+        fb.current.emitAssign(tmp, Op.Call(Type.I1, "flix_codepoint_is_lower_case", List(castValue(x, Type.I32, fb))))
+        tmp
+
+      case SemanticOp.CodePointOp.IsUpperCase =>
+        val tmp = freshTmp(Type.I1)
+        fb.current.emitAssign(tmp, Op.Call(Type.I1, "flix_codepoint_is_upper_case", List(castValue(x, Type.I32, fb))))
+        tmp
+
+      case SemanticOp.CodePointOp.IsTitleCase =>
+        val tmp = freshTmp(Type.I1)
+        fb.current.emitAssign(tmp, Op.Call(Type.I1, "flix_codepoint_is_title_case", List(castValue(x, Type.I32, fb))))
+        tmp
+
+      case SemanticOp.CodePointOp.IsWhitespace =>
+        val tmp = freshTmp(Type.I1)
+        fb.current.emitAssign(tmp, Op.Call(Type.I1, "flix_codepoint_is_whitespace", List(castValue(x, Type.I32, fb))))
+        tmp
+
+      case SemanticOp.CodePointOp.IsAlphabetic =>
+        val tmp = freshTmp(Type.I1)
+        fb.current.emitAssign(tmp, Op.Call(Type.I1, "flix_codepoint_is_alphabetic", List(castValue(x, Type.I32, fb))))
+        tmp
+
+      case SemanticOp.CodePointOp.IsDefined =>
+        val tmp = freshTmp(Type.I1)
+        fb.current.emitAssign(tmp, Op.Call(Type.I1, "flix_codepoint_is_defined", List(castValue(x, Type.I32, fb))))
+        tmp
+
+      case SemanticOp.CodePointOp.IsIdeographic =>
+        val tmp = freshTmp(Type.I1)
+        fb.current.emitAssign(tmp, Op.Call(Type.I1, "flix_codepoint_is_ideographic", List(castValue(x, Type.I32, fb))))
+        tmp
+
+      case SemanticOp.CodePointOp.IsISOControl =>
+        val tmp = freshTmp(Type.I1)
+        fb.current.emitAssign(tmp, Op.Call(Type.I1, "flix_codepoint_is_iso_control", List(castValue(x, Type.I32, fb))))
+        tmp
+
+      case SemanticOp.CodePointOp.IsMirrored =>
+        val tmp = freshTmp(Type.I1)
+        fb.current.emitAssign(tmp, Op.Call(Type.I1, "flix_codepoint_is_mirrored", List(castValue(x, Type.I32, fb))))
+        tmp
+
+      case SemanticOp.CodePointOp.ToLowerCase =>
+        val tmp = freshTmp(Type.I32)
+        fb.current.emitAssign(tmp, Op.Call(Type.I32, "flix_codepoint_to_lower_case", List(castValue(x, Type.I32, fb))))
+        tmp
+
+      case SemanticOp.CodePointOp.ToUpperCase =>
+        val tmp = freshTmp(Type.I32)
+        fb.current.emitAssign(tmp, Op.Call(Type.I32, "flix_codepoint_to_upper_case", List(castValue(x, Type.I32, fb))))
+        tmp
+
+      case SemanticOp.CodePointOp.ToTitleCase =>
+        val tmp = freshTmp(Type.I32)
+        fb.current.emitAssign(tmp, Op.Call(Type.I32, "flix_codepoint_to_title_case", List(castValue(x, Type.I32, fb))))
+        tmp
+
+      case SemanticOp.CodePointOp.GetName =>
+        val tmp = freshTmp(Type.Ptr)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_codepoint_get_name", List(ctxPtr, castValue(x, Type.I32, fb))))
+        tmp
+
+      case SemanticOp.CodePointOp.GetNumericValue =>
+        val tmp = freshTmp(Type.I32)
+        fb.current.emitAssign(tmp, Op.Call(Type.I32, "flix_codepoint_get_numeric_value", List(castValue(x, Type.I32, fb))))
+        tmp
+
       case SemanticOp.Float64Op.Neg =>
         val bits = freshTmp(Type.I64)
         fb.current.emitAssign(bits, Op.Cast("bitcast", Type.I64, x))
@@ -6584,6 +6791,12 @@ object LlvmBackend {
         fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigint_to_string", List(ctxPtr, bigintPtr)))
         tmp
 
+      case SemanticOp.ToStringOp.BigDecimalToString =>
+        val tmp = freshTmp(Type.Ptr)
+        val bigdecPtr = castValue(x, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigdec_to_string", List(ctxPtr, bigdecPtr)))
+        tmp
+
       case SemanticOp.ToStringOp.Float32ToString =>
         val tmp = freshTmp(Type.Ptr)
         fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_float32_to_string", List(x)))
@@ -6673,6 +6886,47 @@ object LlvmBackend {
         fb.current.emitAssign(zeroPtr, Op.Call(Type.Ptr, "flix_bigint_from_i64", List(ctxPtr, Value.IntConst(0L, Type.I64))))
         val failPayload = Value.IntConst(0L, Type.I64)
         val zeroPayload = boxToI64(zeroPtr, SimpleType.BigInt, fb)
+        val failTuple = allocTuple2(tupleTpe, failPayload, zeroPayload, ctxPtr, fb)
+        fb.current.setTerminator(Terminator.Br(endLabel))
+        incomings.addOne((failTuple, failLabel))
+
+        val endBlock = fb.newBlock(endLabel)
+        fb.setCurrent(endBlock)
+        val phi = freshTmp(Type.Ptr)
+        endBlock.emitPhi(phi, incomings.toList)
+        phi
+
+      case SemanticOp.ParseOp.BigDecimalFromString =>
+        val strPtr = castValue(x, Type.Ptr, fb)
+        val parsedPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(parsedPtr, Op.Call(Type.Ptr, "flix_bigdec_try_parse", List(ctxPtr, strPtr)))
+
+        val ok = freshTmp(Type.I1)
+        fb.current.emitAssign(ok, Op.ICmp("ne", parsedPtr, Value.Null(Type.Ptr)))
+
+        val okLabel = freshLabel("parsebigdec_ok")
+        val failLabel = freshLabel("parsebigdec_fail")
+        val endLabel = freshLabel("parsebigdec_end")
+        fb.current.setTerminator(Terminator.CondBr(ok, okLabel, failLabel))
+
+        val incomings = mutable.ArrayBuffer.empty[(Value, String)]
+        val tupleTpe = SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.BigDecimal))
+
+        val okBlock = fb.newBlock(okLabel)
+        fb.setCurrent(okBlock)
+        val okPayload = Value.IntConst(1L, Type.I64)
+        val valuePayload = boxToI64(parsedPtr, SimpleType.BigDecimal, fb)
+        val okTuple = allocTuple2(tupleTpe, okPayload, valuePayload, ctxPtr, fb)
+        fb.current.setTerminator(Terminator.Br(endLabel))
+        incomings.addOne((okTuple, okLabel))
+
+        val failBlock = fb.newBlock(failLabel)
+        fb.setCurrent(failBlock)
+        val zeroStr = emitConstant(Constant.Str("0"), ctxPtr, fb)
+        val zeroPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(zeroPtr, Op.Call(Type.Ptr, "flix_bigdec_from_string", List(ctxPtr, zeroStr)))
+        val failPayload = Value.IntConst(0L, Type.I64)
+        val zeroPayload = boxToI64(zeroPtr, SimpleType.BigDecimal, fb)
         val failTuple = allocTuple2(tupleTpe, failPayload, zeroPayload, ctxPtr, fb)
         fb.current.setTerminator(Terminator.Br(endLabel))
         incomings.addOne((failTuple, failLabel))
@@ -6802,6 +7056,12 @@ object LlvmBackend {
         val tmp = freshTmp(Type.I32)
         val bigintPtr = castValue(x, Type.Ptr, fb)
         fb.current.emitAssign(tmp, Op.Call(Type.I32, "flix_bigint_hash", List(ctxPtr, bigintPtr)))
+        tmp
+
+      case SemanticOp.HashOp.BigDecimalHash =>
+        val tmp = freshTmp(Type.I32)
+        val bigdecPtr = castValue(x, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.I32, "flix_bigdec_hash", List(ctxPtr, bigdecPtr)))
         tmp
 
       case SemanticOp.HashOp.StringHash =>
@@ -9169,6 +9429,41 @@ object LlvmBackend {
         fb.current.emitAssign(tmp, Op.Call(Type.I32, "flix_bigint_cmp", List(ctxPtr, aPtr, bPtr)))
         tmp
 
+      case SemanticOp.BigDecimalOp.Add =>
+        val tmp = freshTmp(Type.Ptr)
+        val aPtr = castValue(a, Type.Ptr, fb)
+        val bPtr = castValue(b, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigdec_add", List(ctxPtr, aPtr, bPtr)))
+        tmp
+
+      case SemanticOp.BigDecimalOp.Sub =>
+        val tmp = freshTmp(Type.Ptr)
+        val aPtr = castValue(a, Type.Ptr, fb)
+        val bPtr = castValue(b, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigdec_sub", List(ctxPtr, aPtr, bPtr)))
+        tmp
+
+      case SemanticOp.BigDecimalOp.Mul =>
+        val tmp = freshTmp(Type.Ptr)
+        val aPtr = castValue(a, Type.Ptr, fb)
+        val bPtr = castValue(b, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigdec_mul", List(ctxPtr, aPtr, bPtr)))
+        tmp
+
+      case SemanticOp.BigDecimalOp.Div =>
+        val tmp = freshTmp(Type.Ptr)
+        val aPtr = castValue(a, Type.Ptr, fb)
+        val bPtr = castValue(b, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.Ptr, "flix_bigdec_div", List(ctxPtr, aPtr, bPtr)))
+        tmp
+
+      case SemanticOp.BigDecimalOp.Cmp =>
+        val tmp = freshTmp(Type.I32)
+        val aPtr = castValue(a, Type.Ptr, fb)
+        val bPtr = castValue(b, Type.Ptr, fb)
+        fb.current.emitAssign(tmp, Op.Call(Type.I32, "flix_bigdec_cmp", List(ctxPtr, aPtr, bPtr)))
+        tmp
+
       case SemanticOp.Int8Op.Add =>
         val tmp = freshTmp(Type.I8)
         fb.current.emitAssign(tmp, Op.Bin("add", Type.I8, a, b))
@@ -10488,6 +10783,9 @@ object LlvmBackend {
 
     def bigIntTypeInfoName: String =
       "flix_ti_bigint"
+
+    def bigDecimalTypeInfoName: String =
+      "flix_ti_bigdecimal"
 
     def handlerTypeInfoName: String =
       "flix_ti_handler"

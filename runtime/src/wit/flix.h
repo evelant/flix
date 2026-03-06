@@ -40,6 +40,11 @@ typedef struct {
   size_t len;
 } flix_list_u8_t;
 
+typedef struct {
+  flix_string_t *ptr;
+  size_t len;
+} flix_list_string_t;
+
 typedef struct exports_flix_runtime_runtime_own_ctx_t {
   int32_t __handle;
 } exports_flix_runtime_runtime_own_ctx_t;
@@ -266,11 +271,6 @@ typedef struct exports_flix_runtime_runtime_process_env_var_t {
 } exports_flix_runtime_runtime_process_env_var_t;
 
 typedef struct {
-  flix_string_t *ptr;
-  size_t len;
-} flix_list_string_t;
-
-typedef struct {
   exports_flix_runtime_runtime_process_env_var_t *ptr;
   size_t len;
 } exports_flix_runtime_runtime_list_process_env_var_t;
@@ -491,7 +491,8 @@ typedef struct exports_flix_runtime_runtime_op_request_t {
 #define EXPORTS_FLIX_RUNTIME_RUNTIME_OP_REQUEST_TCP_SERVER_ACCEPT 41
 #define EXPORTS_FLIX_RUNTIME_RUNTIME_OP_REQUEST_TCP_SERVER_LOCAL_PORT 42
 #define EXPORTS_FLIX_RUNTIME_RUNTIME_OP_REQUEST_TCP_SERVER_CLOSE 43
-#define EXPORTS_FLIX_RUNTIME_RUNTIME_OP_REQUEST_UNKNOWN 44
+#define EXPORTS_FLIX_RUNTIME_RUNTIME_OP_REQUEST_CONSOLE_READLN 44
+#define EXPORTS_FLIX_RUNTIME_RUNTIME_OP_REQUEST_UNKNOWN 45
 
 // Task completion outcome (never suspended).
 typedef struct exports_flix_runtime_runtime_task_outcome_t {
@@ -535,6 +536,12 @@ extern void flix_sys_sys_log(flix_sys_sys_log_level_t level, flix_string_t *msg)
 extern int64_t flix_sys_sys_time_now_ms(void);
 // Return `len` random bytes.
 extern void flix_sys_sys_random_bytes(uint32_t len, flix_list_u8_t *ret);
+// Return the host-provided program arguments.
+// 
+// This mirrors `Env.getArgs` semantics: it must not include the program name.
+// 
+// Hosts may return an empty list when arguments are not meaningful (e.g. browsers).
+extern void flix_sys_sys_get_args(flix_list_string_t *ret);
 extern bool flix_sys_sys_has_capability(flix_sys_sys_capability_t cap);
 
 // Exported Functions from `flix:runtime/runtime@0.1.0`
@@ -548,6 +555,7 @@ void exports_flix_runtime_runtime_suspension_request(exports_flix_runtime_runtim
 void exports_flix_runtime_runtime_resume_ok(exports_flix_runtime_runtime_borrow_ctx_t ctx, exports_flix_runtime_runtime_own_suspension_t s, exports_flix_runtime_runtime_borrow_value_t v);
 void exports_flix_runtime_runtime_resume_throw(exports_flix_runtime_runtime_borrow_ctx_t ctx, exports_flix_runtime_runtime_own_suspension_t s, exports_flix_runtime_runtime_borrow_value_t e);
 void exports_flix_runtime_runtime_resume_timer_sleep(exports_flix_runtime_runtime_borrow_ctx_t ctx, exports_flix_runtime_runtime_own_suspension_t s);
+void exports_flix_runtime_runtime_resume_console_readln_ok(exports_flix_runtime_runtime_borrow_ctx_t ctx, exports_flix_runtime_runtime_own_suspension_t s, flix_string_t *line);
 void exports_flix_runtime_runtime_resume_http_ok(exports_flix_runtime_runtime_borrow_ctx_t ctx, exports_flix_runtime_runtime_own_suspension_t s, exports_flix_runtime_runtime_http_response_t *resp);
 void exports_flix_runtime_runtime_resume_http_err(exports_flix_runtime_runtime_borrow_ctx_t ctx, exports_flix_runtime_runtime_own_suspension_t s, exports_flix_runtime_runtime_io_error_t *err_);
 void exports_flix_runtime_runtime_resume_file_exists_ok(exports_flix_runtime_runtime_borrow_ctx_t ctx, exports_flix_runtime_runtime_own_suspension_t s, bool exists);
@@ -645,6 +653,8 @@ void exports_flix_runtime_runtime_unbox_string(exports_flix_runtime_runtime_borr
 
 void flix_list_u8_free(flix_list_u8_t *ptr);
 
+void flix_list_string_free(flix_list_string_t *ptr);
+
 extern void exports_flix_runtime_runtime_ctx_drop_own(exports_flix_runtime_runtime_own_ctx_t handle);
 
 extern exports_flix_runtime_runtime_own_ctx_t exports_flix_runtime_runtime_ctx_new(exports_flix_runtime_runtime_ctx_t *rep);
@@ -724,8 +734,6 @@ void exports_flix_runtime_runtime_file_mkdirs_req_free(exports_flix_runtime_runt
 void exports_flix_runtime_runtime_file_mk_temp_dir_req_free(exports_flix_runtime_runtime_file_mk_temp_dir_req_t *ptr);
 
 void exports_flix_runtime_runtime_process_env_var_free(exports_flix_runtime_runtime_process_env_var_t *ptr);
-
-void flix_list_string_free(flix_list_string_t *ptr);
 
 void exports_flix_runtime_runtime_list_process_env_var_free(exports_flix_runtime_runtime_list_process_env_var_t *ptr);
 

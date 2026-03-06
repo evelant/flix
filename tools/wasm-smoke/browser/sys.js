@@ -33,6 +33,15 @@ export function randomBytes(len) {
   return bytes;
 }
 
+export function getArgs() {
+  // WIT expects `list<string>`, lifted as `string[]` by jco.
+  //
+  // Smoke harness: default to no args.
+  const args = globalThis.__flix_args;
+  if (Array.isArray(args)) return args.map((x) => String(x));
+  return [];
+}
+
 export function hasCapability(cap) {
   // `cap` is a WIT enum lifted as a string (e.g. "http").
   //

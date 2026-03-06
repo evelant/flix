@@ -279,6 +279,66 @@ object ConstraintGen {
           val resEff = eff
           (resTpe, resEff)
 
+        case SemanticOp.BigDecimalOp.Neg | SemanticOp.BigDecimalOp.Ceil | SemanticOp.BigDecimalOp.Floor | SemanticOp.BigDecimalOp.Round =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.BigDecimal, actual = tpe, exp.loc)
+          c.unifyType(Type.BigDecimal, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.BigDecimalOp.Scale | SemanticOp.BigDecimalOp.Precision =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.BigDecimal, actual = tpe, exp.loc)
+          c.unifyType(Type.Int32, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.BigDecimalOp.ToBigInt =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.BigDecimal, actual = tpe, exp.loc)
+          c.unifyType(Type.BigInt, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.BigDecimalOp.ToPlainString =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.BigDecimal, actual = tpe, exp.loc)
+          c.unifyType(Type.Str, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.CodePointOp.IsLetter | SemanticOp.CodePointOp.IsDigit | SemanticOp.CodePointOp.IsLowerCase |
+             SemanticOp.CodePointOp.IsUpperCase | SemanticOp.CodePointOp.IsTitleCase | SemanticOp.CodePointOp.IsWhitespace |
+             SemanticOp.CodePointOp.IsAlphabetic | SemanticOp.CodePointOp.IsDefined | SemanticOp.CodePointOp.IsIdeographic |
+             SemanticOp.CodePointOp.IsISOControl | SemanticOp.CodePointOp.IsMirrored =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Int32, actual = tpe, exp.loc)
+          c.unifyType(Type.Bool, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.CodePointOp.ToLowerCase | SemanticOp.CodePointOp.ToUpperCase | SemanticOp.CodePointOp.ToTitleCase |
+             SemanticOp.CodePointOp.GetNumericValue =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Int32, actual = tpe, exp.loc)
+          c.unifyType(Type.Int32, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.CodePointOp.GetName =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Int32, actual = tpe, exp.loc)
+          c.unifyType(Type.Str, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
         case SemanticOp.ToStringOp.CharToString =>
           val (tpe, eff) = visitExp(exp)
           c.expectType(expected = Type.Char, actual = tpe, exp.loc)
@@ -338,6 +398,14 @@ object ConstraintGen {
         case SemanticOp.ToStringOp.BigIntToString =>
           val (tpe, eff) = visitExp(exp)
           c.expectType(expected = Type.BigInt, actual = tpe, exp.loc)
+          c.unifyType(Type.Str, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.ToStringOp.BigDecimalToString =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.BigDecimal, actual = tpe, exp.loc)
           c.unifyType(Type.Str, tvar, exp.loc)
           val resTpe = tvar
           val resEff = eff
@@ -483,6 +551,14 @@ object ConstraintGen {
           val (tpe, eff) = visitExp(exp)
           c.expectType(expected = Type.Str, actual = tpe, exp.loc)
           c.unifyType(Type.mkTuple(List(Type.Bool, Type.BigInt), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.ParseOp.BigDecimalFromString =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.Str, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.BigDecimal), exp.loc), tvar, exp.loc)
           val resTpe = tvar
           val resEff = eff
           (resTpe, resEff)
@@ -834,6 +910,14 @@ object ConstraintGen {
         case SemanticOp.HashOp.BigIntHash =>
           val (tpe, eff) = visitExp(exp)
           c.expectType(expected = Type.BigInt, actual = tpe, exp.loc)
+          c.unifyType(Type.Int32, tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = eff
+          (resTpe, resEff)
+
+        case SemanticOp.HashOp.BigDecimalHash =>
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = Type.BigDecimal, actual = tpe, exp.loc)
           c.unifyType(Type.Int32, tvar, exp.loc)
           val resTpe = tvar
           val resEff = eff
@@ -1255,6 +1339,26 @@ object ConstraintGen {
           val (tpe2, eff2) = visitExp(exp2)
           c.expectType(expected = Type.BigInt, actual = tpe1, exp1.loc)
           c.expectType(expected = Type.BigInt, actual = tpe2, exp2.loc)
+          c.unifyType(tvar, Type.Int32, loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff1, eff2, loc)
+          (resTpe, resEff)
+
+        case SemanticOp.BigDecimalOp.Add | SemanticOp.BigDecimalOp.Sub | SemanticOp.BigDecimalOp.Mul | SemanticOp.BigDecimalOp.Div =>
+          val (tpe1, eff1) = visitExp(exp1)
+          val (tpe2, eff2) = visitExp(exp2)
+          c.expectType(expected = Type.BigDecimal, actual = tpe1, exp1.loc)
+          c.expectType(expected = Type.BigDecimal, actual = tpe2, exp2.loc)
+          c.unifyType(tvar, Type.BigDecimal, loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff1, eff2, loc)
+          (resTpe, resEff)
+
+        case SemanticOp.BigDecimalOp.Cmp =>
+          val (tpe1, eff1) = visitExp(exp1)
+          val (tpe2, eff2) = visitExp(exp2)
+          c.expectType(expected = Type.BigDecimal, actual = tpe1, exp1.loc)
+          c.expectType(expected = Type.BigDecimal, actual = tpe2, exp2.loc)
           c.unifyType(tvar, Type.Int32, loc)
           val resTpe = tvar
           val resEff = Type.mkUnion(eff1, eff2, loc)

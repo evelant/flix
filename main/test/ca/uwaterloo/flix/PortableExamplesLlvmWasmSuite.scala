@@ -36,6 +36,16 @@ import scala.jdk.CollectionConverters.*
   */
 class PortableExamplesLlvmWasmSuite extends AnyFunSuite {
 
+  private sealed trait StdoutExpectation
+
+  private object StdoutExpectation {
+    case class Exact(value: String) extends StdoutExpectation
+    case class Regex(pattern: String) extends StdoutExpectation
+    case class OneOf(values: Set[String]) extends StdoutExpectation
+  }
+
+  private case class FileExpectation(path: String, contentsNormalized: String)
+
   private val TestOptions: Options =
     Options.TestWithLibAll.copy(
       stdlibProfile = StdlibProfile.Portable,
@@ -47,53 +57,78 @@ class PortableExamplesLlvmWasmSuite extends AnyFunSuite {
   private val wasmRunnerScript: Path =
     Paths.get("tools/wasm-runner-js/run-flix.mjs").toAbsolutePath.normalize()
 
-  private case class Example(name: String, file: Path, expectedStdoutTrim: String, timeoutSeconds: Long = 25)
+  private case class Example(name: String,
+                             file: Path,
+                             stdout: StdoutExpectation,
+                             expectedFiles: List[FileExpectation] = Nil,
+                             timeoutSeconds: Long = 25)
 
   // Keep this list small and stable; add new examples intentionally as the wasm substrate grows.
   private val Examples: List[Example] = List(
     Example(
       name = "functional-adt-pattern",
       file = Paths.get("examples/functional-style/algebraic-data-types-and-pattern-matching.flix"),
-      expectedStdoutTrim = "8"
+      stdout = StdoutExpectation.Exact("8")
     ),
     Example(
       name = "functional-hof",
       file = Paths.get("examples/functional-style/higher-order-functions.flix"),
-      expectedStdoutTrim = "127"
+      stdout = StdoutExpectation.Exact("127")
     ),
     Example(
       name = "functional-pipeline",
       file = Paths.get("examples/functional-style/function-composition-pipelines-and-currying.flix"),
-      expectedStdoutTrim = "true"
+      stdout = StdoutExpectation.Exact("true")
     ),
     Example(
       name = "functional-lists",
       file = Paths.get("examples/functional-style/lists-and-list-processing.flix"),
-      expectedStdoutTrim = "22"
+      stdout = StdoutExpectation.Exact("22")
     ),
     Example(
       name = "functional-tce-mutual",
       file = Paths.get("examples/functional-style/mutual-recursion-with-full-tail-call-elimination.flix"),
-      expectedStdoutTrim = "true"
+      stdout = StdoutExpectation.Exact("true")
     ),
     Example(
       name = "modules-declaring",
       file = Paths.get("examples/modules/declaring-a-module.flix"),
-      expectedStdoutTrim = "579"
+      stdout = StdoutExpectation.Exact("579")
     ),
     Example(
       name = "records-poly-update",
       file = Paths.get("examples/records/polymorphic-record-update.flix"),
-      expectedStdoutTrim = "4"
+      stdout = StdoutExpectation.Exact("4")
     ),
     Example(
       name = "package-minimal-main",
       file = Paths.get("examples/package-manager/minimal-project/src/Main.flix"),
-      expectedStdoutTrim = "Hello World!"
+      stdout = StdoutExpectation.Exact("Hello World!")
+    ),
+    Example(
+      name = "effects-logger",
+      file = Paths.get("examples/effects-and-handlers/using-Logger.flix"),
+      stdout = StdoutExpectation.Regex("(?s).*\\[Info\\].*Hello.*\\[Warn\\].*World.*")
+    ),
+    Example(
+      name = "effects-file-write",
+      file = Paths.get("examples/effects-and-handlers/using-FileWriteWithResult.flix"),
+      stdout = StdoutExpectation.Exact(""),
+      expectedFiles = List(FileExpectation("data.txt", "Hello\nWorld\n"))
+    ),
+    Example(
+      name = "effects-collatz",
+      file = Paths.get("examples/effects-and-handlers/advanced/collatz.flix"),
+      stdout = StdoutExpectation.Exact("573 took 105 steps to go to 1")
+    ),
+    Example(
+      name = "effects-nqueens",
+      file = Paths.get("examples/effects-and-handlers/advanced/nqueens.flix"),
+      stdout = StdoutExpectation.Exact("92")
     ),
   )
 
-  for (Example(name, file, expected, timeoutSeconds) <- Examples) {
+  for (Example(name, file, stdout, expectedFiles, timeoutSeconds) <- Examples) {
     test(s"llvm-wasm-portable-example-$name") {
       assume(hasZig, "zig not found on PATH (skipping LLVM-wasm portable examples)")
       assume(hasWasmTools, "wasm-tools not found on PATH (skipping LLVM-wasm portable examples)")
@@ -113,10 +148,8 @@ class PortableExamplesLlvmWasmSuite extends AnyFunSuite {
         if (exit != 0) {
           fail(s"Example '$name' failed with exit $exit:\n$output")
         }
-        val trimmed = output.trim
-        if (trimmed != expected) {
-          fail(s"Example '$name' output mismatch.\nExpected: '$expected'\nActual:   '$trimmed'\nRaw:\n$output")
-        }
+        assertStdout(name, stdout, output)
+        assertFiles(name, sandboxDir, expectedFiles)
       } finally {
         deleteRecursive(outDir)
         deleteRecursive(sandboxDir)
@@ -206,6 +239,39 @@ class PortableExamplesLlvmWasmSuite extends AnyFunSuite {
     (p.exitValue(), output)
   }
 
+  private def assertStdout(name: String, expectation: StdoutExpectation, output: String): Unit = {
+    val trimmed = output.trim
+    expectation match {
+      case StdoutExpectation.Exact(expected) =>
+        if (trimmed != expected) {
+          fail(s"Example '$name' output mismatch.\nExpected: '$expected'\nActual:   '$trimmed'\nRaw:\n$output")
+        }
+      case StdoutExpectation.Regex(pattern) =>
+        if (!trimmed.matches(pattern)) {
+          fail(s"Example '$name' output mismatch.\nExpected regex: '$pattern'\nActual:         '$trimmed'\nRaw:\n$output")
+        }
+      case StdoutExpectation.OneOf(values) =>
+        if (!values.contains(trimmed)) {
+          fail(s"Example '$name' output mismatch.\nExpected one of: ${values.toList.sorted.mkString(", ")}\nActual:          '$trimmed'\nRaw:\n$output")
+        }
+    }
+  }
+
+  private def assertFiles(name: String, rootDir: Path, expectedFiles: List[FileExpectation]): Unit =
+    expectedFiles.foreach { expected =>
+      val file = rootDir.resolve(expected.path)
+      if (!Files.exists(file)) {
+        fail(s"Example '$name' expected file not found: $file")
+      }
+      val actual = normalizeNewlines(Files.readString(file, StandardCharsets.UTF_8))
+      if (actual != expected.contentsNormalized) {
+        fail(s"Example '$name' file content mismatch for ${expected.path}.\nExpected:\n${expected.contentsNormalized}\nActual:\n$actual")
+      }
+    }
+
+  private def normalizeNewlines(s: String): String =
+    s.replace("\r\n", "\n")
+
   private def hasZig: Boolean =
     hasCmd(List("zig", "version"))
 
@@ -238,4 +304,3 @@ class PortableExamplesLlvmWasmSuite extends AnyFunSuite {
     }
   }
 }
-
