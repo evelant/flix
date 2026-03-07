@@ -125,6 +125,31 @@ class PortableExamplesLlvmNativeSuite extends AnyFunSuite {
       file = Paths.get("examples/effects-and-handlers/advanced/nqueens.flix"),
       stdout = StdoutExpectation.Exact("92")
     ),
+    Example(
+      name = "datalog-compiler-puzzle",
+      file = Paths.get("examples/datalog/compiler-puzzle.flix"),
+      stdout = StdoutExpectation.Exact("Vector#{(C++, x86), (MiniScala, C++), (MiniScala, x86), (Scala, C++), (Scala, MiniScala), (Scala, x86)}")
+    ),
+    Example(
+      name = "datalog-graph-closure",
+      file = Paths.get("examples/datalog/graph-closure.flix"),
+      stdout = StdoutExpectation.Exact("Set#{(1, 2), (1, 3), (2, 3), (4, 5), (4, 6), (5, 6)}")
+    ),
+    Example(
+      name = "datalog-graph-cycle",
+      file = Paths.get("examples/datalog/graph-cycle.flix"),
+      stdout = StdoutExpectation.Exact("Some(Vector#{1, 2, 3, 1})")
+    ),
+    Example(
+      name = "datalog-dependency-resolution",
+      file = Paths.get("examples/datalog/dependency-resolution.flix"),
+      stdout = StdoutExpectation.Regex("(?s).*postcss@8 requires autoprefixer >= 11 \\(MISSING\\).*next@14 requires postcss >= 8.*string-formatter@1 requires left-pad >= 1 \\(MISSING\\).*next-themes@1 requires string-formatter >= 1.*")
+    ),
+    Example(
+      name = "datalog-graph-reachability",
+      file = Paths.get("examples/datalog/graph-reachability.flix"),
+      stdout = StdoutExpectation.Exact("Set#{4, 5, 6}")
+    ),
   )
 
   for (Example(name, file, stdout, expectedFiles, timeoutSeconds) <- Examples) {

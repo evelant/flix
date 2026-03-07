@@ -119,6 +119,8 @@ object LlvmBackend {
         LlvmIr.TypeDef(flixObjTypeName, objBody),
       )
 
+      val mallocSizeTpe = if (target == CompilationTarget.LlvmWasm) Type.I32 else Type.I64
+
       val decls = List(
         Decl.DeclareFun(Type.Void, "llvm.trap", Nil),
         Decl.DeclareFun(Type.Float, "llvm.pow.f32", List(Type.Float, Type.Float)),
@@ -337,7 +339,7 @@ object LlvmBackend {
         Decl.DeclareFun(Type.Ptr, "flix_alloc_flex", List(Type.Ptr, Type.Ptr, Type.I64)),
         Decl.DeclareFun(Type.Ptr, "flix_region_alloc_flex", List(Type.Ptr, Type.Ptr, Type.Ptr, Type.I64)),
         Decl.DeclareFun(flixResultType, "flix_invoke_thunk", List(Type.Ptr, Type.Ptr, Type.I64)),
-        Decl.DeclareFun(Type.Ptr, "malloc", List(Type.I64))
+        Decl.DeclareFun(Type.Ptr, "malloc", List(mallocSizeTpe))
       )
 
       // Pre-emit resumption invoke wrappers used to build continuation closures inside handler wrappers.
@@ -5377,8 +5379,9 @@ object LlvmBackend {
         val slots = 1L + payloads.length.toLong
         val sizeBytes = Value.IntConst(slots * 8L, Type.I64)
 
-        val objPtr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(objPtr, Op.Call(Type.Ptr, "malloc", List(sizeBytes)))
+	        val mallocSize = castValue(sizeBytes, if (target == CompilationTarget.LlvmWasm) Type.I32 else Type.I64, fb)
+	        val objPtr = freshTmp(Type.Ptr)
+	        fb.current.emitAssign(objPtr, Op.Call(Type.Ptr, "malloc", List(mallocSize)))
 
         val tagPtr = freshTmp(Type.Ptr)
         fb.current.emitAssign(tagPtr, Op.Gep(Type.I64, objPtr, Value.IntConst(0L, Type.I64)))
@@ -6776,8 +6779,9 @@ object LlvmBackend {
         val notBlock = fb.newBlock(notLabel)
         fb.setCurrent(notBlock)
         val s = emitIntToStringNoMin(xi64, ctxPtr, fb)
+        val sLabel = fb.current.label
         fb.current.setTerminator(Terminator.Br(endLabel))
-        incomings.addOne((s, notLabel))
+        incomings.addOne((s, sLabel))
 
         val endBlock = fb.newBlock(endLabel)
         fb.setCurrent(endBlock)

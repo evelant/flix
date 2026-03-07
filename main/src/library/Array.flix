@@ -217,10 +217,11 @@ pub mod Array {
     ///
     /// Returns `a` as a Vector.
     ///
-    pub def toVector(a: Array[a, r]): Vector[a] \ r = region rc {
-        let arr1 = copyOfRange(rc, 0, length(a), a);
-        unchecked_cast(arr1 as Vector[a])
-    }
+    pub def toVector(a: Array[a, r]): Vector[a] \ r =
+        unsafe IO as r {
+            let arr1 = copyOfRange(Static, 0, length(a), a);
+            unchecked_cast(arr1 as Vector[a])
+        }
 
     ///
     /// Returns `Some(x)` if `x` is the first element of `a`.

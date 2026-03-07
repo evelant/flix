@@ -109,6 +109,10 @@ fn wasmCAlloc(alignment_bytes: usize, size: usize) callconv(.c) ?*anyopaque {
     return aligned_ptr;
 }
 
+fn wasmMalloc(size: usize) callconv(.c) ?*anyopaque {
+    return wasmCAlloc(16, size);
+}
+
 fn wasmCFree(ptr: ?*anyopaque) callconv(.c) void {
     const p = ptr orelse return;
     const addr: usize = @intFromPtr(p);
@@ -191,7 +195,7 @@ fn wasmPowf(x: f32, y: f32) callconv(.c) f32 {
 
 comptime {
     if (is_wasm) {
-        @export(&wasmCAlloc, .{ .name = "malloc" });
+        @export(&wasmMalloc, .{ .name = "malloc" });
         @export(&wasmCFree, .{ .name = "free" });
         @export(&wasmCRealloc, .{ .name = "realloc" });
         @export(&wasmMemcpy, .{ .name = "memcpy" });

@@ -237,6 +237,7 @@ object Library {
     * They provide default handlers and implementations that do not rely on Java interop.
     */
   private val StandardLibraryPortableOverlay = List(
+    "portable/BPlusTree.flix" -> LocalResource.get("/src/library/portable/BPlusTree.flix"),
     "portable/Clock.flix" -> LocalResource.get("/src/library/portable/Clock.flix"),
     "portable/Random.flix" -> LocalResource.get("/src/library/portable/Random.flix"),
     "portable/BigDecimal.flix" -> LocalResource.get("/src/library/portable/BigDecimal.flix"),
@@ -244,6 +245,7 @@ object Library {
     "portable/CharacterSet.flix" -> LocalResource.get("/src/library/portable/CharacterSet.flix"),
     "portable/CodePoint.flix" -> LocalResource.get("/src/library/portable/CodePoint.flix"),
     "portable/DecodingReader.flix" -> LocalResource.get("/src/library/portable/DecodingReader.flix"),
+    "portable/Debug.flix" -> LocalResource.get("/src/library/portable/Debug.flix"),
     "portable/EncodingWriter.flix" -> LocalResource.get("/src/library/portable/EncodingWriter.flix"),
     "portable/Float32.flix" -> LocalResource.get("/src/library/portable/Float32.flix"),
     "portable/Float64.flix" -> LocalResource.get("/src/library/portable/Float64.flix"),
@@ -257,8 +259,44 @@ object Library {
     "portable/Int64.flix" -> LocalResource.get("/src/library/portable/Int64.flix"),
   )
 
+  private val Fixpoint3LibraryPortableOverlay = List(
+    "Fixpoint3.flix" -> LocalResource.get("/src/library/portable/Fixpoint3.flix"),
+    "Fixpoint3/Ast.flix" -> LocalResource.get("/src/library/Fixpoint3/Ast.flix"),
+    "Fixpoint3/Ast/Datalog.flix" -> LocalResource.get("/src/library/Fixpoint3/Ast/Datalog.flix"),
+    "Fixpoint3/Ast/ExecutableRam.flix" -> LocalResource.get("/src/library/Fixpoint3/Ast/ExecutableRam.flix"),
+    "Fixpoint3/Ast/Ram.flix" -> LocalResource.get("/src/library/Fixpoint3/Ast/Ram.flix"),
+    "Fixpoint3/Ast/Shared.flix" -> LocalResource.get("/src/library/Fixpoint3/Ast/Shared.flix"),
+    "Fixpoint3/Boxable.flix" -> LocalResource.get("/src/library/portable/Fixpoint3/Boxable.flix"),
+    "Fixpoint3/Boxing.flix" -> LocalResource.get("/src/library/portable/Fixpoint3/Boxing.flix"),
+    "Fixpoint3/BoxingType.flix" -> LocalResource.get("/src/library/Fixpoint3/BoxingType.flix"),
+    "Fixpoint3/Counter.flix" -> LocalResource.get("/src/library/Fixpoint3/Counter.flix"),
+    "Fixpoint3/Debugging.flix" -> LocalResource.get("/src/library/Fixpoint3/Debugging.flix"),
+    "Fixpoint3/Interpreter.flix" -> LocalResource.get("/src/library/Fixpoint3/Interpreter.flix"),
+    "Fixpoint3/Options.flix" -> LocalResource.get("/src/library/portable/Fixpoint3/Options.flix"),
+    "Fixpoint3/Phase.flix" -> LocalResource.get("/src/library/Fixpoint3/Phase.flix"),
+    "Fixpoint3/Phase/Compiler.flix" -> LocalResource.get("/src/library/Fixpoint3/Phase/Compiler.flix"),
+    "Fixpoint3/Phase/Hoisting.flix" -> LocalResource.get("/src/library/Fixpoint3/Phase/Hoisting.flix"),
+    "Fixpoint3/Phase/IndexSelection.flix" -> LocalResource.get("/src/library/Fixpoint3/Phase/IndexSelection.flix"),
+    "Fixpoint3/Phase/IndexSelection/AutomaticIndexSelection.flix" -> LocalResource.get("/src/library/Fixpoint3/Phase/IndexSelection/AutomaticIndexSelection.flix"),
+    "Fixpoint3/Phase/Lowering.flix" -> LocalResource.get("/src/library/Fixpoint3/Phase/Lowering.flix"),
+    "Fixpoint3/Phase/ProvenanceAugment.flix" -> LocalResource.get("/src/library/Fixpoint3/Phase/ProvenanceAugment.flix"),
+    "Fixpoint3/Phase/RenamePredSyms.flix" -> LocalResource.get("/src/library/Fixpoint3/Phase/RenamePredSyms.flix"),
+    "Fixpoint3/Phase/Simplifier.flix" -> LocalResource.get("/src/library/Fixpoint3/Phase/Simplifier.flix"),
+    "Fixpoint3/Phase/Stratifier.flix" -> LocalResource.get("/src/library/Fixpoint3/Phase/Stratifier.flix"),
+    "Fixpoint3/PrecedenceGraph.flix" -> LocalResource.get("/src/library/Fixpoint3/PrecedenceGraph.flix"),
+    "Fixpoint3/PrecedenceGraph/MutGraph.flix" -> LocalResource.get("/src/library/Fixpoint3/PrecedenceGraph/MutGraph.flix"),
+    "Fixpoint3/Predicate.flix" -> LocalResource.get("/src/library/Fixpoint3/Predicate.flix"),
+    "Fixpoint3/ProvenanceReconstruct.flix" -> LocalResource.get("/src/library/Fixpoint3/ProvenanceReconstruct.flix"),
+    "Fixpoint3/ProvenanceReconstruct/ProofTree.flix" -> LocalResource.get("/src/library/Fixpoint3/ProvenanceReconstruct/ProofTree.flix"),
+    "Fixpoint3/ReadWriteLock.flix" -> LocalResource.get("/src/library/portable/Fixpoint3/ReadWriteLock.flix"),
+    "Fixpoint3/Solver.flix" -> LocalResource.get("/src/library/Fixpoint3/Solver.flix"),
+    "Fixpoint3/TypeInfo.flix" -> LocalResource.get("/src/library/Fixpoint3/TypeInfo.flix"),
+    "Fixpoint3/UniqueInts.flix" -> LocalResource.get("/src/library/Fixpoint3/UniqueInts.flix"),
+    "Fixpoint3/Util.flix" -> LocalResource.get("/src/library/Fixpoint3/Util.flix"),
+  )
+
   val StandardLibraryPortable: List[(String, String)] =
-    StandardLibraryBase.filterNot { case (virtualPath, _) => StandardLibraryPortableExclude.contains(virtualPath) } ++ StandardLibraryPortableOverlay
+    StandardLibraryBase.filterNot { case (virtualPath, _) => StandardLibraryPortableExclude.contains(virtualPath) } ++ StandardLibraryPortableOverlay ++ Fixpoint3LibraryPortableOverlay
 
   /**
     * JVM-only standard overlays. These files are loaded only when the stdlib profile is `jvm`.
