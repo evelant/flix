@@ -7,14 +7,22 @@
 // - Stay minimal; higher-level op handlers live in `tools/wasm-runner-js/*-handlers.mjs`.
 
 export function log(level, msg) {
+  if (!Array.isArray(globalThis.__flix_logs)) {
+    globalThis.__flix_logs = [];
+  }
+
   // `level` is a WIT enum lifted as a string, e.g. "info".
   //
   // Keep `info` unadorned to preserve `println`-style output semantics across targets.
   // (The Flix portable stdlib currently uses `info` for user-facing console output.)
   if (level === "info") {
-    console.log(String(msg));
+    const line = String(msg);
+    globalThis.__flix_logs.push(line);
+    console.log(line);
   } else {
-    console.log(`[flix:${level}] ${msg}`);
+    const line = `[flix:${level}] ${msg}`;
+    globalThis.__flix_logs.push(line);
+    console.log(line);
   }
 }
 

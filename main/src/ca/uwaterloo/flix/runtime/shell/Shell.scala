@@ -265,7 +265,7 @@ class Shell(bootstrap: Bootstrap, options: Options) {
     w.println("  :build :b                   Builds (i.e. compiles) the current project.")
     w.println("  :build-jar :jar             Builds a jar-file from the current project.")
     w.println("  :build-fatjar :fatjar       Builds a fatjar-file from the current project.")
-    w.println("  :build-pkg :pkg             Builds a fpkg-file from the current project.")
+    w.println("  :package :pkg               Builds a fpkg-file from the current project.")
     w.println("  :release                    Publishes a release of the current project to GitHub.")
     w.println("  :check :c                   Checks the current project for errors.")
     w.println("  :doc :d                     Generates API documentation for the current project.")

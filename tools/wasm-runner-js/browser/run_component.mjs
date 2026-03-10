@@ -2,6 +2,7 @@ import { FlixRunner } from "../runner.mjs";
 import { makeOpfsFsHandlers, makeOpfsSandbox } from "../opfs-handlers.mjs";
 
 const disposeSym = Symbol.dispose ?? Symbol.for("dispose");
+const consoleLevels = ["log", "info", "warn", "error"];
 const maybeDispose = (x) => {
   try {
     const fn = x?.[disposeSym];
@@ -11,6 +12,26 @@ const maybeDispose = (x) => {
   }
 };
 
+if (!Array.isArray(globalThis.__flix_console_lines)) {
+  globalThis.__flix_console_lines = [];
+}
+
+for (const level of consoleLevels) {
+  const current = globalThis.console?.[level];
+  if (typeof current !== "function") continue;
+  if (current.__flixWrapped === true) continue;
+
+  const wrapped = (...args) => {
+    const rendered = args.map((x) => String(x)).join(" ").trim();
+    if (rendered.length > 0) {
+      globalThis.__flix_console_lines.push(level === "log" || level === "info" ? rendered : `[console:${level}] ${rendered}`);
+    }
+    return current.apply(globalThis.console, args);
+  };
+  wrapped.__flixWrapped = true;
+  globalThis.console[level] = wrapped;
+}
+
 function setStatus(msg) {
   const el = globalThis.document?.getElementById?.("status");
   if (el) el.textContent = msg;
@@ -19,6 +40,62 @@ function setStatus(msg) {
 function setOutcome(tag) {
   const root = globalThis.document?.documentElement;
   if (root) root.setAttribute("data-flix-status", tag);
+}
+
+async function ensureParentDir(rootDirHandle, parts) {
+  let dir = rootDirHandle;
+  for (const part of parts) {
+    dir = await dir.getDirectoryHandle(part, { create: true });
+  }
+  return dir;
+}
+
+async function writeSeedFile(rootDirHandle, relPath, bytes) {
+  const parts = String(relPath)
+    .replaceAll("\\", "/")
+    .split("/")
+    .filter((p) => p.length > 0 && p !== ".");
+
+  if (parts.length === 0) {
+    throw new Error(`invalid seed path: ${relPath}`);
+  }
+
+  const parent = await ensureParentDir(rootDirHandle, parts.slice(0, -1));
+  const fh = await parent.getFileHandle(parts[parts.length - 1], { create: true });
+  const w = await fh.createWritable();
+  try {
+    await w.write(bytes);
+  } finally {
+    await w.close();
+  }
+}
+
+async function preloadSeedFiles(rootDirHandle, seedUrl) {
+  const resp = await fetch(seedUrl.toString(), { redirect: "error" });
+  if (!resp.ok) {
+    throw new Error(`failed to fetch browser seed manifest: ${resp.status}`);
+  }
+
+  const json = await resp.json();
+  if (json?.schema !== "flix-browser-seed-v0") {
+    throw new Error(`unsupported browser seed manifest schema: ${json?.schema ?? "<missing>"}`);
+  }
+
+  const files = Array.isArray(json.files) ? json.files : [];
+  for (const entry of files) {
+    const relPath = typeof entry?.path === "string" ? entry.path : "";
+    const url = typeof entry?.url === "string" ? entry.url : "";
+    if (relPath.length === 0 || url.length === 0) {
+      throw new Error("invalid browser seed manifest entry");
+    }
+
+    const fileResp = await fetch(new URL(url, seedUrl), { redirect: "error" });
+    if (!fileResp.ok) {
+      throw new Error(`failed to fetch seeded file '${relPath}': ${fileResp.status}`);
+    }
+    const bytes = new Uint8Array(await fileResp.arrayBuffer());
+    await writeSeedFile(rootDirHandle, relPath, bytes);
+  }
 }
 
 function parseU32Param(params, name, fallback) {
@@ -91,6 +168,7 @@ async function main() {
   setStatus("running…");
 
   const params = new URLSearchParams(globalThis.location?.search ?? "");
+  globalThis.__flix_args = params.getAll("argv");
 
   const componentParam = params.get("component");
   if (!componentParam) {
@@ -118,10 +196,16 @@ async function main() {
   const budget = parseU32Param(params, "budget", 500);
   const maxRedirects = parseU32Param(params, "maxRedirects", 20);
   const httpTimeoutMs = parseNullableU32Param(params, "httpTimeoutMs");
+  const seedParam = params.get("seed");
 
   const ctx = runtime.newCtx();
   const sandbox = await makeOpfsSandbox("flix-wasm-browser-");
   try {
+    if (seedParam) {
+      setStatus("seeding browser filesystem…");
+      await preloadSeedFiles(sandbox.rootDirHandle, new URL(seedParam, globalThis.location.href));
+    }
+
     const runner = new FlixRunner(runtime, {
       budget,
       maxRedirects,

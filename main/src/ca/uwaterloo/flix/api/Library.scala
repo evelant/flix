@@ -238,6 +238,7 @@ object Library {
     */
   private val StandardLibraryPortableOverlay = List(
     "portable/BPlusTree.flix" -> LocalResource.get("/src/library/portable/BPlusTree.flix"),
+    "portable/Assert.flix" -> LocalResource.get("/src/library/portable/Assert.flix"),
     "portable/Clock.flix" -> LocalResource.get("/src/library/portable/Clock.flix"),
     "portable/Random.flix" -> LocalResource.get("/src/library/portable/Random.flix"),
     "portable/BigDecimal.flix" -> LocalResource.get("/src/library/portable/BigDecimal.flix"),

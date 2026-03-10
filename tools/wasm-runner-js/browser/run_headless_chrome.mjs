@@ -11,6 +11,7 @@ function usage(code) {
 
 options:
   --chrome <path>        Chrome/Chromium binary (or set FLIX_CHROME)
+  --headless <bool>      Default: true
   --timeoutMs <u32>      Default: 60000
 
 notes:
@@ -28,6 +29,7 @@ function parseArgs(argv) {
     switch (a) {
       case "--url":
       case "--chrome":
+      case "--headless":
       case "--timeoutMs": {
         const v = argv[i + 1];
         if (v == null) usage(2);
@@ -55,6 +57,14 @@ function parseU32(x, name, fallback) {
     throw new Error(`invalid ${name}: ${x}`);
   }
   return n;
+}
+
+function parseBool(x, name, fallback) {
+  if (x == null) return fallback;
+  const v = String(x).toLowerCase();
+  if (v === "true" || v === "1" || v === "yes") return true;
+  if (v === "false" || v === "0" || v === "no") return false;
+  throw new Error(`invalid ${name}: ${x}`);
 }
 
 async function getFreePort() {
@@ -150,12 +160,12 @@ async function main() {
   }
 
   const timeoutMs = parseU32(args.timeoutMs, "--timeoutMs", 60_000);
+  const headless = parseBool(args.headless, "--headless", true);
 
   const debugPort = await getFreePort();
   const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), "flix-headless-chrome-"));
 
   const chromeArgs = [
-    "--headless=new",
     "--disable-gpu",
     "--no-first-run",
     "--no-default-browser-check",
@@ -168,6 +178,9 @@ async function main() {
     `--remote-debugging-port=${debugPort}`,
     "about:blank",
   ];
+  if (headless) {
+    chromeArgs.unshift("--headless=new");
+  }
 
   const p = spawn(chrome, chromeArgs, { stdio: ["ignore", "pipe", "pipe"] });
   let stderr = "";
@@ -208,7 +221,7 @@ async function main() {
     await cdp.send("Page.enable", {}, sessionId);
     await cdp.send("Runtime.enable", {}, sessionId);
 
-    const consoleBuf = [];
+    const consoleErrBuf = [];
     const exnBuf = [];
 
     cdp.on("Runtime.consoleAPICalled", (params, sid) => {
@@ -222,8 +235,10 @@ async function main() {
           if (a?.description) return a.description;
           return String(a?.value ?? "");
         })
-        .join(" ");
-      consoleBuf.push(`[console:${t}] ${rendered}`.trim());
+        .join(" ")
+        .trim();
+      if (rendered.length === 0) return;
+      consoleErrBuf.push(`[console:${t}] ${rendered}`);
     });
 
     cdp.on("Runtime.exceptionThrown", (params, sid) => {
@@ -234,6 +249,18 @@ async function main() {
       const desc = typeof exc?.description === "string" ? exc.description : "";
       exnBuf.push(`[exception] ${text}${desc ? `: ${desc}` : ""}`.trim());
     });
+
+    async function readHostLogs() {
+      try {
+        const res = await cdp.send("Runtime.evaluate", {
+          expression: "Array.isArray(globalThis.__flix_console_lines) ? globalThis.__flix_console_lines : (Array.isArray(globalThis.__flix_logs) ? globalThis.__flix_logs : [])",
+          returnByValue: true,
+        }, sessionId);
+        return Array.isArray(res?.result?.value) ? res.result.value.map((x) => String(x)) : [];
+      } catch {
+        return [];
+      }
+    }
 
     // Poll until the page reports completion.
     while (Date.now() < deadline) {
@@ -249,7 +276,12 @@ async function main() {
       }
 
       if (status === "ok") {
+        const hostLogs = await readHostLogs();
         ws.close();
+        for (const line of hostLogs) console.log(line);
+        if (hostLogs.length === 0) {
+          for (const line of consoleErrBuf) console.error(line);
+        }
         process.exitCode = 0;
         return;
       }
@@ -266,9 +298,14 @@ async function main() {
           // Ignore.
         }
 
+        const hostLogs = await readHostLogs();
         ws.close();
         console.error(`[headless] status=${status} ${msg}`);
-        for (const line of consoleBuf) console.error(line);
+        if (hostLogs.length > 0) {
+          for (const line of hostLogs) console.error(line);
+        } else {
+          for (const line of consoleErrBuf) console.error(line);
+        }
         for (const line of exnBuf) console.error(line);
         process.exitCode = 1;
         return;

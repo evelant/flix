@@ -9,17 +9,13 @@ import org.scalatest.funsuite.AnyFunSuite
 import java.io.{IOException, OutputStream, PrintStream}
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths, StandardCopyOption}
-import java.util.Comparator
 import java.util.concurrent.TimeUnit
 import scala.jdk.CollectionConverters.*
 
 /**
-  * Opt-in live-network smoke test for the real weather app on the LLVM-native backend.
-  *
-  * Enable with:
-  *   `FLIX_LIVE_NETWORK_SMOKE=1 ./gradlew test --tests ca.uwaterloo.flix.WeatherAppLlvmNativeSuite`
+  * Compile and opt-in live-network coverage for the real langcensus app on the LLVM-native backend.
   */
-class WeatherAppLlvmNativeSuite extends AnyFunSuite {
+class LangcensusAppLlvmNativeSuite extends AnyFunSuite {
 
   private val TestOptions: Options =
     Options.TestWithLibAll.copy(
@@ -30,25 +26,40 @@ class WeatherAppLlvmNativeSuite extends AnyFunSuite {
       githubToken = sys.env.get("GITHUB_TOKEN"),
     )
 
-  private val weatherProject: Path =
-    Paths.get("examples/apps/weather").toAbsolutePath.normalize()
+  private val langcensusProject: Path =
+    Paths.get("examples/apps/langcensus").toAbsolutePath.normalize()
 
-  test("llvm-native-weather-app-live-network") {
-    assume(liveNetworkEnabled, "FLIX_LIVE_NETWORK_SMOKE not set (skipping live weather app smoke test)")
-    assume(hasZig, "zig not found on PATH (skipping LLVM-native weather app smoke test)")
+  test("llvm-native-langcensus-app-compiles") {
+    assume(hasZig, "zig not found on PATH (skipping LLVM-native langcensus compile test)")
 
-    val projectRoot = Files.createTempDirectory("flix-weather-app-native-project-")
-    val outDir = Files.createTempDirectory("flix-weather-app-native-out-")
+    val projectRoot = Files.createTempDirectory("flix-langcensus-native-project-")
+    val outDir = Files.createTempDirectory("flix-langcensus-native-out-")
     try {
-      copyRecursive(weatherProject, projectRoot)
+      copyRecursive(langcensusProject, projectRoot)
+      compileProject(projectRoot, outDir)
+    } finally {
+      deleteRecursive(projectRoot)
+      deleteRecursive(outDir)
+    }
+  }
+
+  test("llvm-native-langcensus-app-live-network") {
+    assume(liveNetworkEnabled, "FLIX_LIVE_NETWORK_SMOKE not set (skipping live langcensus app smoke test)")
+    assume(githubConfigured, "GITHUB_NAME/GITHUB_TOKEN not set (skipping live langcensus app smoke test)")
+    assume(hasZig, "zig not found on PATH (skipping LLVM-native langcensus app smoke test)")
+
+    val projectRoot = Files.createTempDirectory("flix-langcensus-native-project-")
+    val outDir = Files.createTempDirectory("flix-langcensus-native-out-")
+    try {
+      copyRecursive(langcensusProject, projectRoot)
 
       val exe = compileProject(projectRoot, outDir)
-      val (exit, output) = runExecutable(exe, cwd = projectRoot, timeoutSeconds = 45)
+      val (exit, output) = runExecutable(exe, cwd = projectRoot, timeoutSeconds = 180)
       if (exit != 0) {
-        fail(s"Weather app failed with exit $exit:\n$output")
+        fail(s"Langcensus app failed with exit $exit:\n$output")
       }
 
-      assertWeatherOutput(output)
+      assertLangcensusOutput(output)
     } finally {
       deleteRecursive(projectRoot)
       deleteRecursive(outDir)
@@ -65,7 +76,7 @@ class WeatherAppLlvmNativeSuite extends AnyFunSuite {
 
     val bootstrap = Bootstrap.bootstrap(projectRoot, TestOptions.githubToken) match {
       case ca.uwaterloo.flix.util.Result.Ok(b) => b
-      case ca.uwaterloo.flix.util.Result.Err(e) => fail(s"Bootstrap failed for weather app: $e")
+      case ca.uwaterloo.flix.util.Result.Err(e) => fail(s"Bootstrap failed for langcensus app: $e")
     }
 
     bootstrap.reconfigureFlix(flix)
@@ -114,18 +125,25 @@ class WeatherAppLlvmNativeSuite extends AnyFunSuite {
 
     val output = new String(baos.toByteArray, StandardCharsets.UTF_8)
     if (!finished) {
-      fail(s"Weather app timed out after ${timeoutSeconds}s. Output so far:\n$output")
+      fail(s"Langcensus app timed out after ${timeoutSeconds}s. Output so far:\n$output")
     }
     (p.exitValue(), output)
   }
 
-  private def assertWeatherOutput(rawOutput: String): Unit = {
+  private def assertLangcensusOutput(rawOutput: String): Unit = {
     val output = stripAnsi(rawOutput).trim
-    if (output.contains("[Fatal]")) {
-      fail(s"Weather app hit fatal path:\n$rawOutput")
+    if (output.contains("Parse Error") || output.contains("Environment variable") || output.contains("[Fatal]")) {
+      fail(s"Langcensus app hit failure path:\n$rawOutput")
     }
-    if (!output.matches("(?s).*Weather for .+\\(.+\\) at .+°[NS], .+°[EW]:.*°C.*")) {
-      fail(s"Weather app output did not match expected shape:\n$rawOutput")
+    val expectedSections = List(
+      "Analysis Result Per Repo",
+      "Analysis Result For User",
+      "Analysis Result By Bytes",
+    )
+    expectedSections.foreach { section =>
+      if (!output.contains(section)) {
+        fail(s"Langcensus app output missing expected section '$section':\n$rawOutput")
+      }
     }
   }
 
@@ -133,7 +151,7 @@ class WeatherAppLlvmNativeSuite extends AnyFunSuite {
     s.replaceAll("\u001B\\[[0-9;]*m", "")
 
   private def executablePath(outDir: Path): Path =
-    ca.uwaterloo.flix.language.phase.llvm.LlvmNativeDriver.executablePath(outDir, "weather")
+    ca.uwaterloo.flix.language.phase.llvm.LlvmNativeDriver.executablePath(outDir, "langcensus")
 
   private def isWindows: Boolean =
     System.getProperty("os.name", "").toLowerCase.contains("win")
@@ -182,4 +200,7 @@ class WeatherAppLlvmNativeSuite extends AnyFunSuite {
 
   private def liveNetworkEnabled: Boolean =
     sys.env.get("FLIX_LIVE_NETWORK_SMOKE").contains("1")
+
+  private def githubConfigured: Boolean =
+    sys.env.contains("GITHUB_NAME") && sys.env.contains("GITHUB_TOKEN")
 }

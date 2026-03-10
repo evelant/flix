@@ -19,6 +19,7 @@ import ca.uwaterloo.flix.language.ast.Symbol
 import ca.uwaterloo.flix.language.ast.shared.SecurityContext
 import ca.uwaterloo.flix.tools.pkg.Dependency.{FlixDependency, JarDependency, MavenDependency}
 import ca.uwaterloo.flix.tools.pkg.github.GitHub
+import ca.uwaterloo.flix.util.{CompilationTarget, EmitKind, RunnerKind}
 import ca.uwaterloo.flix.util.Result
 import ca.uwaterloo.flix.util.Result.{Err, Ok, traverse}
 import org.tomlj.*
@@ -105,6 +106,15 @@ object ManifestParser {
       authors <- getRequiredArrayProperty("package.authors", parser, p);
       authorsList <- convertTomlArrayToStringList(authors, p);
 
+      buildTargets <- parseBuildTargets(parser, p);
+      jvmTargetConfig <- parseTargetConfig("target.jvm", parser, p);
+      nativeTargetConfig <- parseTargetConfig("target.native", parser, p);
+      wasmTargetConfig <- parseTargetConfig("target.wasm", parser, p);
+      runTarget <- parseOptionalTargetProperty("run.target", parser, p);
+      runRunner <- parseOptionalRunnerProperty("run.runner", parser, p);
+      testTarget <- parseOptionalTargetProperty("test.target", parser, p);
+      testRunner <- parseOptionalRunnerProperty("test.runner", parser, p);
+
       deps <- getOptionalTableProperty("dependencies", parser, p);
       depsList <- collectDependencies(deps, flixDep = true, jarDep = false, p);
 
@@ -114,12 +124,26 @@ object ManifestParser {
       jarDeps <- getOptionalTableProperty("jar-dependencies", parser, p);
       jarDepsList <- collectDependencies(jarDeps, flixDep = false, jarDep = true, p)
 
-    ) yield Manifest(name, description, versionSemVer, githubProject, packageModules, flixSemVer, license, authorsList, depsList ++ mvnDepsList ++ jarDepsList)
+    ) yield Manifest(
+      name,
+      description,
+      versionSemVer,
+      githubProject,
+      packageModules,
+      flixSemVer,
+      license,
+      authorsList,
+      depsList ++ mvnDepsList ++ jarDepsList,
+      buildConfig = Manifest.BuildConfig(buildTargets),
+      targetConfigs = Manifest.TargetConfigs(jvmTargetConfig, nativeTargetConfig, wasmTargetConfig),
+      runConfig = Manifest.RunConfig(runTarget, runRunner),
+      testConfig = Manifest.TestConfig(testTarget, testRunner)
+    )
   }
 
   private def checkKeys(parser: TomlParseResult, p: Path): Result[Unit, ManifestError] = {
     val keySet: Set[String] = parser.keySet().asScala.toSet
-    val allowedKeys = Set("package", "dependencies", "mvn-dependencies", "jar-dependencies")
+    val allowedKeys = Set("package", "build", "run", "test", "target", "target.jvm", "target.native", "target.wasm", "dependencies", "mvn-dependencies", "jar-dependencies")
     val illegalKeys = keySet.diff(allowedKeys)
 
     if (illegalKeys.nonEmpty) {
@@ -135,6 +159,68 @@ object ManifestParser {
     }
 
     Ok(())
+  }
+
+  private def parseBuildTargets(parser: TomlParseResult, p: Path): Result[List[CompilationTarget], ManifestError] = {
+    getOptionalArrayProperty("build.targets", parser, p).flatMap {
+      case None => Ok(List(CompilationTarget.Jvm))
+      case Some(array) =>
+        convertTomlArrayToStringList(array, p).flatMap { targets =>
+          traverse(targets)(toCompilationTarget(_, p, "build.targets")).map(_.distinct)
+        }
+    }
+  }
+
+  private def parseOptionalTargetProperty(prop: String, parser: TomlParseResult, p: Path): Result[Option[CompilationTarget], ManifestError] = {
+    getOptionalStringProperty(prop, parser, p).flatMap {
+      case None => Ok(None)
+      case Some(target) => toCompilationTarget(target, p, prop).map(Some(_))
+    }
+  }
+
+  private def parseOptionalRunnerProperty(prop: String, parser: TomlParseResult, p: Path): Result[Option[RunnerKind], ManifestError] = {
+    getOptionalStringProperty(prop, parser, p).flatMap {
+      case None => Ok(None)
+      case Some(runner) => toRunnerKind(runner, p, prop).map(Some(_))
+    }
+  }
+
+  private def parseTargetConfig(prefix: String, parser: TomlParseResult, p: Path): Result[Manifest.TargetConfig, ManifestError] = {
+    getOptionalArrayProperty(s"$prefix.emit", parser, p).flatMap {
+      case None => Ok(Manifest.TargetConfig())
+      case Some(array) =>
+        convertTomlArrayToStringList(array, p).flatMap { emits =>
+          traverse(emits)(toEmitKind(_, p, s"$prefix.emit")).map(xs => Manifest.TargetConfig(Some(xs.distinct)))
+        }
+    }
+  }
+
+  private def toCompilationTarget(s: String, p: Path, prop: String): Result[CompilationTarget, ManifestError] = s match {
+    case "jvm" => Ok(CompilationTarget.Jvm)
+    case "native" => Ok(CompilationTarget.LlvmNative)
+    case "wasm" => Ok(CompilationTarget.LlvmWasm)
+    case other => Err(ManifestError.ManifestParseError(p, s"Invalid target '$other' for '$prop'. Expected one of: jvm, native, wasm."))
+  }
+
+  private def toEmitKind(s: String, p: Path, prop: String): Result[EmitKind, ManifestError] = s match {
+    case "classes" => Ok(EmitKind.Classes)
+    case "jar" => Ok(EmitKind.Jar)
+    case "fatjar" => Ok(EmitKind.FatJar)
+    case "exe" => Ok(EmitKind.Exe)
+    case "staticlib" => Ok(EmitKind.StaticLib)
+    case "sharedlib" => Ok(EmitKind.SharedLib)
+    case "component" => Ok(EmitKind.Component)
+    case "js" => Ok(EmitKind.Js)
+    case other => Err(ManifestError.ManifestParseError(p, s"Invalid emit '$other' for '$prop'. Expected one of: classes, jar, fatjar, exe, staticlib, sharedlib, component, js."))
+  }
+
+  private def toRunnerKind(s: String, p: Path, prop: String): Result[RunnerKind, ManifestError] = s match {
+    case "jvm" => Ok(RunnerKind.Jvm)
+    case "native" => Ok(RunnerKind.Native)
+    case "node" => Ok(RunnerKind.Node)
+    case "browser" => Ok(RunnerKind.Browser)
+    case "wasmtime" => Ok(RunnerKind.Wasmtime)
+    case other => Err(ManifestError.ManifestParseError(p, s"Invalid runner '$other' for '$prop'. Expected one of: jvm, native, node, browser, wasmtime."))
   }
 
   /**

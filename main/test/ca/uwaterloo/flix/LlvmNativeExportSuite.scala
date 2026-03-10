@@ -83,9 +83,9 @@ class LlvmNativeExportSuite extends AnyFunSuite {
       flix.codeGen(optRoot.get)
 
       val llvmDir = outDir.resolve("llvm").toAbsolutePath.normalize()
-      val header = llvmDir.resolve("flix_exports.h")
-      val lib = llvmDir.resolve("libflix-llvm-native.a")
-      val shared = llvmDir.resolve(sharedLibraryName)
+      val header = ca.uwaterloo.flix.language.phase.llvm.LlvmExportWriter.exportsHeaderPath(outDir)
+      val lib = ca.uwaterloo.flix.language.phase.llvm.LlvmNativeDriver.staticLibraryPath(outDir)
+      val shared = ca.uwaterloo.flix.language.phase.llvm.LlvmNativeDriver.sharedLibraryPath(outDir)
       if (!Files.exists(header)) fail(s"Missing exports header: $header")
       if (!Files.exists(lib)) fail(s"Missing static library: $lib")
       if (!Files.exists(shared)) fail(s"Missing shared library: $shared")
@@ -96,7 +96,7 @@ class LlvmNativeExportSuite extends AnyFunSuite {
 
       val cProgram =
         """
-          |#include "flix_exports.h"
+          |#include "flix.h"
           |#include <stdio.h>
           |#include <string.h>
           |
@@ -245,7 +245,7 @@ class LlvmNativeExportSuite extends AnyFunSuite {
 
         val dynProgram =
           """
-            |#include "flix_exports.h"
+            |#include "flix.h"
             |#include <stdio.h>
             |#include <dlfcn.h>
             |#include <string.h>
@@ -437,11 +437,6 @@ class LlvmNativeExportSuite extends AnyFunSuite {
 
   private def isMac: Boolean =
     System.getProperty("os.name", "").toLowerCase.contains("mac")
-
-  private def sharedLibraryName: String =
-    if (isWindows) "flix-llvm-native.dll"
-    else if (isMac) "libflix-llvm-native.dylib"
-    else "libflix-llvm-native.so"
 
   private def deleteRecursive(root: Path): Unit = {
     if (!Files.exists(root)) return

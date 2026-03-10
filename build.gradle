@@ -104,6 +104,37 @@ jar {
         into 'runtime/src'
     }
 
+    from('runtime/src/wit') {
+        include '**/*.c'
+        include '**/*.h'
+        into 'runtime/src/wit'
+    }
+
+    // LLVM-wasm runner support (Node host bridge).
+    from('tools/wasm-runner-js') {
+        include '**/*.mjs'
+        include '**/*.js'
+        include '**/*.html'
+        into 'tools/wasm-runner-js'
+    }
+
+    from('tools/wasm-smoke/browser') {
+        include 'serve.mjs'
+        into 'tools/wasm-smoke/browser'
+    }
+
+    from('tools/wasm-runner-rs') {
+        include 'Cargo.toml'
+        include 'Cargo.lock'
+        include 'src/**/*.rs'
+        into 'tools/wasm-runner-rs'
+    }
+
+    from('docs/planning/native-backend/wit/flix-bindings') {
+        include '**/*.wit'
+        into 'docs/planning/native-backend/wit/flix-bindings'
+    }
+
     duplicatesStrategy = 'exclude'
 }
 
@@ -136,7 +167,9 @@ test {
         excludeTestsMatching "ca.uwaterloo.flix.language.phase.unification.UnificationSuite"
         excludeTestsMatching "ca.uwaterloo.flix.language.TestProgramArgs"
         excludeTestsMatching "ca.uwaterloo.flix.tools.pkg.PackageManagerSuite"
-        excludeTestsMatching "ca.uwaterloo.flix.tools.pkg.*"
+        excludeTestsMatching "ca.uwaterloo.flix.tools.pkg.TestFlixPackageManager"
+        excludeTestsMatching "ca.uwaterloo.flix.tools.pkg.TestMavenPackageManager"
+        excludeTestsMatching "ca.uwaterloo.flix.tools.pkg.TestJarPackageManager"
         excludeTestsMatching "ca.uwaterloo.flix.util.UtilSuite"
         excludeTestsMatching "ca.uwaterloo.flix.util.TestChain"
         excludeTestsMatching "flix.fuzzers.FuzzerSuite"

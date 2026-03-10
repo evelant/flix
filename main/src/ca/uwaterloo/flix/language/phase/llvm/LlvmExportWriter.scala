@@ -19,7 +19,7 @@ package ca.uwaterloo.flix.language.phase.llvm
 import ca.uwaterloo.flix.api.Flix
 import ca.uwaterloo.flix.language.ast.{LoweredAst, SimpleType, Symbol}
 import ca.uwaterloo.flix.language.ast.SourceLocation
-import ca.uwaterloo.flix.util.InternalCompilerException
+import ca.uwaterloo.flix.util.{ArtifactNames, InternalCompilerException}
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, LinkOption, Path}
@@ -45,7 +45,7 @@ object LlvmExportWriter {
 
     val header = renderHeader(exports)
     val bytes = header.getBytes(StandardCharsets.UTF_8)
-    val path = exportsHeaderPath(flix.options.outputPath)
+    val path = exportsHeaderPath(flix.options.outputPath, flix.options.artifactName)
     writeFile(path, bytes)
     Some(path)
   }
@@ -53,8 +53,8 @@ object LlvmExportWriter {
   /**
     * Returns the location of the exports header for the current build.
     */
-  def exportsHeaderPath(outputPath: Path): Path =
-    outputPath.resolve("llvm/").resolve("flix_exports.h").toAbsolutePath
+  def exportsHeaderPath(outputPath: Path, artifactName: String = ArtifactNames.DefaultBaseName): Path =
+    outputPath.resolve("llvm/").resolve(ArtifactNames.nativeExportsHeaderFileName(artifactName)).toAbsolutePath
 
   private def renderHeader(exports: List[LoweredAst.Def]): String = {
     val sb = new StringBuilder(8 * 1024)

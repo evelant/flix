@@ -3,7 +3,7 @@ import * as http from "node:http";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const ROOT_DIR = path.resolve(fileURLToPath(new URL("../../..", import.meta.url)));
+const ROOT_DIR = path.resolve(process.env.ROOT_DIR ?? fileURLToPath(new URL("../../..", import.meta.url)));
 
 const MIME = {
   ".html": "text/html; charset=utf-8",

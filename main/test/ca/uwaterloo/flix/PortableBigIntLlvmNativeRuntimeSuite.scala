@@ -97,7 +97,7 @@ class PortableBigIntLlvmNativeRuntimeSuite extends AnyFunSuite {
   }
 
   private def executablePath(outDir: Path): Path =
-    outDir.resolve("llvm").resolve(if (isWindows) "flix-llvm-native.exe" else "flix-llvm-native").toAbsolutePath.normalize()
+    ca.uwaterloo.flix.language.phase.llvm.LlvmNativeDriver.executablePath(outDir)
 
   private def isWindows: Boolean =
     System.getProperty("os.name").toLowerCase.contains("win")

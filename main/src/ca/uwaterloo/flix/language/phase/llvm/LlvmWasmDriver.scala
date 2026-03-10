@@ -18,7 +18,7 @@ package ca.uwaterloo.flix.language.phase.llvm
 
 import ca.uwaterloo.flix.api.Flix
 import ca.uwaterloo.flix.language.ast.SourceLocation
-import ca.uwaterloo.flix.util.{Build, InternalCompilerException}
+import ca.uwaterloo.flix.util.{ArtifactNames, Build, InternalCompilerException}
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths, StandardCopyOption}
@@ -37,25 +37,64 @@ object LlvmWasmDriver {
 
   case class Artifacts(coreWasm: Path,
                        componentWasm: Path,
-                       jsOutDir: Option[Path])
+                       componentJs: Path,
+                       exportsManifest: Path,
+                       jsOutDir: Path,
+                       nodeRunner: Path)
 
   private val BundledRuntimeZigResource: String = "/runtime/src/flix_rt_llvm.zig"
   private val BundledUnicodeCaseTablesZigResource: String = "/runtime/src/unicode_case_tables.zig"
+  private val BundledRegexRuntimeZigResource: String = "/runtime/src/rt_regex.zig"
+  private val BundledWitGlueCResource: String = "/runtime/src/wit/flix.c"
+  private val BundledWitGlueHResource: String = "/runtime/src/wit/flix.h"
+  private val BundledSysJsResource: String = "/tools/wasm-runner-js/sys.js"
+  private val BundledRunFlixResource: String = "/tools/wasm-runner-js/run-flix.mjs"
+  private val BundledRunnerResource: String = "/tools/wasm-runner-js/runner.mjs"
+  private val BundledNodeHandlersResource: String = "/tools/wasm-runner-js/node-handlers.mjs"
+  private val BundledNodeTcpHandlersResource: String = "/tools/wasm-runner-js/node-tcp-handlers.mjs"
+  private val BundledNodeProcessHandlersResource: String = "/tools/wasm-runner-js/node-process-handlers.mjs"
+  private val BundledWasmtimeCargoTomlResource: String = "/tools/wasm-runner-rs/Cargo.toml"
+  private val BundledWasmtimeCargoLockResource: String = "/tools/wasm-runner-rs/Cargo.lock"
+  private val BundledWasmtimeLibResource: String = "/tools/wasm-runner-rs/src/lib.rs"
+  private val BundledWasmtimeHostResource: String = "/tools/wasm-runner-rs/src/host.rs"
+  private val BundledWasmtimeRunnerResource: String = "/tools/wasm-runner-rs/src/runner.rs"
+  private val BundledWasmtimeBinResource: String = "/tools/wasm-runner-rs/src/bin/run_flix.rs"
+  private val BundledWitBindingsResource: String = "/docs/planning/native-backend/wit/flix-bindings/bindings.wit"
+  private val BundledWitRuntimeDepResource: String = "/docs/planning/native-backend/wit/flix-bindings/deps/runtime.wit"
+  private val BundledWitSysDepResource: String = "/docs/planning/native-backend/wit/flix-bindings/deps/sys.wit"
 
-  private val WitBindingsDir: Path =
+  private val DefaultWitBindingsDir: Path =
     Paths.get("docs/planning/native-backend/wit/flix-bindings").toAbsolutePath.normalize()
 
-  private val WitGlueC: Path =
-    Paths.get("runtime/src/wit/flix.c").toAbsolutePath.normalize()
+  private val DefaultWitGlueDir: Path =
+    Paths.get("runtime/src/wit").toAbsolutePath.normalize()
 
   private val DefaultSysJs: Path =
     Paths.get("tools/wasm-runner-js/sys.js").toAbsolutePath.normalize()
 
-  def run(modulePath: Path)(implicit flix: Flix): Artifacts = {
+  private val DefaultNodeRunner: Path =
+    Paths.get("tools/wasm-runner-js/run-flix.mjs").toAbsolutePath.normalize()
+
+  private val DefaultRunnerModule: Path =
+    Paths.get("tools/wasm-runner-js/runner.mjs").toAbsolutePath.normalize()
+
+  private val DefaultNodeHandlersModule: Path =
+    Paths.get("tools/wasm-runner-js/node-handlers.mjs").toAbsolutePath.normalize()
+
+  private val DefaultNodeTcpHandlersModule: Path =
+    Paths.get("tools/wasm-runner-js/node-tcp-handlers.mjs").toAbsolutePath.normalize()
+
+  private val DefaultNodeProcessHandlersModule: Path =
+    Paths.get("tools/wasm-runner-js/node-process-handlers.mjs").toAbsolutePath.normalize()
+
+  private val DefaultWasmtimeRunnerCargoToml: Path =
+    Paths.get("tools/wasm-runner-rs/Cargo.toml").toAbsolutePath.normalize()
+
+  def run(modulePath: Path, emitJs: Boolean = true)(implicit flix: Flix): Artifacts = {
     val outDir = flix.options.outputPath.resolve("llvm").toAbsolutePath
     Files.createDirectories(outDir)
 
-    val wasmDir = outDir.resolve("wasm")
+    val wasmDir = wasmDirPath(flix.options.outputPath)
     Files.createDirectories(wasmDir)
 
     val optFlag = flix.options.build match {
@@ -64,23 +103,53 @@ object LlvmWasmDriver {
     }
 
     val runtimeZig = resolveRuntimeZig(outDir)
+    val witBindingsDir = resolveWitBindingsDir(outDir)
+    val witGlueC = resolveWitGlue(outDir)
     val runtimeObj = compileRuntime(runtimeZig, wasmDir, optFlag)
     val moduleObj = compileModule(modulePath, wasmDir, optFlag)
-    val witObj = compileWitGlue(wasmDir, optFlag)
+    val witObj = compileWitGlue(witGlueC, wasmDir, optFlag)
 
-    val coreWasm = wasmDir.resolve("flix-llvm-wasm.core.wasm")
+    val coreWasm = coreWasmPath(flix.options.outputPath, flix.options.artifactName)
     linkCore(coreWasm, wasmDir, optFlag, List(moduleObj, runtimeObj, witObj))
 
     val embeddedCore = wasmDir.resolve("flix-llvm-wasm.core.embed.wasm")
-    embedWit(coreWasm, embeddedCore, wasmDir)
+    embedWit(coreWasm, embeddedCore, wasmDir, witBindingsDir)
 
-    val componentWasm = wasmDir.resolve("flix-llvm-wasm.component.wasm")
+    val componentWasm = componentWasmPath(flix.options.outputPath, flix.options.artifactName)
     componentize(embeddedCore, componentWasm, wasmDir)
 
-    val jsOutDir = Some(transpileToJs(componentWasm, wasmDir))
+    if (emitJs) {
+      transpileToJs(componentWasm, wasmDir)
+    }
+    val jsOutDir = jsOutDirPath(flix.options.outputPath)
+    val componentJs = componentJsPath(flix.options.outputPath, flix.options.artifactName)
+    val nodeRunner = if (emitJs) resolveNodeRunner(outDir) else outDir.resolve("wasm-runner-js").resolve("run-flix.mjs")
+    val exportsManifest = LlvmWasmExportWriter.manifestPath(flix.options.outputPath, flix.options.artifactName)
 
-    Artifacts(coreWasm = coreWasm, componentWasm = componentWasm, jsOutDir = jsOutDir)
+    Artifacts(
+      coreWasm = coreWasm,
+      componentWasm = componentWasm,
+      componentJs = componentJs,
+      exportsManifest = exportsManifest,
+      jsOutDir = jsOutDir,
+      nodeRunner = nodeRunner
+    )
   }
+
+  def wasmDirPath(outputPath: Path): Path =
+    outputPath.resolve("llvm").resolve("wasm").toAbsolutePath.normalize()
+
+  def coreWasmPath(outputPath: Path, artifactName: String = ArtifactNames.DefaultBaseName): Path =
+    wasmDirPath(outputPath).resolve(ArtifactNames.wasmCoreFileName(artifactName))
+
+  def componentWasmPath(outputPath: Path, artifactName: String = ArtifactNames.DefaultBaseName): Path =
+    wasmDirPath(outputPath).resolve(ArtifactNames.wasmComponentFileName(artifactName))
+
+  def jsOutDirPath(outputPath: Path): Path =
+    wasmDirPath(outputPath).resolve("js")
+
+  def componentJsPath(outputPath: Path, artifactName: String = ArtifactNames.DefaultBaseName): Path =
+    jsOutDirPath(outputPath).resolve(ArtifactNames.wasmComponentJsFileName(artifactName))
 
   /**
     * Resolves the Zig runtime support file for the LLVM backend.
@@ -95,6 +164,7 @@ object LlvmWasmDriver {
 
     val dest = outDir.resolve("flix_rt_llvm.zig").toAbsolutePath.normalize()
     val unicodeDest = outDir.resolve("unicode_case_tables.zig").toAbsolutePath.normalize()
+    val regexDest = outDir.resolve("rt_regex.zig").toAbsolutePath.normalize()
     val is = Option(getClass.getResourceAsStream(BundledRuntimeZigResource)).getOrElse {
       throw InternalCompilerException(
         s"Missing LLVM runtime support file: '$cwdRuntime' and no bundled resource '$BundledRuntimeZigResource' found.",
@@ -107,13 +177,21 @@ object LlvmWasmDriver {
         SourceLocation.Unknown
       )
     }
+    val regexIs = Option(getClass.getResourceAsStream(BundledRegexRuntimeZigResource)).getOrElse {
+      throw InternalCompilerException(
+        s"Missing LLVM runtime support file: '$cwdRuntime' and no bundled resource '$BundledRegexRuntimeZigResource' found.",
+        SourceLocation.Unknown
+      )
+    }
 
     try {
       Files.copy(is, dest, StandardCopyOption.REPLACE_EXISTING)
       Files.copy(unicodeIs, unicodeDest, StandardCopyOption.REPLACE_EXISTING)
+      Files.copy(regexIs, regexDest, StandardCopyOption.REPLACE_EXISTING)
     } finally {
       is.close()
       unicodeIs.close()
+      regexIs.close()
     }
 
     dest
@@ -167,14 +245,14 @@ object LlvmWasmDriver {
     * Bring-up shortcut: compile as `wasm32-wasi` (headers available) but link into a freestanding core module.
     * This avoids introducing a WASI dependency as long as we do not link wasi-libc.
     */
-  private def compileWitGlue(wasmDir: Path, optFlag: String): Path = {
+  private def compileWitGlue(witGlueC: Path, wasmDir: Path, optFlag: String): Path = {
     val out = wasmDir.resolve("flix_wit_glue.wasm.o")
     val cmd = List(
       "zig", "cc",
       "-target", "wasm32-wasi",
       "-c",
       optFlag,
-      WitGlueC.toString,
+      witGlueC.toString,
       "-o", out.toString
     )
     val (exit, output) = exec(cmd, wasmDir)
@@ -207,16 +285,16 @@ object LlvmWasmDriver {
     }
   }
 
-  private def embedWit(inWasm: Path, outWasm: Path, cwd: Path): Unit = {
-    if (!Files.exists(WitBindingsDir)) {
-      throw InternalCompilerException(s"Missing WIT bindings directory: '$WitBindingsDir'.", SourceLocation.Unknown)
+  private def embedWit(inWasm: Path, outWasm: Path, cwd: Path, witBindingsDir: Path): Unit = {
+    if (!Files.exists(witBindingsDir)) {
+      throw InternalCompilerException(s"Missing WIT bindings directory: '$witBindingsDir'.", SourceLocation.Unknown)
     }
 
     val cmd = List(
       "wasm-tools",
       "component",
       "embed",
-      WitBindingsDir.toString,
+      witBindingsDir.toString,
       inWasm.toString,
       "--world",
       "flix",
@@ -256,9 +334,7 @@ object LlvmWasmDriver {
 
     // Ensure a default sys implementation is available for the transpiled output.
     // Hosts are free to ignore/replace this mapping.
-    if (Files.exists(DefaultSysJs)) {
-      Files.copy(DefaultSysJs, jsDir.resolve("sys.js"), StandardCopyOption.REPLACE_EXISTING)
-    }
+    copyDefaultSysJs(jsDir)
 
     val cmd = List(
       "jco",
@@ -279,6 +355,103 @@ object LlvmWasmDriver {
     }
 
     jsDir
+  }
+
+  private def copyDefaultSysJs(jsDir: Path): Unit = {
+    val dest = jsDir.resolve("sys.js")
+    if (Files.exists(DefaultSysJs)) {
+      Files.copy(DefaultSysJs, dest, StandardCopyOption.REPLACE_EXISTING)
+      return
+    }
+
+    copyBundledResource(BundledSysJsResource, dest)
+  }
+
+  private def resolveNodeRunner(outDir: Path): Path = {
+    if (Files.exists(DefaultNodeRunner)
+      && Files.exists(DefaultRunnerModule)
+      && Files.exists(DefaultNodeHandlersModule)
+      && Files.exists(DefaultNodeTcpHandlersModule)
+      && Files.exists(DefaultNodeProcessHandlersModule)) {
+      return DefaultNodeRunner
+    }
+
+    val runnerDir = outDir.resolve("wasm-runner-js")
+    Files.createDirectories(runnerDir)
+
+    copyBundledResource(BundledRunFlixResource, runnerDir.resolve("run-flix.mjs"))
+    copyBundledResource(BundledRunnerResource, runnerDir.resolve("runner.mjs"))
+    copyBundledResource(BundledNodeHandlersResource, runnerDir.resolve("node-handlers.mjs"))
+    copyBundledResource(BundledNodeTcpHandlersResource, runnerDir.resolve("node-tcp-handlers.mjs"))
+    copyBundledResource(BundledNodeProcessHandlersResource, runnerDir.resolve("node-process-handlers.mjs"))
+
+    runnerDir.resolve("run-flix.mjs")
+  }
+
+  def resolveWasmtimeRunnerManifest(outputPath: Path): Path = {
+    val outDir = outputPath.resolve("llvm").toAbsolutePath.normalize()
+    if (Files.exists(DefaultWasmtimeRunnerCargoToml)) {
+      return DefaultWasmtimeRunnerCargoToml
+    }
+
+    val runnerDir = outDir.resolve("tools").resolve("wasm-runner-rs")
+    Files.createDirectories(runnerDir.resolve("src").resolve("bin"))
+    copyBundledResource(BundledWasmtimeCargoTomlResource, runnerDir.resolve("Cargo.toml"))
+    copyBundledResource(BundledWasmtimeCargoLockResource, runnerDir.resolve("Cargo.lock"))
+    copyBundledResource(BundledWasmtimeLibResource, runnerDir.resolve("src").resolve("lib.rs"))
+    copyBundledResource(BundledWasmtimeHostResource, runnerDir.resolve("src").resolve("host.rs"))
+    copyBundledResource(BundledWasmtimeRunnerResource, runnerDir.resolve("src").resolve("runner.rs"))
+    copyBundledResource(BundledWasmtimeBinResource, runnerDir.resolve("src").resolve("bin").resolve("run_flix.rs"))
+
+    val witDir = outDir.resolve("docs").resolve("planning").resolve("native-backend").resolve("wit").resolve("flix-bindings")
+    Files.createDirectories(witDir.resolve("deps"))
+    copyBundledResource(BundledWitBindingsResource, witDir.resolve("bindings.wit"))
+    copyBundledResource(BundledWitRuntimeDepResource, witDir.resolve("deps").resolve("runtime.wit"))
+    copyBundledResource(BundledWitSysDepResource, witDir.resolve("deps").resolve("sys.wit"))
+
+    runnerDir.resolve("Cargo.toml")
+  }
+
+  private def resolveWitBindingsDir(outDir: Path): Path = {
+    if (Files.exists(DefaultWitBindingsDir)) {
+      return DefaultWitBindingsDir
+    }
+
+    val bindingsDir = outDir.resolve("wit-bindings")
+    Files.createDirectories(bindingsDir.resolve("deps"))
+    copyBundledResource(BundledWitBindingsResource, bindingsDir.resolve("bindings.wit"))
+    copyBundledResource(BundledWitRuntimeDepResource, bindingsDir.resolve("deps").resolve("runtime.wit"))
+    copyBundledResource(BundledWitSysDepResource, bindingsDir.resolve("deps").resolve("sys.wit"))
+    bindingsDir
+  }
+
+  private def resolveWitGlue(outDir: Path): Path = {
+    val witGlueC = DefaultWitGlueDir.resolve("flix.c")
+    val witGlueH = DefaultWitGlueDir.resolve("flix.h")
+    if (Files.exists(witGlueC) && Files.exists(witGlueH)) {
+      return witGlueC
+    }
+
+    val witDir = outDir.resolve("wit")
+    Files.createDirectories(witDir)
+    copyBundledResource(BundledWitGlueCResource, witDir.resolve("flix.c"))
+    copyBundledResource(BundledWitGlueHResource, witDir.resolve("flix.h"))
+    witDir.resolve("flix.c")
+  }
+
+  private def copyBundledResource(resource: String, dest: Path): Unit = {
+    val is = Option(getClass.getResourceAsStream(resource)).getOrElse {
+      throw InternalCompilerException(
+        s"Missing LLVM-wasm support resource '$resource'.",
+        SourceLocation.Unknown
+      )
+    }
+
+    try {
+      Files.copy(is, dest, StandardCopyOption.REPLACE_EXISTING)
+    } finally {
+      is.close()
+    }
   }
 
   private def exec(cmd: List[String], cwd: Path): (Int, String) = {

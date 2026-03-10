@@ -88,8 +88,8 @@ class PortableStdlibLlvmWasmtimeRuntimeSuite extends AnyFunSuite {
 
       flix.codeGen(optRoot.get)
 
-      val componentWasm = outDir.resolve("llvm").resolve("wasm").resolve("flix-llvm-wasm.component.wasm")
-      val exportsManifest = outDir.resolve("llvm").resolve("flix_wasm_exports.json")
+      val componentWasm = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmDriver.componentWasmPath(outDir)
+      val exportsManifest = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmExportWriter.manifestPath(outDir)
 
       if (!Files.exists(componentWasm)) {
         fail(s"Missing wasm component artifact: $componentWasm")
@@ -193,4 +193,3 @@ class PortableStdlibLlvmWasmtimeRuntimeSuite extends AnyFunSuite {
   }
 
 }
-

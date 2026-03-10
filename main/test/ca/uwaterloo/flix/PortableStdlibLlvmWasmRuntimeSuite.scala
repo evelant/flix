@@ -86,8 +86,8 @@ class PortableStdlibLlvmWasmRuntimeSuite extends AnyFunSuite {
 
       flix.codeGen(optRoot.get)
 
-      val componentJs = outDir.resolve("llvm").resolve("wasm").resolve("js").resolve("flix-llvm-wasm.component.js")
-      val exportsManifest = outDir.resolve("llvm").resolve("flix_wasm_exports.json")
+      val componentJs = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmDriver.componentJsPath(outDir)
+      val exportsManifest = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmExportWriter.manifestPath(outDir)
 
       if (!Files.exists(componentJs)) {
         fail(s"Missing wasm JS component artifact: $componentJs")
@@ -132,8 +132,8 @@ class PortableStdlibLlvmWasmRuntimeSuite extends AnyFunSuite {
 
       flix.codeGen(optRoot.get)
 
-      val componentJs = outDir.resolve("llvm").resolve("wasm").resolve("js").resolve("flix-llvm-wasm.component.js")
-      val exportsManifest = outDir.resolve("llvm").resolve("flix_wasm_exports.json")
+      val componentJs = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmDriver.componentJsPath(outDir)
+      val exportsManifest = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmExportWriter.manifestPath(outDir)
 
       val (exit, output) = runNode(componentJs, exportsManifest, sandboxDir)
       if (exit != 0) {

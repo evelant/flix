@@ -21,17 +21,19 @@ import ca.uwaterloo.flix.language.ast.{Scheme, SourceLocation, Symbol, TypedAst}
 import ca.uwaterloo.flix.language.ast.shared.SecurityContext
 import ca.uwaterloo.flix.language.phase.HtmlDocumentor
 import ca.uwaterloo.flix.runtime.CompilationResult
-import ca.uwaterloo.flix.tools.Tester
+import ca.uwaterloo.flix.tools.{ProjectTestDriver, Tester}
 import ca.uwaterloo.flix.tools.pkg.FlixPackageManager.findFlixDependencies
 import ca.uwaterloo.flix.tools.pkg.github.GitHub
 import ca.uwaterloo.flix.tools.pkg.{FlixPackageManager, JarPackageManager, Manifest, ManifestParser, MavenPackageManager, PackageModules, ReleaseError}
 import ca.uwaterloo.flix.util.Result.{Err, Ok}
 import ca.uwaterloo.flix.util.collection.ListMap
-import ca.uwaterloo.flix.util.{Build, FileOps, Formatter, Result, Validation}
+import ca.uwaterloo.flix.util.{ArtifactNames, Build, EmitKind, FileOps, Formatter, Result, RunnerKind, Validation}
+import ca.uwaterloo.flix.util.CompilationTarget
 import ca.uwaterloo.flix.api.lsp.Formatter as LspFormatter
 import ca.uwaterloo.flix.language.CompilationMessage
 
 import java.io.PrintStream
+import java.net.URI
 import java.nio.file.*
 import java.util.zip.{ZipInputStream, ZipOutputStream}
 import scala.collection.mutable
@@ -86,6 +88,15 @@ object Bootstrap {
          |version     = "0.1.0"
          |flix        = "${Version.CurrentVersion}"
          |authors     = ["John Doe <john@example.com>"]
+         |
+         |[build]
+         |targets = ["jvm"]
+         |
+         |[run]
+         |target = "jvm"
+         |
+         |[test]
+         |target = "jvm"
          |""".stripMargin
     }
 
@@ -122,7 +133,9 @@ object Bootstrap {
 
     FileOps.newFileIfAbsent(mainTestFile) {
       """@Test
-        |def test01(): Unit \ Assert = Assert.assertEq(expected = 2, 1 + 1)
+        |def test01(): Unit =
+        |    if (1 + 1 == 2) ()
+        |    else bug!("unexpected arithmetic failure")
         |""".stripMargin
     }
     Result.Ok(())
@@ -187,6 +200,12 @@ object Bootstrap {
     * Returns the path to the build directory relative to the given path `p`.
     */
   private def getBuildDirectory(p: Path): Path = p.resolve(s"./$buildDirectoryRaw").normalize()
+
+  def getBuildTargetDirectory(p: Path, target: CompilationTarget): Path = target match {
+    case CompilationTarget.Jvm => getBuildDirectory(p)
+    case CompilationTarget.LlvmNative => getBuildDirectory(p).resolve("./native/").normalize()
+    case CompilationTarget.LlvmWasm => getBuildDirectory(p).resolve("./wasm/").normalize()
+  }
 
   /**
     * The relative path to the build directory as a string.
@@ -310,6 +329,27 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
 
   private var securityLevels: Map[Path, SecurityContext] = Map.empty
 
+  def buildTargets: List[CompilationTarget] =
+    optManifest.map(_.buildConfig.targets).getOrElse(List(CompilationTarget.Jvm))
+
+  def runTarget: Option[CompilationTarget] =
+    optManifest.flatMap(_.runConfig.target)
+
+  def testTarget: Option[CompilationTarget] =
+    optManifest.flatMap(_.testConfig.target)
+
+  def runRunner: Option[RunnerKind] =
+    optManifest.flatMap(_.runConfig.runner)
+
+  def testRunner: Option[RunnerKind] =
+    optManifest.flatMap(_.testConfig.runner)
+
+  def buildEmits(target: CompilationTarget): Option[List[EmitKind]] =
+    optManifest.flatMap(_.targetConfigs.emitFor(target))
+
+  def artifactName: String =
+    optManifest.map(_.name).getOrElse(projectPath.toAbsolutePath.normalize().getFileName.toString)
+
   /**
     * Parses `flix.toml` to a Manifest and downloads all required files.
     * Then makes a list of all flix source files, flix packages
@@ -341,15 +381,21 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
   /**
     * Builds (compiles) the source files for the project.
     */
-  def build(flix: Flix, build: Build = Build.Development): Result[CompilationResult, BootstrapError] = {
+  def build(flix: Flix, build: Build = Build.Development, includeTests: Boolean = false): Result[CompilationResult, BootstrapError] = {
     // We disable incremental compilation to ensure a clean compile.
-    val newOptions = flix.options.copy(build = build, incremental = false, outputJvm = true, outputPath = Bootstrap.getBuildDirectory(projectPath))
+    val newOptions = flix.options.copy(
+      build = build,
+      incremental = false,
+      outputJvm = true,
+      outputPath = Bootstrap.getBuildTargetDirectory(projectPath, flix.options.target),
+      artifactName = artifactName
+    )
     flix.setOptions(newOptions)
 
     // We also clear any cached ASTs.
     flix.clearCaches()
 
-    Steps.updateStaleSources(flix)
+    Steps.updateStaleSources(flix, includeTests = includeTests, forceReload = true)
     Steps.compile(flix)
   }
 
@@ -358,7 +404,8 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
     */
   def buildJar(flix: Flix): Result[Unit, BootstrapError] = {
     val jarFile = Bootstrap.getJarFile(projectPath)
-    Steps.updateStaleSources(flix)
+    flix.setOptions(flix.options.copy(artifactName = artifactName))
+    Steps.updateStaleSources(flix, forceReload = true)
     for {
       _ <- Steps.configureJarOutput(flix)
       _ <- Steps.compile(flix)
@@ -379,7 +426,8 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
   def buildFatJar(flix: Flix): Result[Unit, BootstrapError] = {
     val jarFile = Bootstrap.getJarFile(projectPath)
     val libDir = Bootstrap.getLibraryDirectory(projectPath)
-    Steps.updateStaleSources(flix)
+    flix.setOptions(flix.options.copy(artifactName = artifactName))
+    Steps.updateStaleSources(flix, forceReload = true)
     for {
       _ <- Steps.configureJarOutput(flix)
       _ <- Steps.compile(flix)
@@ -455,7 +503,7 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
       case Ok(true) => ()
     }
 
-    Steps.updateStaleSources(flix)
+    Steps.updateStaleSources(flix, forceReload = true)
     for {
       json <- FileOps.readString(Bootstrap.getEffectLockFile(projectPath)).mapErr(e => BootstrapError.FileError(s"IO error: ${e.getMessage}"))
       (lockedDefs, lockedSigs) <- EffectLock.deserialize(json).mapErr(BootstrapError.FileError.apply)
@@ -522,7 +570,7 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
     if (!isProjectMode) {
       return Err(BootstrapError.FileError("No 'flix.toml' found. Refusing to run 'eff-lock'"))
     }
-    Steps.updateStaleSources(flix)
+    Steps.updateStaleSources(flix, forceReload = true)
     for {
       root <- Steps.check(flix)
     } yield {
@@ -571,6 +619,8 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
     val buildDir = Bootstrap.getBuildDirectory(projectPath)
     val classDir = Bootstrap.getClassDirectory(projectPath)
     val docDir = Bootstrap.getDocumentationDirectory(projectPath)
+    val nativeDir = Bootstrap.getBuildTargetDirectory(projectPath, CompilationTarget.LlvmNative)
+    val wasmDir = Bootstrap.getBuildTargetDirectory(projectPath, CompilationTarget.LlvmWasm)
 
     // Ensure `buildDir` is not dangerous
     checkForDangerousPath(buildDir) match {
@@ -594,6 +644,8 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
           case Err(e) => return Err(e)
           case Ok(()) => ()
         }
+      } else if (file.startsWith(nativeDir) || file.startsWith(wasmDir)) {
+        ()
       } else {
         return Err(BootstrapError.FileError(s"Unexpected directory in build directory: '${projectPath.relativize(file)}'"))
       }
@@ -714,7 +766,8 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
     * Type checks the source files for the project.
     */
   def check(flix: Flix): Result[Unit, BootstrapError] = {
-    Steps.updateStaleSources(flix)
+    flix.setOptions(flix.options.copy(artifactName = artifactName))
+    Steps.updateStaleSources(flix, forceReload = true)
     Steps.check(flix).map(_ => ())
   }
 
@@ -726,14 +779,16 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
   def reconfigureFlix(flix: Flix): Unit = {
     // TODO: Figure out if this function can be removed somehow (maybe by removing shell depending on bootstrap)
     // TODO: Can be removed by moving `updateStaleSources` into all step functions that require updating stale sources (almost all). This also remove responsibility from the caller.
-    Steps.updateStaleSources(flix)
+    flix.setOptions(flix.options.copy(artifactName = artifactName))
+    Steps.updateStaleSources(flix, forceReload = true)
   }
 
   /**
     * Generates API documentation.
     */
   def doc(flix: Flix): Result[Unit, BootstrapError] = {
-    Steps.updateStaleSources(flix)
+    flix.setOptions(flix.options.copy(artifactName = artifactName))
+    Steps.updateStaleSources(flix, forceReload = true)
     Steps.check(flix).map(HtmlDocumentor.run(_, getPackageModules)(flix))
   }
 
@@ -741,7 +796,8 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
     * Formats all source files in the project.
     */
   def format(flix: Flix): Result[Unit, BootstrapError] = {
-    Steps.updateStaleSources(flix)
+    flix.setOptions(flix.options.copy(artifactName = artifactName))
+    Steps.updateStaleSources(flix, forceReload = true)
     Steps.check(flix).map {
       case _ =>
         val syntaxTree = flix.getParsedAst
@@ -754,25 +810,29 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
     */
   def run(flix: Flix, args: Array[String]): Result[Unit, BootstrapError] = {
     for {
-      compilationResult <- build(flix)
-    } yield {
-      compilationResult.getMain match {
-        case None => ()
-        case Some(main) => main(args)
+      compilationResult <- build(flix, includeTests = false)
+      main <- compilationResult.getMain match {
+        case None => Result.Err(BootstrapError.GeneralError("Project has no main entry point."))
+        case Some(main) => Result.Ok(main)
       }
-    }
+    } yield main(args)
   }
 
   /**
     * Runs all tests in the flix package for the project.
     */
-  def test(flix: Flix): Result[Unit, BootstrapError] = {
-    for {
-      compilationResult <- build(flix)
-      res <- Tester.run(Nil, compilationResult)(flix).mapErr(_ => BootstrapError.GeneralError("Tester Error"))
-    } yield {
-      res
-    }
+  def test(flix: Flix, runner: Option[RunnerKind] = None): Result[Unit, BootstrapError] = flix.options.target match {
+    case CompilationTarget.Jvm =>
+      for {
+        compilationResult <- build(flix, includeTests = true)
+        res <- Tester.run(Nil, compilationResult)(flix).mapErr(_ => BootstrapError.GeneralError("Tester Error"))
+      } yield res
+
+    case CompilationTarget.LlvmNative | CompilationTarget.LlvmWasm =>
+      for {
+        compilationResult <- buildPortableTestDriver(flix)
+        _ <- executePortableTests(compilationResult, flix, runner)
+      } yield ()
   }
 
   /**
@@ -1187,26 +1247,30 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
       * If they have, they are added to flix. Then updates the timestamps
       * map to reflect the current source files and packages.
       */
-    def updateStaleSources(flix: Flix): Unit = {
+    def updateStaleSources(flix: Flix, includeTests: Boolean = true, forceReload: Boolean = false): Unit = {
+      val selectedSourcePaths =
+        if (includeTests) sourcePaths
+        else sourcePaths.filterNot(isTestSourcePath)
+
       val previousSources = timestamps.keySet
 
-      for (path <- sourcePaths if hasChanged(path)) {
+      for (path <- selectedSourcePaths if forceReload || hasChanged(path)) {
         flix.addFile(path)(SecurityContext.Unrestricted)
       }
 
-      for (path <- flixPackagePaths if hasChanged(path)) {
+      for (path <- flixPackagePaths if forceReload || hasChanged(path)) {
         flix.addPkg(path)(securityLevels.getOrElse(path, SecurityContext.Plain))
       }
 
-      for (path <- mavenPackagePaths if hasChanged(path)) {
+      for (path <- mavenPackagePaths if forceReload || hasChanged(path)) {
         flix.addJar(path)
       }
 
-      for (path <- jarPackagePaths if hasChanged(path)) {
+      for (path <- jarPackagePaths if forceReload || hasChanged(path)) {
         flix.addJar(path)
       }
 
-      val currentSources = (sourcePaths ::: flixPackagePaths ::: mavenPackagePaths ::: jarPackagePaths).filter(p => Files.exists(p))
+      val currentSources = (selectedSourcePaths ::: flixPackagePaths ::: mavenPackagePaths ::: jarPackagePaths).filter(p => Files.exists(p))
 
       val deletedSources = previousSources -- currentSources
       for (path <- deletedSources) {
@@ -1215,6 +1279,9 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
 
       timestamps = currentSources.map(f => f -> f.toFile.lastModified).toMap
     }
+
+    private def isTestSourcePath(path: Path): Boolean =
+      path.normalize().startsWith(Bootstrap.getTestDirectory(projectPath))
 
     /**
       * Returns `OK(())` if `dir` exists and is a readable directory.
@@ -1254,5 +1321,74 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
       Result.traverse(FileOps.getFilesWithExtIn(dir, EXT_JAR, Int.MaxValue))(Steps.validateJarFile).map(_ => ())
     }
 
+  }
+
+  private def defaultRunnerKind(target: CompilationTarget): RunnerKind = target match {
+    case CompilationTarget.Jvm => RunnerKind.Jvm
+    case CompilationTarget.LlvmNative => RunnerKind.Native
+    case CompilationTarget.LlvmWasm => RunnerKind.Node
+  }
+
+  private def buildPortableTestDriver(flix: Flix): Result[CompilationResult, BootstrapError] = {
+    val newOptions = flix.options.copy(
+      build = Build.Development,
+      entryPoint = None,
+      incremental = false,
+      outputJvm = true,
+      outputPath = Bootstrap.getBuildTargetDirectory(projectPath, flix.options.target),
+      artifactName = artifactName
+    )
+    flix.setOptions(newOptions)
+    flix.clearCaches()
+
+    Steps.updateStaleSources(flix, includeTests = true, forceReload = true)
+
+    implicit val sctx: SecurityContext = SecurityContext.Unrestricted
+
+    for {
+      root <- Steps.check(flix)
+      driver = ProjectTestDriver.mkDriverSource(ProjectTestDriver.collectProjectTests(root))(flix)
+      _ = {
+        val driverPath = Bootstrap.getBuildTargetDirectory(projectPath, flix.options.target).resolve("__FlixProjectTestDriver.flix").normalize()
+        flix.remVirtualPath(driverPath)
+        flix.addVirtualPath(driverPath, driver)
+        flix.setOptions(flix.options.copy(entryPoint = Some(ProjectTestDriver.EntryPointSym)))
+      }
+      compilationResult <- Steps.compile(flix)
+    } yield compilationResult
+  }
+
+  private def executePortableTests(compilationResult: CompilationResult,
+                                   flix: Flix,
+                                   runner: Option[RunnerKind]): Result[Unit, BootstrapError] = {
+    val selectedRunner = runner.getOrElse(defaultRunnerKind(flix.options.target))
+
+    flix.options.target match {
+      case CompilationTarget.LlvmWasm if selectedRunner == RunnerKind.Wasmtime =>
+        WasmRunSupport.runWasmtime(flix.options, projectPath, Array.empty) match {
+          case Right(_) => Result.Ok(())
+          case Left(msg) => Result.Err(BootstrapError.GeneralError(msg))
+        }
+
+      case CompilationTarget.LlvmWasm if selectedRunner == RunnerKind.Browser =>
+        BrowserRunSupport.runBrowser(flix.options, projectPath, Array.empty, headless = true) match {
+          case Right(_) => Result.Ok(())
+          case Left(msg) => Result.Err(BootstrapError.GeneralError(msg))
+        }
+
+      case _ =>
+        compilationResult.getMain match {
+          case Some(main) =>
+            try {
+              main(Array.empty)
+              Result.Ok(())
+            } catch {
+              case ex: Throwable =>
+                Result.Err(BootstrapError.GeneralError(Option(ex.getMessage).getOrElse(ex.toString)))
+            }
+          case None =>
+            Result.Err(BootstrapError.GeneralError("Generated test driver has no main entry point."))
+        }
+    }
   }
 }

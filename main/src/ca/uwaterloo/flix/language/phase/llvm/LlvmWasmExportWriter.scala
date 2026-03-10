@@ -19,7 +19,7 @@ package ca.uwaterloo.flix.language.phase.llvm
 import ca.uwaterloo.flix.api.Flix
 import ca.uwaterloo.flix.language.ast.{LoweredAst, SimpleType}
 import ca.uwaterloo.flix.language.ast.SourceLocation
-import ca.uwaterloo.flix.util.InternalCompilerException
+import ca.uwaterloo.flix.util.{ArtifactNames, InternalCompilerException}
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, LinkOption, Path}
@@ -43,7 +43,7 @@ object LlvmWasmExportWriter {
 
     val json = render(entries)
     val bytes = json.getBytes(StandardCharsets.UTF_8)
-    val path = manifestPath(flix.options.outputPath)
+    val path = manifestPath(flix.options.outputPath, flix.options.artifactName)
     writeFile(path, bytes)
     Some(path)
   }
@@ -51,8 +51,8 @@ object LlvmWasmExportWriter {
   /**
     * Returns the location of the wasm def-id manifest for the current build.
     */
-  def manifestPath(outputPath: Path): Path =
-    outputPath.resolve("llvm/").resolve("flix_wasm_exports.json").toAbsolutePath
+  def manifestPath(outputPath: Path, artifactName: String = ArtifactNames.DefaultBaseName): Path =
+    outputPath.resolve("llvm/").resolve(ArtifactNames.wasmExportsManifestFileName(artifactName)).toAbsolutePath
 
   private def render(entries: List[LlvmWasmDefs.Entry]): String = {
     val sb = new StringBuilder(8 * 1024)
@@ -122,4 +122,3 @@ object LlvmWasmExportWriter {
     Files.write(path, bytes)
   }
 }
-

@@ -18,6 +18,7 @@ package ca.uwaterloo.flix.tools.pkg
 
 import ca.uwaterloo.flix.language.ast.shared.SecurityContext
 import ca.uwaterloo.flix.tools.pkg.github.GitHub
+import ca.uwaterloo.flix.util.{CompilationTarget, EmitKind, RunnerKind}
 
 case class Manifest(name: String,
                     description: String,
@@ -27,7 +28,11 @@ case class Manifest(name: String,
                     flix: SemVer,
                     license: Option[String],
                     authors: List[String],
-                    dependencies: List[Dependency]) {
+                    dependencies: List[Dependency],
+                    buildConfig: Manifest.BuildConfig = Manifest.BuildConfig(),
+                    targetConfigs: Manifest.TargetConfigs = Manifest.TargetConfigs(),
+                    runConfig: Manifest.RunConfig = Manifest.RunConfig(),
+                    testConfig: Manifest.TestConfig = Manifest.TestConfig()) {
   def flixDependencies: List[Dependency.FlixDependency] = dependencies.collect { case dep: Dependency.FlixDependency => dep }
 
   def mavenDependencies: List[Dependency.MavenDependency] = dependencies.collect { case dep: Dependency.MavenDependency => dep }
@@ -37,16 +42,43 @@ case class Manifest(name: String,
 
 object Manifest {
 
+  case class BuildConfig(targets: List[CompilationTarget] = List(CompilationTarget.Jvm))
+
+  case class TargetConfig(emits: Option[List[EmitKind]] = None)
+
+  case class TargetConfigs(jvm: TargetConfig = TargetConfig(),
+                           native: TargetConfig = TargetConfig(),
+                           wasm: TargetConfig = TargetConfig()) {
+    def emitFor(target: CompilationTarget): Option[List[EmitKind]] = target match {
+      case CompilationTarget.Jvm => jvm.emits
+      case CompilationTarget.LlvmNative => native.emits
+      case CompilationTarget.LlvmWasm => wasm.emits
+    }
+  }
+
+  case class RunConfig(target: Option[CompilationTarget] = None,
+                       runner: Option[RunnerKind] = None)
+
+  case class TestConfig(target: Option[CompilationTarget] = None,
+                        runner: Option[RunnerKind] = None)
+
   /**
     * Formats `manifest` as a string / a valid `.toml` file.
     * Parsing the output yields the original manifest, i.e., `manifest`.
     */
   def format(manifest: Manifest): String = {
     val packageSection = mkPackageSection(manifest)
+    val buildSection = mkBuildSection(manifest)
+    val targetJvmSection = mkTargetSection("jvm", manifest.targetConfigs.jvm)
+    val targetNativeSection = mkTargetSection("native", manifest.targetConfigs.native)
+    val targetWasmSection = mkTargetSection("wasm", manifest.targetConfigs.wasm)
+    val runSection = mkRunSection(manifest)
+    val testSection = mkTestSection(manifest)
     val flixDepSection = mkFlixDependencySection(manifest)
     val mvnDepSection = mkMavenDependencySection(manifest)
     val jarDepSection = mkJarDependencySection(manifest)
-    List(packageSection, flixDepSection, mvnDepSection, jarDepSection)
+    List(Some(packageSection), buildSection, targetJvmSection, targetNativeSection, targetWasmSection, runSection, testSection, Some(flixDepSection), Some(mvnDepSection), Some(jarDepSection))
+      .flatten
       .map(formatTomlSection)
       .mkString(System.lineSeparator())
   }
@@ -84,6 +116,41 @@ object Manifest {
   private def mkFlixDependencySection(manifest: Manifest): TomlSection = {
     TomlSection("dependencies", manifest.flixDependencies.map(mkFlixDependency))
   }
+
+  private def mkBuildSection(manifest: Manifest): Option[TomlSection] =
+    if (manifest.buildConfig.targets == List(CompilationTarget.Jvm)) None
+    else {
+      val targets = TomlEntry.Present(TomlKey("targets"), TomlExp.TomlArray(manifest.buildConfig.targets.map(formatTarget).map(TomlExp.TomlValue.apply)))
+      Some(TomlSection("build", List(targets)))
+    }
+
+  private def mkRunSection(manifest: Manifest): Option[TomlSection] =
+    if (manifest.runConfig == RunConfig()) None
+    else {
+      val entries = List(
+        manifest.runConfig.target.map(target => TomlEntry.Present(TomlKey("target"), TomlExp.TomlValue(formatTarget(target)))).getOrElse(TomlEntry.Absent),
+        manifest.runConfig.runner.map(runner => TomlEntry.Present(TomlKey("runner"), TomlExp.TomlValue(formatRunner(runner)))).getOrElse(TomlEntry.Absent)
+      )
+      Some(TomlSection("run", entries))
+    }
+
+  private def mkTestSection(manifest: Manifest): Option[TomlSection] =
+    if (manifest.testConfig == TestConfig()) None
+    else {
+      val entries = List(
+        manifest.testConfig.target.map(target => TomlEntry.Present(TomlKey("target"), TomlExp.TomlValue(formatTarget(target)))).getOrElse(TomlEntry.Absent),
+        manifest.testConfig.runner.map(runner => TomlEntry.Present(TomlKey("runner"), TomlExp.TomlValue(formatRunner(runner)))).getOrElse(TomlEntry.Absent)
+      )
+      Some(TomlSection("test", entries))
+    }
+
+  private def mkTargetSection(name: String, config: TargetConfig): Option[TomlSection] =
+    config.emits match {
+      case None => None
+      case Some(emits) =>
+        val entry = TomlEntry.Present(TomlKey("emit"), TomlExp.TomlArray(emits.map(formatEmit).map(TomlExp.TomlValue.apply)))
+        Some(TomlSection(s"target.$name", List(entry)))
+    }
 
   private def mkMavenDependencySection(manifest: Manifest) = {
     TomlSection("mvn-dependencies", manifest.mavenDependencies.map(mkMavenDependency))
@@ -167,6 +234,31 @@ object Manifest {
   private def escape(str: String): String = {
     str.replace("\\", "\\\\")
       .replace("\"", "\\\"")
+  }
+
+  private def formatTarget(target: CompilationTarget): String = target match {
+    case CompilationTarget.Jvm => "jvm"
+    case CompilationTarget.LlvmNative => "native"
+    case CompilationTarget.LlvmWasm => "wasm"
+  }
+
+  private def formatEmit(emit: EmitKind): String = emit match {
+    case EmitKind.Classes => "classes"
+    case EmitKind.Jar => "jar"
+    case EmitKind.FatJar => "fatjar"
+    case EmitKind.Exe => "exe"
+    case EmitKind.StaticLib => "staticlib"
+    case EmitKind.SharedLib => "sharedlib"
+    case EmitKind.Component => "component"
+    case EmitKind.Js => "js"
+  }
+
+  private def formatRunner(runner: RunnerKind): String = runner match {
+    case RunnerKind.Jvm => "jvm"
+    case RunnerKind.Native => "native"
+    case RunnerKind.Node => "node"
+    case RunnerKind.Browser => "browser"
+    case RunnerKind.Wasmtime => "wasmtime"
   }
 
   private case class TomlSection(section: String, entries: List[TomlEntry])

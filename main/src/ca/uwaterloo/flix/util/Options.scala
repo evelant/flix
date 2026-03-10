@@ -28,6 +28,8 @@ object Options {
     lib = LibLevel.All,
     stdlibProfile = StdlibProfile.Jvm,
     target = CompilationTarget.Jvm,
+    artifactName = ArtifactNames.DefaultBaseName,
+    emits = Set.empty,
     build = Build.Development,
     entryPoint = None,
     githubToken = None,
@@ -91,6 +93,8 @@ object Options {
 case class Options(lib: LibLevel,
                    stdlibProfile: StdlibProfile,
                    target: CompilationTarget,
+                   artifactName: String,
+                   emits: Set[EmitKind] = Set.empty,
                    build: Build,
                    entryPoint: Option[Symbol.DefnSym],
                    githubToken: Option[String],
@@ -192,6 +196,29 @@ object CompilationTarget {
     * Compile to LLVM IR intended for WebAssembly.
     */
   case object LlvmWasm extends CompilationTarget
+}
+
+sealed trait EmitKind
+
+object EmitKind {
+  case object Classes extends EmitKind
+  case object Jar extends EmitKind
+  case object FatJar extends EmitKind
+  case object Exe extends EmitKind
+  case object StaticLib extends EmitKind
+  case object SharedLib extends EmitKind
+  case object Component extends EmitKind
+  case object Js extends EmitKind
+}
+
+sealed trait RunnerKind
+
+object RunnerKind {
+  case object Jvm extends RunnerKind
+  case object Native extends RunnerKind
+  case object Node extends RunnerKind
+  case object Browser extends RunnerKind
+  case object Wasmtime extends RunnerKind
 }
 
 sealed trait Subeffecting

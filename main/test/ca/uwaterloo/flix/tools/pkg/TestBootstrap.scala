@@ -1,15 +1,16 @@
 package ca.uwaterloo.flix.tools.pkg
 
 import ca.uwaterloo.flix.api.{Bootstrap, BootstrapError}
-import ca.uwaterloo.flix.util.{FileOps, Formatter, Result}
+import ca.uwaterloo.flix.util.{CompilationTarget, FileOps, Formatter, Result, RunnerKind, StdlibProfile}
 import org.scalatest.funsuite.AnyFunSuite
 
+import java.io.IOException
 import java.nio.file.{Files, Path}
 import java.security.{DigestInputStream, MessageDigest}
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.zip.ZipFile
-import scala.jdk.CollectionConverters.EnumerationHasAsScala
+import scala.jdk.CollectionConverters.*
 import scala.util.Using
 
 class TestBootstrap extends AnyFunSuite {
@@ -159,6 +160,35 @@ class TestBootstrap extends AnyFunSuite {
     Bootstrap.init(p)(System.out)
     val b = Bootstrap.bootstrap(p, None)(Formatter.getDefault, System.out).unsafeGet
     b.test(PkgTestUtils.mkFlix)
+  }
+
+  test("test-native") {
+    assume(hasCmd(List("zig", "version")), "zig not available")
+
+    val p = Files.createTempDirectory(ProjectPrefix)
+    Bootstrap.init(p)(System.out)
+    val b = Bootstrap.bootstrap(p, None)(Formatter.getDefault, System.out).unsafeGet
+
+    val flix = PkgTestUtils.mkFlix
+    flix.setOptions(flix.options.copy(target = CompilationTarget.LlvmNative, stdlibProfile = StdlibProfile.Portable))
+
+    b.test(flix, Some(RunnerKind.Native)).unsafeGet
+  }
+
+  test("test-wasm-node") {
+    assume(hasCmd(List("zig", "version")), "zig not available")
+    assume(hasCmd(List("wasm-tools", "--version")), "wasm-tools not available")
+    assume(hasCmd(List("jco", "--version")), "jco not available")
+    assume(hasCmd(List("node", "--version")), "node not available")
+
+    val p = Files.createTempDirectory(ProjectPrefix)
+    Bootstrap.init(p)(System.out)
+    val b = Bootstrap.bootstrap(p, None)(Formatter.getDefault, System.out).unsafeGet
+
+    val flix = PkgTestUtils.mkFlix
+    flix.setOptions(flix.options.copy(target = CompilationTarget.LlvmWasm, stdlibProfile = StdlibProfile.Portable))
+
+    b.test(flix, Some(RunnerKind.Node)).unsafeGet
   }
 
   test("clean-command-should-remove-class-files-and-directories-if-compiled-previously") {
@@ -402,6 +432,17 @@ class TestBootstrap extends AnyFunSuite {
       input.readNBytes(8192)
       sha.digest.map("%02x".format(_)).mkString
     }.get
+  }
+
+  private def hasCmd(cmd: List[String]): Boolean = {
+    try {
+      val p = new ProcessBuilder(cmd.asJava).redirectErrorStream(true).start()
+      p.waitFor()
+      p.exitValue() == 0
+    } catch {
+      case _: IOException => false
+      case _: InterruptedException => false
+    }
   }
 
 }

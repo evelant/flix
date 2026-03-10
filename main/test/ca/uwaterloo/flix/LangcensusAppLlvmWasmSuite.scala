@@ -13,12 +13,9 @@ import java.util.concurrent.TimeUnit
 import scala.jdk.CollectionConverters.*
 
 /**
-  * Opt-in live-network smoke test for the real weather app on the LLVM-wasm backend.
-  *
-  * Enable with:
-  *   `FLIX_LIVE_NETWORK_SMOKE=1 ./gradlew test --tests ca.uwaterloo.flix.WeatherAppLlvmWasmSuite`
+  * Compile and opt-in live-network coverage for the real langcensus app on the LLVM-wasm backend.
   */
-class WeatherAppLlvmWasmSuite extends AnyFunSuite {
+class LangcensusAppLlvmWasmSuite extends AnyFunSuite {
 
   private val TestOptions: Options =
     Options.TestWithLibAll.copy(
@@ -29,31 +26,48 @@ class WeatherAppLlvmWasmSuite extends AnyFunSuite {
       githubToken = sys.env.get("GITHUB_TOKEN"),
     )
 
-  private val weatherProject: Path =
-    Paths.get("examples/apps/weather").toAbsolutePath.normalize()
+  private val langcensusProject: Path =
+    Paths.get("examples/apps/langcensus").toAbsolutePath.normalize()
 
   private val wasmRunnerScript: Path =
     Paths.get("tools/wasm-runner-js/run-flix.mjs").toAbsolutePath.normalize()
 
-  test("llvm-wasm-weather-app-live-network") {
-    assume(liveNetworkEnabled, "FLIX_LIVE_NETWORK_SMOKE not set (skipping live weather app smoke test)")
-    assume(hasZig, "zig not found on PATH (skipping LLVM-wasm weather app smoke test)")
-    assume(hasWasmTools, "wasm-tools not found on PATH (skipping LLVM-wasm weather app smoke test)")
-    assume(hasJco, "jco not found on PATH (skipping LLVM-wasm weather app smoke test)")
-    assume(hasNode, "node not found on PATH (skipping LLVM-wasm weather app smoke test)")
+  test("llvm-wasm-langcensus-app-compiles") {
+    assume(hasZig, "zig not found on PATH (skipping LLVM-wasm langcensus compile test)")
+    assume(hasWasmTools, "wasm-tools not found on PATH (skipping LLVM-wasm langcensus compile test)")
+    assume(hasJco, "jco not found on PATH (skipping LLVM-wasm langcensus compile test)")
 
-    val projectRoot = Files.createTempDirectory("flix-weather-app-wasm-project-")
-    val outDir = Files.createTempDirectory("flix-weather-app-wasm-out-")
+    val projectRoot = Files.createTempDirectory("flix-langcensus-wasm-project-")
+    val outDir = Files.createTempDirectory("flix-langcensus-wasm-out-")
     try {
-      copyRecursive(weatherProject, projectRoot)
+      copyRecursive(langcensusProject, projectRoot)
+      compileProject(projectRoot, outDir)
+    } finally {
+      deleteRecursive(projectRoot)
+      deleteRecursive(outDir)
+    }
+  }
+
+  test("llvm-wasm-langcensus-app-live-network") {
+    assume(liveNetworkEnabled, "FLIX_LIVE_NETWORK_SMOKE not set (skipping live langcensus app smoke test)")
+    assume(githubConfigured, "GITHUB_NAME/GITHUB_TOKEN not set (skipping live langcensus app smoke test)")
+    assume(hasZig, "zig not found on PATH (skipping LLVM-wasm langcensus app smoke test)")
+    assume(hasWasmTools, "wasm-tools not found on PATH (skipping LLVM-wasm langcensus app smoke test)")
+    assume(hasJco, "jco not found on PATH (skipping LLVM-wasm langcensus app smoke test)")
+    assume(hasNode, "node not found on PATH (skipping LLVM-wasm langcensus app smoke test)")
+
+    val projectRoot = Files.createTempDirectory("flix-langcensus-wasm-project-")
+    val outDir = Files.createTempDirectory("flix-langcensus-wasm-out-")
+    try {
+      copyRecursive(langcensusProject, projectRoot)
 
       val (componentJs, exportsManifest) = compileProject(projectRoot, outDir)
-      val (exit, output) = runNode(componentJs, exportsManifest, rootDir = projectRoot, timeoutSeconds = 60)
+      val (exit, output) = runNode(componentJs, exportsManifest, rootDir = projectRoot, timeoutSeconds = 240)
       if (exit != 0) {
-        fail(s"Weather wasm app failed with exit $exit:\n$output")
+        fail(s"Langcensus wasm app failed with exit $exit:\n$output")
       }
 
-      assertWeatherOutput(output)
+      assertLangcensusOutput(output)
     } finally {
       deleteRecursive(projectRoot)
       deleteRecursive(outDir)
@@ -70,7 +84,7 @@ class WeatherAppLlvmWasmSuite extends AnyFunSuite {
 
     val bootstrap = Bootstrap.bootstrap(projectRoot, TestOptions.githubToken) match {
       case ca.uwaterloo.flix.util.Result.Ok(b) => b
-      case ca.uwaterloo.flix.util.Result.Err(e) => fail(s"Bootstrap failed for weather app: $e")
+      case ca.uwaterloo.flix.util.Result.Err(e) => fail(s"Bootstrap failed for langcensus app: $e")
     }
 
     bootstrap.reconfigureFlix(flix)
@@ -82,8 +96,8 @@ class WeatherAppLlvmWasmSuite extends AnyFunSuite {
 
     flix.codeGen(optRoot.get)
 
-    val componentJs = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmDriver.componentJsPath(outDir, "weather")
-    val exportsManifest = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmExportWriter.manifestPath(outDir, "weather")
+    val componentJs = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmDriver.componentJsPath(outDir, "langcensus")
+    val exportsManifest = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmExportWriter.manifestPath(outDir, "langcensus")
 
     if (!Files.exists(componentJs)) {
       fail(s"Missing wasm JS component artifact: $componentJs")
@@ -109,9 +123,9 @@ class WeatherAppLlvmWasmSuite extends AnyFunSuite {
       "--rootDir",
       rootDir.toAbsolutePath.normalize().toString,
       "--budget",
-      "500",
+      "5000",
       "--httpTimeoutMs",
-      "10000",
+      "15000",
     )
 
     val pb = new ProcessBuilder(cmd.asJava)
@@ -147,18 +161,25 @@ class WeatherAppLlvmWasmSuite extends AnyFunSuite {
 
     val output = new String(baos.toByteArray, StandardCharsets.UTF_8)
     if (!finished) {
-      fail(s"Weather wasm app timed out after ${timeoutSeconds}s. Output so far:\n$output")
+      fail(s"Langcensus wasm app timed out after ${timeoutSeconds}s. Output so far:\n$output")
     }
     (p.exitValue(), output)
   }
 
-  private def assertWeatherOutput(rawOutput: String): Unit = {
+  private def assertLangcensusOutput(rawOutput: String): Unit = {
     val output = stripAnsi(rawOutput).trim
-    if (output.contains("[Fatal]")) {
-      fail(s"Weather wasm app hit fatal path:\n$rawOutput")
+    if (output.contains("Parse Error") || output.contains("Environment variable") || output.contains("[Fatal]")) {
+      fail(s"Langcensus wasm app hit failure path:\n$rawOutput")
     }
-    if (!output.matches("(?s).*Weather for .+\\(.+\\) at .+°[NS], .+°[EW]:.*°C.*")) {
-      fail(s"Weather wasm app output did not match expected shape:\n$rawOutput")
+    val expectedSections = List(
+      "Analysis Result Per Repo",
+      "Analysis Result For User",
+      "Analysis Result By Bytes",
+    )
+    expectedSections.foreach { section =>
+      if (!output.contains(section)) {
+        fail(s"Langcensus wasm app output missing expected section '$section':\n$rawOutput")
+      }
     }
   }
 
@@ -218,4 +239,7 @@ class WeatherAppLlvmWasmSuite extends AnyFunSuite {
 
   private def liveNetworkEnabled: Boolean =
     sys.env.get("FLIX_LIVE_NETWORK_SMOKE").contains("1")
+
+  private def githubConfigured: Boolean =
+    sys.env.contains("GITHUB_NAME") && sys.env.contains("GITHUB_TOKEN")
 }

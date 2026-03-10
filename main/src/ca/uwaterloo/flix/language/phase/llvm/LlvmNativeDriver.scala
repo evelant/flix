@@ -18,7 +18,7 @@ package ca.uwaterloo.flix.language.phase.llvm
 
 import ca.uwaterloo.flix.api.Flix
 import ca.uwaterloo.flix.language.ast.SourceLocation
-import ca.uwaterloo.flix.util.{Build, InternalCompilerException}
+import ca.uwaterloo.flix.util.{ArtifactNames, Build, InternalCompilerException}
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, StandardCopyOption}
@@ -40,6 +40,7 @@ object LlvmNativeDriver {
 
   private val BundledRuntimeZigResource: String = "/runtime/src/flix_rt_llvm.zig"
   private val BundledUnicodeCaseTablesZigResource: String = "/runtime/src/unicode_case_tables.zig"
+  private val BundledRegexRuntimeZigResource: String = "/runtime/src/rt_regex.zig"
 
   /**
     * Compiles `modulePath` (a `.ll` file) into a native executable in `outputPath/llvm/`.
@@ -48,8 +49,7 @@ object LlvmNativeDriver {
     val outDir = flix.options.outputPath.resolve("llvm").toAbsolutePath
     Files.createDirectories(outDir)
 
-    val exeName = if (isWindows) "flix-llvm-native.exe" else "flix-llvm-native"
-    val exePath = outDir.resolve(exeName)
+    val exePath = executablePath(flix.options.outputPath, flix.options.artifactName)
 
     val optFlag = flix.options.build match {
       case Build.Development => "-O0"
@@ -100,7 +100,7 @@ object LlvmNativeDriver {
     val runtimeObj = compileRuntime(runtimeZig, outDir, optFlag)
     val moduleObj = compileModule(modulePath, outDir, optFlag)
 
-    val libPath = outDir.resolve("libflix-llvm-native.a")
+    val libPath = staticLibraryPath(flix.options.outputPath, flix.options.artifactName)
     val arCmd = List(
       "zig",
       "ar",
@@ -138,12 +138,7 @@ object LlvmNativeDriver {
     val runtimeObj = compileRuntime(runtimeZig, outDir, optFlag)
     val moduleObj = compileModule(modulePath, outDir, optFlag)
 
-    val libName =
-      if (isWindows) "flix-llvm-native.dll"
-      else if (isMac) "libflix-llvm-native.dylib"
-      else "libflix-llvm-native.so"
-
-    val libPath = outDir.resolve(libName)
+    val libPath = sharedLibraryPath(flix.options.outputPath, flix.options.artifactName)
 
     val linkModeFlag = if (isMac) "-dynamiclib" else "-shared"
     val windowsExportFlags = if (isWindows) List("-Wl,--export-all-symbols") else Nil
@@ -185,6 +180,7 @@ object LlvmNativeDriver {
 
     val dest = outDir.resolve("flix_rt_llvm.zig").toAbsolutePath.normalize()
     val unicodeDest = outDir.resolve("unicode_case_tables.zig").toAbsolutePath.normalize()
+    val regexDest = outDir.resolve("rt_regex.zig").toAbsolutePath.normalize()
     val is = Option(getClass.getResourceAsStream(BundledRuntimeZigResource)).getOrElse {
       throw InternalCompilerException(
         s"Missing LLVM runtime support file: '$cwdRuntime' and no bundled resource '$BundledRuntimeZigResource' found.",
@@ -197,13 +193,21 @@ object LlvmNativeDriver {
         SourceLocation.Unknown
       )
     }
+    val regexIs = Option(getClass.getResourceAsStream(BundledRegexRuntimeZigResource)).getOrElse {
+      throw InternalCompilerException(
+        s"Missing LLVM runtime support file: '$cwdRuntime' and no bundled resource '$BundledRegexRuntimeZigResource' found.",
+        SourceLocation.Unknown
+      )
+    }
 
     try {
       Files.copy(is, dest, StandardCopyOption.REPLACE_EXISTING)
       Files.copy(unicodeIs, unicodeDest, StandardCopyOption.REPLACE_EXISTING)
+      Files.copy(regexIs, regexDest, StandardCopyOption.REPLACE_EXISTING)
     } finally {
       is.close()
       unicodeIs.close()
+      regexIs.close()
     }
 
     dest
@@ -259,6 +263,15 @@ object LlvmNativeDriver {
 
   private def isMac: Boolean =
     System.getProperty("os.name", "").toLowerCase.contains("mac")
+
+  def executablePath(outputPath: Path, artifactName: String = ArtifactNames.DefaultBaseName): Path =
+    outputPath.resolve("llvm").resolve(ArtifactNames.nativeExecutableFileName(artifactName)).toAbsolutePath.normalize()
+
+  def staticLibraryPath(outputPath: Path, artifactName: String = ArtifactNames.DefaultBaseName): Path =
+    outputPath.resolve("llvm").resolve(ArtifactNames.nativeStaticLibraryFileName(artifactName)).toAbsolutePath.normalize()
+
+  def sharedLibraryPath(outputPath: Path, artifactName: String = ArtifactNames.DefaultBaseName): Path =
+    outputPath.resolve("llvm").resolve(ArtifactNames.nativeSharedLibraryFileName(artifactName)).toAbsolutePath.normalize()
 
   private def picFlags: List[String] =
     if (isWindows) Nil else List("-fPIC")

@@ -35,7 +35,7 @@ import ca.uwaterloo.flix.util.tc.Debug
 
 import java.net.URI
 import java.nio.charset.Charset
-import java.nio.file.{Files, Path}
+import java.nio.file.{Files, Path, Paths}
 import java.util.concurrent.ForkJoinPool
 import java.util.zip.ZipFile
 import scala.collection.mutable
@@ -645,37 +645,82 @@ class Flix {
         val hasMain = loweredAst.mainEntryPoint.nonEmpty
         val hasExports = loweredAst.defs.values.exists(_.ann.isExport)
         val module = LlvmBackend.run(loweredAst)
+        val requestedEmits = flix.options.emits
 
         val totalTime = flix.getTotalTime
         val totalSize = LlvmWriter.run(module)
 
         val result = flix.options.target match {
-          case CompilationTarget.LlvmNative if hasMain =>
-            if (hasExports) {
+          case CompilationTarget.LlvmNative =>
+            val emitExe = if (requestedEmits.isEmpty) hasMain else requestedEmits.contains(EmitKind.Exe)
+            val emitStaticLib = if (requestedEmits.isEmpty) !hasMain && hasExports else requestedEmits.contains(EmitKind.StaticLib)
+            val emitSharedLib = if (requestedEmits.isEmpty) !hasMain && hasExports else requestedEmits.contains(EmitKind.SharedLib)
+
+            if ((emitStaticLib || emitSharedLib) && !hasExports) {
+              throw new RuntimeException("Requested native library emit, but the program has no @Export definitions.")
+            }
+
+            if (emitExe && !hasMain) {
+              throw new RuntimeException("Requested native executable emit, but the program has no main entry point.")
+            }
+
+            if (hasExports && (emitExe || emitStaticLib || emitSharedLib)) {
               LlvmExportWriter.run(loweredAst)
             }
-            val artifacts = LlvmNativeDriver.run(LlvmWriter.modulePath(flix.options.outputPath))
-            val main = Some((args: Array[String]) => {
-              val cmd = (artifacts.executable.toString :: args.toList).asJava
-              val pb = new ProcessBuilder(cmd)
-              pb.inheritIO()
-              val exit = pb.start().waitFor()
-              if (exit != 0) {
-                throw new RuntimeException(s"LLVM-native program exited with code: $exit")
-              }
-            })
-            new CompilationResult(main, Map.empty, typedAst.sources, totalTime, totalSize)
 
-          case CompilationTarget.LlvmNative if hasExports =>
-            LlvmExportWriter.run(loweredAst)
-            LlvmNativeDriver.buildStaticLibrary(LlvmWriter.modulePath(flix.options.outputPath))
-            LlvmNativeDriver.buildSharedLibrary(LlvmWriter.modulePath(flix.options.outputPath))
-            new CompilationResult(None, Map.empty, typedAst.sources, totalTime, totalSize)
+            val main =
+              if (emitExe) {
+                val artifacts = LlvmNativeDriver.run(LlvmWriter.modulePath(flix.options.outputPath))
+                Some((args: Array[String]) => {
+                  val cmd = (artifacts.executable.toString :: args.toList).asJava
+                  val pb = new ProcessBuilder(cmd)
+                  pb.inheritIO()
+                  val exit = pb.start().waitFor()
+                  if (exit != 0) {
+                    throw new RuntimeException(s"LLVM-native program exited with code: $exit")
+                  }
+                })
+              } else None
+
+            if (emitStaticLib) {
+              LlvmNativeDriver.buildStaticLibrary(LlvmWriter.modulePath(flix.options.outputPath))
+            }
+
+            if (emitSharedLib) {
+              LlvmNativeDriver.buildSharedLibrary(LlvmWriter.modulePath(flix.options.outputPath))
+            }
+
+            new CompilationResult(main, Map.empty, typedAst.sources, totalTime, totalSize)
 
           case CompilationTarget.LlvmWasm =>
             LlvmWasmExportWriter.run(loweredAst)
-            LlvmWasmDriver.run(LlvmWriter.modulePath(flix.options.outputPath))
-            new CompilationResult(None, Map.empty, typedAst.sources, totalTime, totalSize)
+            val emitJs = requestedEmits.isEmpty || requestedEmits.contains(EmitKind.Js)
+            val artifacts = LlvmWasmDriver.run(LlvmWriter.modulePath(flix.options.outputPath), emitJs = emitJs)
+            val main =
+              if (hasMain) {
+                Some((args: Array[String]) => {
+                  val rootDir = Paths.get(".").toAbsolutePath.normalize()
+                  val cmd =
+                    List(
+                      "node",
+                      artifacts.nodeRunner.toString,
+                      "--js",
+                      artifacts.componentJs.toString,
+                      "--exports",
+                      artifacts.exportsManifest.toString,
+                      "--rootDir",
+                      rootDir.toString
+                    ) ::: args.toList.flatMap(arg => List("--argv", arg))
+
+                  val pb = new ProcessBuilder(cmd.asJava)
+                  pb.inheritIO()
+                  val exit = pb.start().waitFor()
+                  if (exit != 0) {
+                    throw new RuntimeException(s"LLVM-wasm program exited with code: $exit")
+                  }
+                })
+              } else None
+            new CompilationResult(main, Map.empty, typedAst.sources, totalTime, totalSize)
 
           case _ =>
             // LLVM artifacts are written to disk. We do not (yet) support running or loading them.

@@ -146,8 +146,7 @@ class PortableProcessLlvmNativeSuite extends AnyFunSuite {
   }
 
   private def executablePath(outDir: Path): Path = {
-    val exeName = if (isWindows) "flix-llvm-native.exe" else "flix-llvm-native"
-    outDir.resolve("llvm").resolve(exeName).toAbsolutePath.normalize()
+    ca.uwaterloo.flix.language.phase.llvm.LlvmNativeDriver.executablePath(outDir)
   }
 
   private def isWindows: Boolean =
