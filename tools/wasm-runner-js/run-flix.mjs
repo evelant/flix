@@ -37,7 +37,9 @@ options:
 
 notes:
   - This runs Flix wasm *components* transpiled by 'jco transpile' (ES module output).
-  - Only a small set of argument/result types are supported right now: Unit/Bool/Int32/String.
+  - Supported scalar argument types: Unit/Bool/Int8/Int16/Int32/Int64/Float32/Float64/String.
+  - Supported '--printResult' types: Unit/Bool/Int32/String.
+  - Bytes are not yet supported by this CLI runner.
 `;
   console.error(msg);
   process.exit(code);
@@ -120,6 +122,18 @@ function parseU64BigInt(x, name) {
   }
 }
 
+function parseI64BigInt(x, name) {
+  try {
+    const v = BigInt(x);
+    const min = -(1n << 63n);
+    const max = (1n << 63n) - 1n;
+    if (v < min || v > max) throw new Error("out of range");
+    return v;
+  } catch {
+    throw new Error(`invalid ${name}: ${x}`);
+  }
+}
+
 async function loadExportsManifest(exportsPath) {
   const txt = await fs.readFile(exportsPath, { encoding: "utf8" });
   const json = JSON.parse(txt);
@@ -163,12 +177,42 @@ function boxArg(runtime, ctx, tpe, raw) {
     }
     case "String":
       return runtime.boxString(ctx, raw);
+    case "Int8": {
+      const n = Number.parseInt(raw, 10);
+      if (!Number.isInteger(n) || n < -128 || n > 127) {
+        throw new Error(`invalid Int8 arg: ${raw}`);
+      }
+      return runtime.boxI8(ctx, n);
+    }
+    case "Int16": {
+      const n = Number.parseInt(raw, 10);
+      if (!Number.isInteger(n) || n < -32768 || n > 32767) {
+        throw new Error(`invalid Int16 arg: ${raw}`);
+      }
+      return runtime.boxI16(ctx, n);
+    }
     case "Int32": {
       const n = Number.parseInt(raw, 10);
       if (!Number.isInteger(n) || n < -2147483648 || n > 2147483647) {
         throw new Error(`invalid Int32 arg: ${raw}`);
       }
       return runtime.boxI32(ctx, n);
+    }
+    case "Int64":
+      return runtime.boxI64(ctx, parseI64BigInt(raw, "Int64"));
+    case "Float32": {
+      const n = Number(raw);
+      if (Number.isNaN(n) && raw.toLowerCase() !== "nan") {
+        throw new Error(`invalid Float32 arg: ${raw}`);
+      }
+      return runtime.boxF32(ctx, n);
+    }
+    case "Float64": {
+      const n = Number(raw);
+      if (Number.isNaN(n) && raw.toLowerCase() !== "nan") {
+        throw new Error(`invalid Float64 arg: ${raw}`);
+      }
+      return runtime.boxF64(ctx, n);
     }
     case "Bool": {
       if (raw === "true") return runtime.boxBool(ctx, true);
@@ -191,7 +235,7 @@ function maybeUnbox(runtime, ctx, tpe, v) {
     case "Bool":
       return runtime.unboxBool(ctx, v);
     default:
-      return null;
+      throw new Error(`printResult unsupported for result type: ${tpe}`);
   }
 }
 

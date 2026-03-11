@@ -154,11 +154,41 @@ fn box_arg<T>(store: &mut Store<T>, rt: &bindings::exports::flix::runtime::runti
     match tpe {
         "Unit" => Ok(rt.call_box_i32(store, ctx, 0)?),
         "String" => Ok(rt.call_box_string(store, ctx, raw)?),
+        "Int8" => {
+            let n = raw
+                .parse::<i8>()
+                .with_context(|| format!("invalid Int8 arg: {raw}"))?;
+            Ok(rt.call_box_i8(store, ctx, n)?)
+        }
+        "Int16" => {
+            let n = raw
+                .parse::<i16>()
+                .with_context(|| format!("invalid Int16 arg: {raw}"))?;
+            Ok(rt.call_box_i16(store, ctx, n)?)
+        }
         "Int32" => {
             let n = raw
                 .parse::<i32>()
                 .with_context(|| format!("invalid Int32 arg: {raw}"))?;
             Ok(rt.call_box_i32(store, ctx, n)?)
+        }
+        "Int64" => {
+            let n = raw
+                .parse::<i64>()
+                .with_context(|| format!("invalid Int64 arg: {raw}"))?;
+            Ok(rt.call_box_i64(store, ctx, n)?)
+        }
+        "Float32" => {
+            let n = raw
+                .parse::<f32>()
+                .with_context(|| format!("invalid Float32 arg: {raw}"))?;
+            Ok(rt.call_box_f32(store, ctx, n)?)
+        }
+        "Float64" => {
+            let n = raw
+                .parse::<f64>()
+                .with_context(|| format!("invalid Float64 arg: {raw}"))?;
+            Ok(rt.call_box_f64(store, ctx, n)?)
         }
         "Bool" => match raw {
             "true" => Ok(rt.call_box_bool(store, ctx, true)?),

@@ -20,12 +20,13 @@ import ca.uwaterloo.flix.TestUtils
 import ca.uwaterloo.flix.language.ast.shared.SecurityContext
 import ca.uwaterloo.flix.language.errors.{EntryPointError, SafetyError}
 import ca.uwaterloo.flix.language.errors.SafetyError.{Forbidden, IllegalCatchType, IllegalMethodEffect, IllegalNegativelyBoundWildCard, IllegalNonPositivelyBoundVar, IllegalPatternInBodyAtom, IllegalRelationalUseOfLatticeVar, IllegalThrowType}
-import ca.uwaterloo.flix.util.Options
+import ca.uwaterloo.flix.util.{CompilationTarget, Options, StdlibProfile}
 import org.scalatest.funsuite.AnyFunSuite
 
 class TestSafety extends AnyFunSuite with TestUtils {
 
   val DefaultOptions: Options = Options.TestWithLibMin
+  val LlvmPortableOptions: Options = Options.TestWithLibAll.copy(target = CompilationTarget.LlvmNative, stdlibProfile = StdlibProfile.Portable)
 
   test("IllegalCatchType.01") {
     val input =
@@ -763,6 +764,33 @@ class TestSafety extends AnyFunSuite with TestUtils {
         |""".stripMargin
     val result = check(input, Options.TestWithLibNix)
     expectError[EntryPointError.IllegalEntryPointTypeVariables](result)
+  }
+
+  test("PortableExportFunction.01") {
+    val input =
+      """
+        |mod Mod { @Export pub def echo(s: String): String = s }
+        |""".stripMargin
+    val result = check(input, LlvmPortableOptions)
+    expectSuccess(result)
+  }
+
+  test("PortableExportFunction.02") {
+    val input =
+      """
+        |mod Mod { @Export pub def bytesId(a: Array[Int8, Static]): Array[Int8, Static] = a }
+        |""".stripMargin
+    val result = check(input, LlvmPortableOptions)
+    expectSuccess(result)
+  }
+
+  test("IllegalPortableExportFunction.10") {
+    val input =
+      """
+        |mod Mod { @Export pub def id(x: Char): Char = x }
+        |""".stripMargin
+    val result = check(input, LlvmPortableOptions)
+    expectError[EntryPointError.IllegalExportType](result)
   }
 
   test("IllegalMethodEffect.01") {

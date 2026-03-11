@@ -36,6 +36,7 @@ class TestAll extends Suites(
   new PortableProcessLlvmNativeSuite,
   new PortableTcpLlvmNativeSuite,
   new LlvmNativeExportSuite,
+  new LlvmWasmExportSuite,
   new PortableStdlibLlvmNativeRuntimeSuite,
   new ResiliencySuite,
   new TestMain,

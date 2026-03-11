@@ -469,12 +469,15 @@ object EntryPoints {
     *   - `isExportableType(java.lang.Object) = true` (JVM only)
     */
   private def isExportableType(tpe: Type)(implicit flix: Flix): Result[Boolean, ErrorOrMalformed.type] = {
-    // TODO: Exportability should eventually be fully backend-specific (stable C ABI for LLVM targets, Java types for JVM).
     flix.options.target match {
       case CompilationTarget.Jvm =>
         isExportableJavaType(tpe)
       case CompilationTarget.LlvmNative | CompilationTarget.LlvmWasm =>
-        isExportableNativeType(tpe)
+        ExportAbi.portableV0FromType(tpe) match {
+          case Result.Ok(Some(_)) => Result.Ok(true)
+          case Result.Ok(None) => Result.Ok(false)
+          case Result.Err(_) => Result.Err(ErrorOrMalformed)
+        }
     }
   }
 
@@ -509,73 +512,6 @@ object EntryPoints {
       case Type.JvmToEff(_, _) => Result.Err(ErrorOrMalformed)
       case Type.UnresolvedJvmType(_, _) => Result.Err(ErrorOrMalformed)
     }
-  }
-
-  /**
-    * Returns `true` if `tpe` is a type supported by the LLVM-native C ABI for `@Export`.
-    *
-    * Bring-up policy: allow a small portable set of types and encode non-primitive values as opaque pointers.
-    */
-  @tailrec
-  private def isExportableNativeType(tpe: Type): Result[Boolean, ErrorOrMalformed.type] = tpe match {
-    case Type.Cst(TypeConstructor.Bool, _) => Result.Ok(true)
-    case Type.Cst(TypeConstructor.Char, _) => Result.Ok(true)
-    case Type.Cst(TypeConstructor.Float32, _) => Result.Ok(true)
-    case Type.Cst(TypeConstructor.Float64, _) => Result.Ok(true)
-    case Type.Cst(TypeConstructor.Int8, _) => Result.Ok(true)
-    case Type.Cst(TypeConstructor.Int16, _) => Result.Ok(true)
-    case Type.Cst(TypeConstructor.Int32, _) => Result.Ok(true)
-    case Type.Cst(TypeConstructor.Int64, _) => Result.Ok(true)
-    case Type.Cst(TypeConstructor.Str, _) => Result.Ok(true)
-
-    // Array[Int8, Static] (Static is aliased to IO in the stdlib).
-    case Type.Apply(Type.Apply(Type.Cst(TypeConstructor.Array, _), elm, _), reg, _) =>
-      (isInt8Type(elm), isStaticRegion(reg)) match {
-        case (Result.Ok(true), Result.Ok(true)) => Result.Ok(true)
-        case (Result.Ok(_), Result.Ok(_)) => Result.Ok(false)
-        case _ => Result.Err(ErrorOrMalformed)
-      }
-
-    case Type.Cst(_, _) => Result.Ok(false)
-    case Type.Apply(_, _, _) => Result.Ok(false)
-    case Type.Alias(_, _, t, _) => isExportableNativeType(t)
-    case Type.Var(_, _) => Result.Err(ErrorOrMalformed)
-    case Type.AssocType(_, _, _, _) => Result.Err(ErrorOrMalformed)
-    case Type.JvmToType(_, _) => Result.Err(ErrorOrMalformed)
-    case Type.JvmToEff(_, _) => Result.Err(ErrorOrMalformed)
-    case Type.UnresolvedJvmType(_, _) => Result.Err(ErrorOrMalformed)
-  }
-
-  /**
-    * Returns `true` if `tpe` represents the global-lifetime region (Static), which is aliased to `IO`.
-    */
-  @tailrec
-  private def isStaticRegion(tpe: Type): Result[Boolean, ErrorOrMalformed.type] = tpe match {
-    case Type.Cst(TypeConstructor.Effect(sym, _), _) if sym == Symbol.IO => Result.Ok(true)
-    case Type.Alias(_, _, t, _) => isStaticRegion(t)
-    case Type.Cst(_, _) => Result.Ok(false)
-    case Type.Apply(_, _, _) => Result.Ok(false)
-    case Type.Var(_, _) => Result.Err(ErrorOrMalformed)
-    case Type.AssocType(_, _, _, _) => Result.Err(ErrorOrMalformed)
-    case Type.JvmToType(_, _) => Result.Err(ErrorOrMalformed)
-    case Type.JvmToEff(_, _) => Result.Err(ErrorOrMalformed)
-    case Type.UnresolvedJvmType(_, _) => Result.Err(ErrorOrMalformed)
-  }
-
-  /**
-    * Returns `true` if `tpe` is equivalent to `Int8` (via type aliases).
-    */
-  @tailrec
-  private def isInt8Type(tpe: Type): Result[Boolean, ErrorOrMalformed.type] = tpe match {
-    case Type.Cst(TypeConstructor.Int8, _) => Result.Ok(true)
-    case Type.Alias(_, _, t, _) => isInt8Type(t)
-    case Type.Cst(_, _) => Result.Ok(false)
-    case Type.Apply(_, _, _) => Result.Ok(false)
-    case Type.Var(_, _) => Result.Err(ErrorOrMalformed)
-    case Type.AssocType(_, _, _, _) => Result.Err(ErrorOrMalformed)
-    case Type.JvmToType(_, _) => Result.Err(ErrorOrMalformed)
-    case Type.JvmToEff(_, _) => Result.Err(ErrorOrMalformed)
-    case Type.UnresolvedJvmType(_, _) => Result.Err(ErrorOrMalformed)
   }
 
   /**

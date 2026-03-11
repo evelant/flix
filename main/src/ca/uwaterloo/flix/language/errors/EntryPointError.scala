@@ -180,7 +180,7 @@ object EntryPointError {
         case CompilationTarget.Jvm =>
           "Bool, Char, Int8, Int16, Int32, Int64, Float32, Float64, or java.lang.Object"
         case CompilationTarget.LlvmNative | CompilationTarget.LlvmWasm =>
-          "Bool, Char, Int8, Int16, Int32, Int64, Float32, Float64, String, Array[Int8, Static], or java.lang.Object"
+          "Unit, Bool, Int8, Int16, Int32, Int64, Float32, Float64, String, or Bytes (Array[Int8, Static])"
       }
 
       s""">> Unexpected type '${red(FormatType.formatType(t))}' in exported function.

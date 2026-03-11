@@ -1517,7 +1517,13 @@ object Main {
           ca.uwaterloo.flix.language.phase.llvm.LlvmWasmExportWriter.manifestPath(options.outputPath, options.artifactName),
           ca.uwaterloo.flix.language.phase.llvm.LlvmWasmDriver.coreWasmPath(options.outputPath, options.artifactName),
           ca.uwaterloo.flix.language.phase.llvm.LlvmWasmDriver.componentWasmPath(options.outputPath, options.artifactName),
+          ca.uwaterloo.flix.language.phase.llvm.LlvmWasmTypedExportsWriter.typedComponentPath(options.outputPath, options.artifactName),
           ca.uwaterloo.flix.language.phase.llvm.LlvmWasmDriver.componentJsPath(options.outputPath, options.artifactName),
+          ca.uwaterloo.flix.language.phase.llvm.LlvmWasmTypedExportsWriter.typedComponentJsPath(options.outputPath, options.artifactName),
+          ca.uwaterloo.flix.language.phase.llvm.LlvmWasmTypedExportsWriter.typedComponentTypesPath(options.outputPath, options.artifactName),
+          ca.uwaterloo.flix.language.phase.llvm.LlvmWasmBindingWriter.bindingsJsPath(options.outputPath, options.artifactName),
+          ca.uwaterloo.flix.language.phase.llvm.LlvmWasmBindingWriter.bindingsTypesPath(options.outputPath, options.artifactName),
+          ca.uwaterloo.flix.language.phase.llvm.LlvmWasmTypedExportsWriter.typedWitDirPath(options.outputPath, options.artifactName),
           llvmDir.resolve("wasm").resolve("js")
         ).filter(Files.exists(_))
 

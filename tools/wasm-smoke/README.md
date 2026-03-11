@@ -26,8 +26,8 @@ It is intentionally minimal and should stay that way.
     - `suspension-request` returning `op-request`
     - `resume-timer-sleep` (no “fabricate Unit” requirement)
     - `resume-http-ok` / `resume-http-err`
-    - Filesystem: typed requests + `resume-file-*` resumers (see `docs/planning/native-backend/wit/op-catalog.md`)
-    - Process: typed requests + `resume-process-*` resumers (see `docs/planning/native-backend/wit/op-catalog.md`)
+    - Filesystem: typed requests + `resume-file-*` resumers (see `runtime/wit/op-catalog.md`)
+    - Process: typed requests + `resume-process-*` resumers (see `runtime/wit/op-catalog.md`)
     - TCP:
       - `resume-tcp-socket-connect-ok` / `resume-tcp-socket-connect-err`
       - `resume-tcp-socket-read-ok` / `resume-tcp-socket-read-err`

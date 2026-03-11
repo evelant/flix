@@ -60,6 +60,24 @@ object ArtifactNames {
   def wasmExportsManifestFileName(raw: String): String =
     s"${baseName(raw)}.exports.json"
 
+  def wasmBindingsJsFileName(raw: String): String =
+    s"${baseName(raw)}.bindings.mjs"
+
+  def wasmBindingsTypesFileName(raw: String): String =
+    s"${baseName(raw)}.bindings.d.ts"
+
+  def wasmTypedExportComponentFileName(raw: String): String =
+    s"${baseName(raw)}.exports.component.wasm"
+
+  def wasmTypedExportComponentJsFileName(raw: String): String =
+    s"${baseName(raw)}.exports.component.js"
+
+  def wasmTypedExportComponentTypesFileName(raw: String): String =
+    s"${baseName(raw)}.exports.component.d.ts"
+
+  def wasmTypedExportWitDirName(raw: String): String =
+    s"${baseName(raw)}.exports.wit"
+
   def wasmCoreFileName(raw: String): String =
     s"${baseName(raw)}.core.wasm"
 

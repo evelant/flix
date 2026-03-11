@@ -8134,6 +8134,53 @@ fn resumeTaskWithHandle(ctx_rep: *exports_flix_runtime_runtime_ctx_t, susp: expo
     exports_flix_runtime_runtime_suspension_drop_own(susp);
 }
 
+fn resumeTaskWithHandleSync(ctx_rep: *exports_flix_runtime_runtime_ctx_t, susp: exports_flix_runtime_runtime_own_suspension_t, resume_handle: i64, is_throw: bool, ret: *exports_flix_runtime_runtime_exec_t) void {
+    witSetCurrentCtx(ctx_rep);
+
+    const srep = exports_flix_runtime_runtime_suspension_rep(susp);
+    const task_id = srep.task_id;
+    const susp_handle = srep.susp_handle;
+
+    const task_ptr = ctx_rep.tasks.getPtr(task_id) orelse @panic("resume-sync on unknown task-id");
+
+    switch (task_ptr.state) {
+        .Blocked => |st| {
+            if (st.susp_handle != susp_handle) @panic("resume-sync suspension mismatch");
+        },
+        else => @panic("resume-sync on non-blocked task"),
+    }
+
+    if (is_throw) {
+        task_ptr.state = .{ .ReadyResumeThrow = .{ .susp_handle = susp_handle, .exn_handle = resume_handle } };
+    } else {
+        task_ptr.state = .{ .ReadyResumeOk = .{ .susp_handle = susp_handle, .resume_handle = resume_handle } };
+    }
+
+    // Consume the old suspension resource before resuming.
+    exports_flix_runtime_runtime_suspension_drop_own(susp);
+
+    if (runTaskOnce(ctx_rep, task_id, task_ptr)) |own_susp| {
+        ret.* = .{
+            .tag = 2,
+            .val = .{ .suspended = .{ .task = task_id, .suspension = own_susp } },
+        };
+        return;
+    }
+
+    switch (task_ptr.state) {
+        .Completed => |st| {
+            const own_v = makeOwnRuntimeValue(ctx_rep, st.handle);
+            if (st.tag == 0) {
+                ret.* = .{ .tag = 0, .val = .{ .ok = own_v } };
+            } else {
+                ret.* = .{ .tag = 1, .val = .{ .thrown = own_v } };
+            }
+            _ = ctx_rep.tasks.remove(task_id);
+        },
+        else => @panic("resume-sync: unexpected task state"),
+    }
+}
+
 fn makeIoTuple2(ok: bool, msg: *anyopaque) *anyopaque {
     return allocFlixTupleFromPayloads(&.{ payloadFromBool(ok), payloadFromPtr(msg) }, 0b10);
 }
@@ -8167,6 +8214,42 @@ fn makeHandleForPtr(ctx_ptr: *anyopaque, ptr: *anyopaque) i64 {
 
 fn makeHandleForI64(ctx_ptr: *anyopaque, payload: i64) i64 {
     return flix_handle_new_i64(ctx_ptr, payload);
+}
+
+fn makeOwnRuntimeValue(ctx_rep: *exports_flix_runtime_runtime_ctx_t, handle: i64) exports_flix_runtime_runtime_own_value_t {
+    const rep = rt_alloc.create(exports_flix_runtime_runtime_value_t) catch @panic("oom");
+    rep.* = .{ .flix_ctx = ctx_rep.flix_ctx, .handle = handle };
+    return exports_flix_runtime_runtime_value_new(rep);
+}
+
+fn suspensionArgCountRaw(s: exports_flix_runtime_runtime_borrow_suspension_t) usize {
+    const susp_ptr = flix_handle_get(s.flix_ctx, s.susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    const arg_count_i64: i64 = slots[4];
+    if (arg_count_i64 < 0) @panic("invalid suspension argCount");
+    return @intCast(arg_count_i64);
+}
+
+fn suspensionArgBits(s: exports_flix_runtime_runtime_borrow_suspension_t, idx0: u32) i64 {
+    const idx: usize = @intCast(idx0);
+    const arg_count = suspensionArgCountRaw(s);
+    if (idx >= arg_count) @panic("suspension arg index out of bounds");
+
+    const susp_ptr = flix_handle_get(s.flix_ctx, s.susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    return slots[5 + idx];
+}
+
+fn witScalarBits(v: exports_flix_runtime_runtime_borrow_value_t, comptime ptr_unbox: fn (i64) callconv(.c) i64) i64 {
+    const ctx: *FlixCtx = requireCtx(v.flix_ctx);
+    ctx.handles_mutex.lock();
+    defer ctx.handles_mutex.unlock();
+
+    const entry = ctx.handles.get(v.handle) orelse @panic("invalid flix handle");
+    return switch (entry.kind) {
+        .I64 => entry.payload,
+        .Ptr => ptr_unbox(entry.payload),
+    };
 }
 
 // Exported Functions from `flix:runtime/runtime@0.1.0`
@@ -8237,6 +8320,38 @@ export fn exports_flix_runtime_runtime_suspension_destructor(rep: *exports_flix_
     rt_alloc.destroy(rep);
 }
 
+export fn exports_flix_runtime_runtime_box_i8(ctx: exports_flix_runtime_runtime_borrow_ctx_t, x: i8) exports_flix_runtime_runtime_own_value_t {
+    if (!is_wasm) @panic("box-i8: wasm-only");
+    witSetCurrentCtx(ctx);
+
+    const h = makeHandleForI64(ctx.flix_ctx, @as(i64, x));
+    const rep = rt_alloc.create(exports_flix_runtime_runtime_value_t) catch @panic("oom");
+    rep.* = .{ .flix_ctx = ctx.flix_ctx, .handle = h };
+    return exports_flix_runtime_runtime_value_new(rep);
+}
+
+export fn exports_flix_runtime_runtime_unbox_i8(ctx: exports_flix_runtime_runtime_borrow_ctx_t, v: exports_flix_runtime_runtime_borrow_value_t) i8 {
+    _ = ctx;
+    const bits = witScalarBits(v, flix_unbox_int8);
+    return @intCast(@as(i8, @truncate(bits)));
+}
+
+export fn exports_flix_runtime_runtime_box_i16(ctx: exports_flix_runtime_runtime_borrow_ctx_t, x: i16) exports_flix_runtime_runtime_own_value_t {
+    if (!is_wasm) @panic("box-i16: wasm-only");
+    witSetCurrentCtx(ctx);
+
+    const h = makeHandleForI64(ctx.flix_ctx, @as(i64, x));
+    const rep = rt_alloc.create(exports_flix_runtime_runtime_value_t) catch @panic("oom");
+    rep.* = .{ .flix_ctx = ctx.flix_ctx, .handle = h };
+    return exports_flix_runtime_runtime_value_new(rep);
+}
+
+export fn exports_flix_runtime_runtime_unbox_i16(ctx: exports_flix_runtime_runtime_borrow_ctx_t, v: exports_flix_runtime_runtime_borrow_value_t) i16 {
+    _ = ctx;
+    const bits = witScalarBits(v, flix_unbox_int16);
+    return @intCast(@as(i16, @truncate(bits)));
+}
+
 export fn exports_flix_runtime_runtime_box_i32(ctx: exports_flix_runtime_runtime_borrow_ctx_t, x: i32) exports_flix_runtime_runtime_own_value_t {
     if (!is_wasm) @panic("box-i32: wasm-only");
     witSetCurrentCtx(ctx);
@@ -8249,8 +8364,58 @@ export fn exports_flix_runtime_runtime_box_i32(ctx: exports_flix_runtime_runtime
 
 export fn exports_flix_runtime_runtime_unbox_i32(ctx: exports_flix_runtime_runtime_borrow_ctx_t, v: exports_flix_runtime_runtime_borrow_value_t) i32 {
     _ = ctx;
-    const bits = flix_handle_payload(v.flix_ctx, v.handle);
+    const bits = witScalarBits(v, flix_unbox_int32);
     return @intCast(@as(i32, @truncate(bits)));
+}
+
+export fn exports_flix_runtime_runtime_box_i64(ctx: exports_flix_runtime_runtime_borrow_ctx_t, x: i64) exports_flix_runtime_runtime_own_value_t {
+    if (!is_wasm) @panic("box-i64: wasm-only");
+    witSetCurrentCtx(ctx);
+
+    const h = makeHandleForI64(ctx.flix_ctx, x);
+    const rep = rt_alloc.create(exports_flix_runtime_runtime_value_t) catch @panic("oom");
+    rep.* = .{ .flix_ctx = ctx.flix_ctx, .handle = h };
+    return exports_flix_runtime_runtime_value_new(rep);
+}
+
+export fn exports_flix_runtime_runtime_unbox_i64(ctx: exports_flix_runtime_runtime_borrow_ctx_t, v: exports_flix_runtime_runtime_borrow_value_t) i64 {
+    _ = ctx;
+    return witScalarBits(v, flix_unbox_int64);
+}
+
+export fn exports_flix_runtime_runtime_box_f32(ctx: exports_flix_runtime_runtime_borrow_ctx_t, x: f32) exports_flix_runtime_runtime_own_value_t {
+    if (!is_wasm) @panic("box-f32: wasm-only");
+    witSetCurrentCtx(ctx);
+
+    const bits_u32: u32 = @bitCast(x);
+    const h = makeHandleForI64(ctx.flix_ctx, @as(i64, bits_u32));
+    const rep = rt_alloc.create(exports_flix_runtime_runtime_value_t) catch @panic("oom");
+    rep.* = .{ .flix_ctx = ctx.flix_ctx, .handle = h };
+    return exports_flix_runtime_runtime_value_new(rep);
+}
+
+export fn exports_flix_runtime_runtime_unbox_f32(ctx: exports_flix_runtime_runtime_borrow_ctx_t, v: exports_flix_runtime_runtime_borrow_value_t) f32 {
+    _ = ctx;
+    const bits = witScalarBits(v, flix_unbox_float32);
+    const bits_u32: u32 = @truncate(@as(u64, @bitCast(bits)));
+    return @bitCast(bits_u32);
+}
+
+export fn exports_flix_runtime_runtime_box_f64(ctx: exports_flix_runtime_runtime_borrow_ctx_t, x: f64) exports_flix_runtime_runtime_own_value_t {
+    if (!is_wasm) @panic("box-f64: wasm-only");
+    witSetCurrentCtx(ctx);
+
+    const bits_i64: i64 = @bitCast(x);
+    const h = makeHandleForI64(ctx.flix_ctx, bits_i64);
+    const rep = rt_alloc.create(exports_flix_runtime_runtime_value_t) catch @panic("oom");
+    rep.* = .{ .flix_ctx = ctx.flix_ctx, .handle = h };
+    return exports_flix_runtime_runtime_value_new(rep);
+}
+
+export fn exports_flix_runtime_runtime_unbox_f64(ctx: exports_flix_runtime_runtime_borrow_ctx_t, v: exports_flix_runtime_runtime_borrow_value_t) f64 {
+    _ = ctx;
+    const bits = witScalarBits(v, flix_unbox_float64);
+    return @bitCast(bits);
 }
 
 export fn exports_flix_runtime_runtime_box_bool(ctx: exports_flix_runtime_runtime_borrow_ctx_t, b: bool) exports_flix_runtime_runtime_own_value_t {
@@ -8265,7 +8430,7 @@ export fn exports_flix_runtime_runtime_box_bool(ctx: exports_flix_runtime_runtim
 
 export fn exports_flix_runtime_runtime_unbox_bool(ctx: exports_flix_runtime_runtime_borrow_ctx_t, v: exports_flix_runtime_runtime_borrow_value_t) bool {
     _ = ctx;
-    const bits = flix_handle_payload(v.flix_ctx, v.handle);
+    const bits = witScalarBits(v, flix_unbox_bool);
     return bits != 0;
 }
 
@@ -8285,6 +8450,25 @@ export fn exports_flix_runtime_runtime_unbox_string(ctx: exports_flix_runtime_ru
     const bits = flix_handle_payload(v.flix_ctx, v.handle);
     const str_ptr = ptrFromPayload(bits);
     ret.* = witStringFromFlixString(str_ptr);
+}
+
+export fn exports_flix_runtime_runtime_box_bytes(ctx: exports_flix_runtime_runtime_borrow_ctx_t, bytes: *flix_list_u8_t) exports_flix_runtime_runtime_own_value_t {
+    if (!is_wasm) @panic("box-bytes: wasm-only");
+    witSetCurrentCtx(ctx);
+
+    const slice = bytes.ptr[0..bytes.len];
+    const arr_ptr = allocFlixInt8ArrayFromBytes(slice);
+    const h = makeHandleForPtr(ctx.flix_ctx, arr_ptr);
+    const rep = rt_alloc.create(exports_flix_runtime_runtime_value_t) catch @panic("oom");
+    rep.* = .{ .flix_ctx = ctx.flix_ctx, .handle = h };
+    return exports_flix_runtime_runtime_value_new(rep);
+}
+
+export fn exports_flix_runtime_runtime_unbox_bytes(ctx: exports_flix_runtime_runtime_borrow_ctx_t, v: exports_flix_runtime_runtime_borrow_value_t, ret: *flix_list_u8_t) void {
+    _ = ctx;
+    const bits = flix_handle_payload(v.flix_ctx, v.handle);
+    const arr_ptr = ptrFromPayload(bits);
+    ret.* = witBytesToOwned(flixInt8ArrayBytesView(arr_ptr));
 }
 
 export fn exports_flix_runtime_runtime_start_task(ctx: exports_flix_runtime_runtime_borrow_ctx_t, def_id: exports_flix_runtime_runtime_def_id_t, args: *exports_flix_runtime_runtime_list_borrow_value_t) exports_flix_runtime_runtime_task_id_t {
@@ -8744,6 +8928,26 @@ export fn exports_flix_runtime_runtime_suspension_request(ctx: exports_flix_runt
     }
 }
 
+export fn exports_flix_runtime_runtime_suspension_arg_count(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_borrow_suspension_t) u32 {
+    _ = ctx;
+    const n = suspensionArgCountRaw(s);
+    if (n > std.math.maxInt(u32)) @panic("suspension arg count exceeds u32");
+    return @intCast(n);
+}
+
+export fn exports_flix_runtime_runtime_suspension_arg_as_i64(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_borrow_suspension_t, idx: u32) exports_flix_runtime_runtime_own_value_t {
+    const bits = suspensionArgBits(s, idx);
+    const h = makeHandleForI64(ctx.flix_ctx, bits);
+    return makeOwnRuntimeValue(ctx, h);
+}
+
+export fn exports_flix_runtime_runtime_suspension_arg_as_ptr(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_borrow_suspension_t, idx: u32) exports_flix_runtime_runtime_own_value_t {
+    const bits = suspensionArgBits(s, idx);
+    if (bits == 0) @panic("suspension arg is null pointer");
+    const h = makeHandleForPtr(ctx.flix_ctx, ptrFromPayload(bits));
+    return makeOwnRuntimeValue(ctx, h);
+}
+
 export fn exports_flix_runtime_runtime_resume_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, v: exports_flix_runtime_runtime_borrow_value_t) void {
     if (!is_wasm) @panic("resume-ok: wasm-only");
     // Resume payload is the *Flix value bits* stored in the handle.
@@ -8757,6 +8961,19 @@ export fn exports_flix_runtime_runtime_resume_throw(ctx: exports_flix_runtime_ru
     // Throw payload is expected to be an exception value handle; pass the handle through.
     flix_handle_retain(ctx.flix_ctx, e.handle);
     resumeTaskWithHandle(ctx, s, e.handle, true);
+}
+
+export fn exports_flix_runtime_runtime_resume_ok_sync(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, v: exports_flix_runtime_runtime_borrow_value_t, ret: *exports_flix_runtime_runtime_exec_t) void {
+    if (!is_wasm) @panic("resume-ok-sync: wasm-only");
+    const bits = flix_handle_payload(v.flix_ctx, v.handle);
+    const resume_handle = makeHandleForI64(ctx.flix_ctx, bits);
+    resumeTaskWithHandleSync(ctx, s, resume_handle, false, ret);
+}
+
+export fn exports_flix_runtime_runtime_resume_throw_sync(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, e: exports_flix_runtime_runtime_borrow_value_t, ret: *exports_flix_runtime_runtime_exec_t) void {
+    if (!is_wasm) @panic("resume-throw-sync: wasm-only");
+    flix_handle_retain(ctx.flix_ctx, e.handle);
+    resumeTaskWithHandleSync(ctx, s, e.handle, true, ret);
 }
 
 export fn exports_flix_runtime_runtime_resume_timer_sleep(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t) void {

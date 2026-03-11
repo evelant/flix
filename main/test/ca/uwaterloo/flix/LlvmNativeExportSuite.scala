@@ -109,25 +109,26 @@ class LlvmNativeExportSuite extends AnyFunSuite {
           |  }
           |
           |  // Int32 export.
-          |  flix_result_t add_r = flix_export_Test_add(ctx, (int32_t)1, (int32_t)2);
-          |  if (add_r.tag != FLIX_RESULT_VALUE) {
+          |  int32_t sum = 0;
+          |  flix_exec_t add_r = flix_export_Test_add(ctx, (int32_t)1, (int32_t)2, &sum);
+          |  if (add_r.tag != FLIX_EXEC_OK) {
           |    fprintf(stderr, "bad add tag: %lld\n", (long long)add_r.tag);
           |    return 1;
           |  }
-          |  if ((int32_t)add_r.payload != 3) {
-          |    fprintf(stderr, "bad add payload: %lld\n", (long long)add_r.payload);
+          |  if (sum != 3) {
+          |    fprintf(stderr, "bad add value: %d\n", (int)sum);
           |    return 2;
           |  }
           |
           |  // String roundtrip export.
           |  const uint8_t hello_bytes[] = { 'h', 'e', 'l', 'l', 'o' };
           |  flix_string_t hello = flix_string_from_utf8(ctx, hello_bytes, 5);
-          |  flix_result_t echo_r = flix_export_Test_echo(ctx, hello);
-          |  if (echo_r.tag != FLIX_RESULT_VALUE) {
+          |  flix_string_t echoed = 0;
+          |  flix_exec_t echo_r = flix_export_Test_echo(ctx, hello, &echoed);
+          |  if (echo_r.tag != FLIX_EXEC_OK) {
           |    fprintf(stderr, "bad echo tag: %lld\n", (long long)echo_r.tag);
           |    return 3;
           |  }
-          |  flix_string_t echoed = (flix_string_t) echo_r.payload;
           |  int64_t echoed_len = 0;
           |  uint8_t* echoed_out = flix_string_to_utf8(ctx, echoed, &echoed_len);
           |  if (echoed_len != 5 || memcmp(echoed_out, hello_bytes, 5) != 0) {
@@ -139,24 +140,25 @@ class LlvmNativeExportSuite extends AnyFunSuite {
           |
           |  // Bytes roundtrip export.
           |  const uint8_t data[] = { 0, 1, 2, 255 };
-          |  flix_i8_array_t arr = flix_i8_array_from_bytes(ctx, data, 4);
-          |  flix_result_t len_r = flix_export_Test_bytesLen(ctx, arr);
-          |  if (len_r.tag != FLIX_RESULT_VALUE) {
+          |  flix_bytes_t arr = flix_bytes_from_slice(ctx, data, 4);
+          |  int32_t arr_len = 0;
+          |  flix_exec_t len_r = flix_export_Test_bytesLen(ctx, arr, &arr_len);
+          |  if (len_r.tag != FLIX_EXEC_OK) {
           |    fprintf(stderr, "bad bytesLen tag: %lld\n", (long long)len_r.tag);
           |    return 5;
           |  }
-          |  if ((int32_t)len_r.payload != 4) {
-          |    fprintf(stderr, "bad bytesLen payload: %lld\n", (long long)len_r.payload);
+          |  if (arr_len != 4) {
+          |    fprintf(stderr, "bad bytesLen value: %d\n", (int)arr_len);
           |    return 6;
           |  }
-          |  flix_result_t id_r = flix_export_Test_bytesId(ctx, arr);
-          |  if (id_r.tag != FLIX_RESULT_VALUE) {
+          |  flix_bytes_t arr2 = 0;
+          |  flix_exec_t id_r = flix_export_Test_bytesId(ctx, arr, &arr2);
+          |  if (id_r.tag != FLIX_EXEC_OK) {
           |    fprintf(stderr, "bad bytesId tag: %lld\n", (long long)id_r.tag);
           |    return 7;
           |  }
-          |  flix_i8_array_t arr2 = (flix_i8_array_t) id_r.payload;
           |  int64_t out_len = 0;
-          |  uint8_t* out = flix_i8_array_to_bytes(ctx, arr2, &out_len);
+          |  uint8_t* out = flix_bytes_to_slice(ctx, arr2, &out_len);
           |  if (out_len != 4 || memcmp(out, data, 4) != 0) {
           |    fprintf(stderr, "bad bytesId payload\n");
           |    return 8;
@@ -166,8 +168,9 @@ class LlvmNativeExportSuite extends AnyFunSuite {
           |  flix_handle_release(ctx, arr2);
           |
           |  // Suspension + resume roundtrip export (host effect).
-          |  flix_result_t susp_r = flix_export_Test_suspendEcho(ctx, hello);
-          |  if (susp_r.tag != FLIX_RESULT_SUSPENSION) {
+          |  flix_string_t ignored = 0;
+          |  flix_exec_t susp_r = flix_export_Test_suspendEcho(ctx, hello, &ignored);
+          |  if (susp_r.tag != FLIX_EXEC_SUSPENDED) {
           |    fprintf(stderr, "bad suspendEcho tag: %lld\n", (long long)susp_r.tag);
           |    return 9;
           |  }
@@ -188,12 +191,12 @@ class LlvmNativeExportSuite extends AnyFunSuite {
           |
           |  const uint8_t ok_bytes[] = { 'o', 'k' };
           |  flix_string_t ok = flix_string_from_utf8(ctx, ok_bytes, 2);
-          |  flix_result_t resume_r = flix_export_resume_Test_suspendEcho(ctx, susp, ok);
-          |  if (resume_r.tag != FLIX_RESULT_VALUE) {
+          |  flix_string_t resumed = 0;
+          |  flix_exec_t resume_r = flix_export_resume_Test_suspendEcho(ctx, susp, ok, &resumed);
+          |  if (resume_r.tag != FLIX_EXEC_OK) {
           |    fprintf(stderr, "bad suspendEcho resume tag: %lld\n", (long long)resume_r.tag);
           |    return 12;
           |  }
-          |  flix_string_t resumed = (flix_string_t) resume_r.payload;
           |  int64_t resumed_len = 0;
           |  uint8_t* resumed_out = flix_string_to_utf8(ctx, resumed, &resumed_len);
           |  if (resumed_len != 2 || memcmp(resumed_out, ok_bytes, 2) != 0) {
@@ -254,12 +257,12 @@ class LlvmNativeExportSuite extends AnyFunSuite {
             |typedef flix_ctx_t* (*flix_ctx_new_fn)(void);
             |typedef void (*flix_ctx_free_fn)(flix_ctx_t* ctx);
             |typedef void (*flix_handle_release_fn)(flix_ctx_t* ctx, flix_handle_t h);
-            |typedef flix_result_t (*flix_add_fn)(flix_ctx_t* ctx, int32_t x, int32_t y);
-            |typedef flix_result_t (*flix_echo_fn)(flix_ctx_t* ctx, flix_string_t s);
-            |typedef flix_result_t (*flix_blen_fn)(flix_ctx_t* ctx, flix_i8_array_t a);
-            |typedef flix_result_t (*flix_bid_fn)(flix_ctx_t* ctx, flix_i8_array_t a);
-            |typedef flix_result_t (*flix_susp_echo_fn)(flix_ctx_t* ctx, flix_string_t s);
-            |typedef flix_result_t (*flix_susp_echo_resume_fn)(flix_ctx_t* ctx, flix_handle_t susp, flix_handle_t resume);
+            |typedef flix_exec_t (*flix_add_fn)(flix_ctx_t* ctx, int32_t x, int32_t y, int32_t* out);
+            |typedef flix_exec_t (*flix_echo_fn)(flix_ctx_t* ctx, flix_string_t s, flix_string_t* out);
+            |typedef flix_exec_t (*flix_blen_fn)(flix_ctx_t* ctx, flix_bytes_t a, int32_t* out);
+            |typedef flix_exec_t (*flix_bid_fn)(flix_ctx_t* ctx, flix_bytes_t a, flix_bytes_t* out);
+            |typedef flix_exec_t (*flix_susp_echo_fn)(flix_ctx_t* ctx, flix_string_t s, flix_string_t* out);
+            |typedef flix_exec_t (*flix_susp_echo_resume_fn)(flix_ctx_t* ctx, flix_handle_t susp, flix_handle_t resume, flix_string_t* out);
             |typedef void (*flix_free_fn)(void* p);
             |typedef flix_string_t (*flix_string_from_utf8_fn)(flix_ctx_t* ctx, const uint8_t* bytes, int64_t len);
             |typedef uint8_t* (*flix_string_to_utf8_fn)(flix_ctx_t* ctx, flix_string_t str, int64_t* out_len);
@@ -309,20 +312,21 @@ class LlvmNativeExportSuite extends AnyFunSuite {
             |    return 5;
             |  }
             |
-            |  flix_result_t add_r = add_ptr(ctx, (int32_t)1, (int32_t)2);
-            |  if (add_r.tag != FLIX_RESULT_VALUE || (int32_t)add_r.payload != 3) {
+            |  int32_t sum = 0;
+            |  flix_exec_t add_r = add_ptr(ctx, (int32_t)1, (int32_t)2, &sum);
+            |  if (add_r.tag != FLIX_EXEC_OK || sum != 3) {
             |    fprintf(stderr, "bad add\n");
             |    return 6;
             |  }
             |
             |  const uint8_t hello_bytes[] = { 'h', 'e', 'l', 'l', 'o' };
             |  flix_string_t hello = from_utf8_ptr(ctx, hello_bytes, 5);
-            |  flix_result_t echo_r = echo_ptr(ctx, hello);
-            |  if (echo_r.tag != FLIX_RESULT_VALUE) {
+            |  flix_string_t echoed = 0;
+            |  flix_exec_t echo_r = echo_ptr(ctx, hello, &echoed);
+            |  if (echo_r.tag != FLIX_EXEC_OK) {
             |    fprintf(stderr, "bad echo\n");
             |    return 7;
             |  }
-            |  flix_string_t echoed = (flix_string_t) echo_r.payload;
             |  int64_t echoed_len = 0;
             |  uint8_t* echoed_out = to_utf8_ptr(ctx, echoed, &echoed_len);
             |  if (echoed_len != 5 || memcmp(echoed_out, hello_bytes, 5) != 0) {
@@ -330,22 +334,22 @@ class LlvmNativeExportSuite extends AnyFunSuite {
             |    return 8;
             |  }
             |  free_ptr(echoed_out);
-            |  release_ptr(ctx, hello);
             |  release_ptr(ctx, echoed);
             |
             |  const uint8_t data[] = { 0, 1, 2, 255 };
-            |  flix_i8_array_t arr = arr_from_ptr(ctx, data, 4);
-            |  flix_result_t len_r = blen_ptr(ctx, arr);
-            |  if (len_r.tag != FLIX_RESULT_VALUE || (int32_t)len_r.payload != 4) {
+            |  flix_bytes_t arr = arr_from_ptr(ctx, data, 4);
+            |  int32_t arr_len = 0;
+            |  flix_exec_t len_r = blen_ptr(ctx, arr, &arr_len);
+            |  if (len_r.tag != FLIX_EXEC_OK || arr_len != 4) {
             |    fprintf(stderr, "bad bytesLen\n");
             |    return 9;
             |  }
-            |  flix_result_t id_r = bid_ptr(ctx, arr);
-            |  if (id_r.tag != FLIX_RESULT_VALUE) {
+            |  flix_bytes_t arr2 = 0;
+            |  flix_exec_t id_r = bid_ptr(ctx, arr, &arr2);
+            |  if (id_r.tag != FLIX_EXEC_OK) {
             |    fprintf(stderr, "bad bytesId\n");
             |    return 10;
             |  }
-            |  flix_i8_array_t arr2 = (flix_i8_array_t) id_r.payload;
             |  int64_t out_len = 0;
             |  uint8_t* out = arr_to_ptr(ctx, arr2, &out_len);
             |  if (out_len != 4 || memcmp(out, data, 4) != 0) {
@@ -355,6 +359,37 @@ class LlvmNativeExportSuite extends AnyFunSuite {
             |  free_ptr(out);
             |  release_ptr(ctx, arr);
             |  release_ptr(ctx, arr2);
+            |
+            |  flix_string_t ignored = 0;
+            |  flix_exec_t susp_r = susp_echo_ptr(ctx, hello, &ignored);
+            |  if (susp_r.tag != FLIX_EXEC_SUSPENDED) {
+            |    fprintf(stderr, "bad suspendEcho\n");
+            |    return 12;
+            |  }
+            |  flix_handle_t susp = (flix_handle_t)susp_r.payload;
+            |  if (susp_argc_ptr(ctx, susp) != 1) {
+            |    fprintf(stderr, "bad suspend argc\n");
+            |    return 13;
+            |  }
+            |  const uint8_t ok_bytes[] = { 'o', 'k' };
+            |  flix_string_t ok = from_utf8_ptr(ctx, ok_bytes, 2);
+            |  flix_string_t resumed = 0;
+            |  flix_exec_t resume_r = susp_echo_resume_ptr(ctx, susp, ok, &resumed);
+            |  if (resume_r.tag != FLIX_EXEC_OK) {
+            |    fprintf(stderr, "bad suspend resume\n");
+            |    return 14;
+            |  }
+            |  int64_t resumed_len = 0;
+            |  uint8_t* resumed_out = to_utf8_ptr(ctx, resumed, &resumed_len);
+            |  if (resumed_len != 2 || memcmp(resumed_out, ok_bytes, 2) != 0) {
+            |    fprintf(stderr, "bad resume payload\n");
+            |    return 15;
+            |  }
+            |  free_ptr(resumed_out);
+            |  release_ptr(ctx, ok);
+            |  release_ptr(ctx, resumed);
+            |  release_ptr(ctx, susp);
+            |  release_ptr(ctx, hello);
             |  ctx_free_ptr(ctx);
             |
             |  printf("OK\n");

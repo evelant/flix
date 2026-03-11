@@ -29,7 +29,7 @@ import scala.jdk.CollectionConverters.*
   *
   * Browser-first bring-up:
   *   - core module is `wasm32-freestanding` (no WASI preview1),
-  *   - the component world is described by WIT (`docs/planning/native-backend/wit/flix-bindings`),
+  *   - the component world is described by WIT (`runtime/wit/flix-bindings`),
   *   - we use `wasm-tools component embed/new` to produce a component,
   *   - we optionally use `jco transpile` to generate a browser/Node-friendly JS bundle.
   */
@@ -40,7 +40,11 @@ object LlvmWasmDriver {
                        componentJs: Path,
                        exportsManifest: Path,
                        jsOutDir: Path,
-                       nodeRunner: Path)
+                       nodeRunner: Path,
+                       typedExportComponent: Option[Path],
+                       typedExportWitDir: Option[Path],
+                       typedExportComponentJs: Option[Path],
+                       typedExportComponentTypes: Option[Path])
 
   private val BundledRuntimeZigResource: String = "/runtime/src/flix_rt_llvm.zig"
   private val BundledUnicodeCaseTablesZigResource: String = "/runtime/src/unicode_case_tables.zig"
@@ -59,12 +63,12 @@ object LlvmWasmDriver {
   private val BundledWasmtimeHostResource: String = "/tools/wasm-runner-rs/src/host.rs"
   private val BundledWasmtimeRunnerResource: String = "/tools/wasm-runner-rs/src/runner.rs"
   private val BundledWasmtimeBinResource: String = "/tools/wasm-runner-rs/src/bin/run_flix.rs"
-  private val BundledWitBindingsResource: String = "/docs/planning/native-backend/wit/flix-bindings/bindings.wit"
-  private val BundledWitRuntimeDepResource: String = "/docs/planning/native-backend/wit/flix-bindings/deps/runtime.wit"
-  private val BundledWitSysDepResource: String = "/docs/planning/native-backend/wit/flix-bindings/deps/sys.wit"
+  private val BundledWitBindingsResource: String = "/runtime/wit/flix-bindings/bindings.wit"
+  private val BundledWitRuntimeDepResource: String = "/runtime/wit/flix-bindings/deps/runtime.wit"
+  private val BundledWitSysDepResource: String = "/runtime/wit/flix-bindings/deps/sys.wit"
 
   private val DefaultWitBindingsDir: Path =
-    Paths.get("docs/planning/native-backend/wit/flix-bindings").toAbsolutePath.normalize()
+    Paths.get("runtime/wit/flix-bindings").toAbsolutePath.normalize()
 
   private val DefaultWitGlueDir: Path =
     Paths.get("runtime/src/wit").toAbsolutePath.normalize()
@@ -90,7 +94,16 @@ object LlvmWasmDriver {
   private val DefaultWasmtimeRunnerCargoToml: Path =
     Paths.get("tools/wasm-runner-rs/Cargo.toml").toAbsolutePath.normalize()
 
-  def run(modulePath: Path, emitJs: Boolean = true)(implicit flix: Flix): Artifacts = {
+  private val WitBindgenCliVersion = "0.53.1"
+  private val WacCliVersion = "0.9.0"
+
+  private val DefaultWitBindgenCli: Path =
+    Paths.get("build").resolve("tools").resolve(s"wit-bindgen-cli-$WitBindgenCliVersion").resolve("bin").resolve("wit-bindgen").toAbsolutePath.normalize()
+
+  private val DefaultWacCli: Path =
+    Paths.get("build").resolve("tools").resolve(s"wac-cli-$WacCliVersion").resolve("bin").resolve("wac").toAbsolutePath.normalize()
+
+  def run(modulePath: Path, typedExports: List[LlvmWasmTypedExportsWriter.Entry] = Nil, emitJs: Boolean = true)(implicit flix: Flix): Artifacts = {
     val outDir = flix.options.outputPath.resolve("llvm").toAbsolutePath
     Files.createDirectories(outDir)
 
@@ -107,7 +120,7 @@ object LlvmWasmDriver {
     val witGlueC = resolveWitGlue(outDir)
     val runtimeObj = compileRuntime(runtimeZig, wasmDir, optFlag)
     val moduleObj = compileModule(modulePath, wasmDir, optFlag)
-    val witObj = compileWitGlue(witGlueC, wasmDir, optFlag)
+    val witObj = compileWitGlue(witGlueC, wasmDir.resolve("flix_wit_glue.wasm.o"), wasmDir, optFlag)
 
     val coreWasm = coreWasmPath(flix.options.outputPath, flix.options.artifactName)
     linkCore(coreWasm, wasmDir, optFlag, List(moduleObj, runtimeObj, witObj))
@@ -125,6 +138,12 @@ object LlvmWasmDriver {
     val componentJs = componentJsPath(flix.options.outputPath, flix.options.artifactName)
     val nodeRunner = if (emitJs) resolveNodeRunner(outDir) else outDir.resolve("wasm-runner-js").resolve("run-flix.mjs")
     val exportsManifest = LlvmWasmExportWriter.manifestPath(flix.options.outputPath, flix.options.artifactName)
+    val typedExportsArtifacts = buildTypedExportComponent(componentWasm, wasmDir, outDir, witBindingsDir, flix.options.outputPath, flix.options.artifactName, typedExports, optFlag)
+    if (emitJs) {
+      typedExportsArtifacts.foreach { case (typedComponent, _) =>
+        transpileToJs(typedComponent, wasmDir)
+      }
+    }
 
     Artifacts(
       coreWasm = coreWasm,
@@ -132,7 +151,11 @@ object LlvmWasmDriver {
       componentJs = componentJs,
       exportsManifest = exportsManifest,
       jsOutDir = jsOutDir,
-      nodeRunner = nodeRunner
+      nodeRunner = nodeRunner,
+      typedExportComponent = typedExportsArtifacts.map(_._1),
+      typedExportWitDir = typedExportsArtifacts.map(_._2),
+      typedExportComponentJs = typedExportsArtifacts.map(_ => LlvmWasmTypedExportsWriter.typedComponentJsPath(flix.options.outputPath, flix.options.artifactName)),
+      typedExportComponentTypes = typedExportsArtifacts.map(_ => LlvmWasmTypedExportsWriter.typedComponentTypesPath(flix.options.outputPath, flix.options.artifactName))
     )
   }
 
@@ -245,8 +268,7 @@ object LlvmWasmDriver {
     * Bring-up shortcut: compile as `wasm32-wasi` (headers available) but link into a freestanding core module.
     * This avoids introducing a WASI dependency as long as we do not link wasi-libc.
     */
-  private def compileWitGlue(witGlueC: Path, wasmDir: Path, optFlag: String): Path = {
-    val out = wasmDir.resolve("flix_wit_glue.wasm.o")
+  private def compileWitGlue(witGlueC: Path, out: Path, wasmDir: Path, optFlag: String): Path = {
     val cmd = List(
       "zig", "cc",
       "-target", "wasm32-wasi",
@@ -328,6 +350,55 @@ object LlvmWasmDriver {
     }
   }
 
+  private def linkTypedExportAdapter(outWasm: Path,
+                                     wasmDir: Path,
+                                     optFlag: String,
+                                     glueC: Path,
+                                     implC: Path,
+                                     shimC: Path,
+                                     componentTypeObj: Path,
+                                     includeDir: Path): Unit = {
+    val cmd = List(
+      "zig", "cc",
+      "-target", "wasm32-freestanding",
+      "-Wl,--no-entry",
+      "-I",
+      includeDir.toString,
+      "-nostdlibinc",
+      optFlag
+    ) ::: List(glueC.toString, implC.toString, shimC.toString, componentTypeObj.toString, "-o", outWasm.toString)
+
+    val (exit, output) = exec(cmd, wasmDir)
+    if (exit != 0) {
+      throw InternalCompilerException(
+        s"LLVM-wasm toolchain failed while linking typed export adapter (exit $exit):\n${cmd.mkString(" ")}\n\n$output",
+        SourceLocation.Unknown
+      )
+    }
+  }
+
+  private def composeTypedExportComponent(baseComponent: Path, adapterComponent: Path, outComponent: Path, composeWac: Path, cwd: Path): Unit = {
+    val wac = resolveWacCli()
+    val cmd = List(
+      wac.toString,
+      "compose",
+      composeWac.toString,
+      "-d",
+      s"flix:base=${baseComponent.toString}",
+      "-d",
+      s"flix:adapter=${adapterComponent.toString}",
+      "-o",
+      outComponent.toString
+    )
+    val (exit, output) = exec(cmd, cwd)
+    if (exit != 0) {
+      throw InternalCompilerException(
+        s"wasm-tools failed while composing typed export component (exit $exit):\n${cmd.mkString(" ")}\n\n$output",
+        SourceLocation.Unknown
+      )
+    }
+  }
+
   private def transpileToJs(component: Path, wasmDir: Path): Path = {
     val jsDir = wasmDir.resolve("js")
     Files.createDirectories(jsDir)
@@ -403,7 +474,7 @@ object LlvmWasmDriver {
     copyBundledResource(BundledWasmtimeRunnerResource, runnerDir.resolve("src").resolve("runner.rs"))
     copyBundledResource(BundledWasmtimeBinResource, runnerDir.resolve("src").resolve("bin").resolve("run_flix.rs"))
 
-    val witDir = outDir.resolve("docs").resolve("planning").resolve("native-backend").resolve("wit").resolve("flix-bindings")
+    val witDir = outDir.resolve("runtime").resolve("wit").resolve("flix-bindings")
     Files.createDirectories(witDir.resolve("deps"))
     copyBundledResource(BundledWitBindingsResource, witDir.resolve("bindings.wit"))
     copyBundledResource(BundledWitRuntimeDepResource, witDir.resolve("deps").resolve("runtime.wit"))
@@ -417,12 +488,161 @@ object LlvmWasmDriver {
       return DefaultWitBindingsDir
     }
 
-    val bindingsDir = outDir.resolve("wit-bindings")
+    val bindingsDir = outDir.resolve("runtime").resolve("wit").resolve("flix-bindings")
     Files.createDirectories(bindingsDir.resolve("deps"))
     copyBundledResource(BundledWitBindingsResource, bindingsDir.resolve("bindings.wit"))
     copyBundledResource(BundledWitRuntimeDepResource, bindingsDir.resolve("deps").resolve("runtime.wit"))
     copyBundledResource(BundledWitSysDepResource, bindingsDir.resolve("deps").resolve("sys.wit"))
     bindingsDir
+  }
+
+  private def resolveWitBindgenCli(): Path = {
+    if (versionMatchesWitBindgen(DefaultWitBindgenCli)) {
+      return DefaultWitBindgenCli
+    }
+
+    val installRoot = DefaultWitBindgenCli.getParent.getParent
+    Files.createDirectories(installRoot)
+    val cmd = List(
+      "cargo",
+      "+stable",
+      "install",
+      "wit-bindgen-cli",
+      "--version",
+      WitBindgenCliVersion,
+      "--locked",
+      "--root",
+      installRoot.toString
+    )
+    val (exit, output) = exec(cmd, Paths.get(".").toAbsolutePath.normalize())
+    if (exit != 0 || !versionMatchesWitBindgen(DefaultWitBindgenCli)) {
+      throw InternalCompilerException(
+        s"Failed to install wit-bindgen-cli $WitBindgenCliVersion for typed wasm exports.\n${cmd.mkString(" ")}\n\n$output",
+        SourceLocation.Unknown
+      )
+    }
+    DefaultWitBindgenCli
+  }
+
+  private def versionMatchesWitBindgen(bin: Path): Boolean = {
+    if (!Files.exists(bin)) return false
+    val (exit, output) = exec(List(bin.toString, "--version"), bin.getParent)
+    exit == 0 && {
+      val trimmed = output.trim
+      trimmed == s"wit-bindgen $WitBindgenCliVersion" || trimmed == s"wit-bindgen-cli $WitBindgenCliVersion"
+    }
+  }
+
+  private def resolveWacCli(): Path = {
+    if (versionMatchesWac(DefaultWacCli)) {
+      return DefaultWacCli
+    }
+
+    val installRoot = DefaultWacCli.getParent.getParent
+    Files.createDirectories(installRoot)
+    val cmd = List(
+      "cargo",
+      "+stable",
+      "install",
+      "wac-cli",
+      "--version",
+      WacCliVersion,
+      "--root",
+      installRoot.toString
+    )
+    val (exit, output) = exec(cmd, Paths.get(".").toAbsolutePath.normalize())
+    if (exit != 0 || !versionMatchesWac(DefaultWacCli)) {
+      throw InternalCompilerException(
+        s"Failed to install wac-cli $WacCliVersion for typed wasm export composition.\n${cmd.mkString(" ")}\n\n$output",
+        SourceLocation.Unknown
+      )
+    }
+    DefaultWacCli
+  }
+
+  private def versionMatchesWac(bin: Path): Boolean = {
+    if (!Files.exists(bin)) return false
+    val (exit, output) = exec(List(bin.toString, "--version"), bin.getParent)
+    exit == 0 && {
+      val trimmed = output.trim
+      trimmed == s"wac $WacCliVersion" || trimmed == s"wac-cli $WacCliVersion"
+    }
+  }
+
+  private def buildTypedExportComponent(baseComponentWasm: Path,
+                                        wasmDir: Path,
+                                        outDir: Path,
+                                        witBindingsDir: Path,
+                                        outputPath: Path,
+                                        artifactName: String,
+                                        typedExports: List[LlvmWasmTypedExportsWriter.Entry],
+                                        optFlag: String): Option[(Path, Path)] = {
+    if (typedExports.isEmpty) return None
+
+    val typedWitDir = LlvmWasmTypedExportsWriter.typedWitDirPath(outputPath, artifactName)
+    val adapterWorkDir = wasmDir.resolve("typed-exports").resolve("adapter")
+    val adapterWitDir = adapterWorkDir.resolve("wit")
+    val adapterGenDir = adapterWorkDir.resolve("gen")
+    Files.createDirectories(typedWitDir.resolve("deps"))
+    Files.createDirectories(adapterWitDir.resolve("deps"))
+    Files.createDirectories(adapterGenDir)
+
+    val runtimeDep = witBindingsDir.resolve("deps").resolve("runtime.wit")
+    val sysDep = witBindingsDir.resolve("deps").resolve("sys.wit")
+    if (!Files.exists(runtimeDep)) {
+      throw InternalCompilerException(s"Missing runtime WIT dependency: '$runtimeDep'.", SourceLocation.Unknown)
+    }
+    if (!Files.exists(sysDep)) {
+      throw InternalCompilerException(s"Missing sys WIT dependency: '$sysDep'.", SourceLocation.Unknown)
+    }
+
+    Files.copy(runtimeDep, typedWitDir.resolve("deps").resolve("runtime.wit"), StandardCopyOption.REPLACE_EXISTING)
+    Files.copy(runtimeDep, adapterWitDir.resolve("deps").resolve("runtime.wit"), StandardCopyOption.REPLACE_EXISTING)
+    Files.copy(sysDep, typedWitDir.resolve("deps").resolve("sys.wit"), StandardCopyOption.REPLACE_EXISTING)
+    Files.writeString(typedWitDir.resolve("bindings.wit"), LlvmWasmTypedExportsWriter.renderPublicBindings(typedExports), StandardCharsets.UTF_8)
+    Files.writeString(adapterWitDir.resolve("bindings.wit"), LlvmWasmTypedExportsWriter.renderAdapterBindings(typedExports), StandardCharsets.UTF_8)
+
+    val witBindgen = resolveWitBindgenCli()
+    val witCmd = List(
+      witBindgen.toString,
+      "c",
+      adapterWitDir.toString,
+      "--world",
+      "adapter",
+      "--out-dir",
+      adapterGenDir.toString
+    )
+    val (witExit, witOutput) = exec(witCmd, wasmDir)
+    if (witExit != 0) {
+      throw InternalCompilerException(
+        s"wit-bindgen failed while generating typed export adapter glue (exit $witExit):\n${witCmd.mkString(" ")}\n\n$witOutput",
+        SourceLocation.Unknown
+      )
+    }
+
+    val adapterImpl = adapterGenDir.resolve("typed_exports_impl.c")
+    val adapterShim = adapterGenDir.resolve("typed_exports_shim.c")
+    val adapterStdlibH = adapterGenDir.resolve("stdlib.h")
+    val adapterStringH = adapterGenDir.resolve("string.h")
+    Files.writeString(adapterImpl, LlvmWasmTypedExportsWriter.renderAdapterImpl(typedExports), StandardCharsets.UTF_8)
+    Files.writeString(adapterShim, LlvmWasmTypedExportsWriter.renderAdapterShimC(), StandardCharsets.UTF_8)
+    Files.writeString(adapterStdlibH, LlvmWasmTypedExportsWriter.renderFreestandingStdlibHeader(), StandardCharsets.UTF_8)
+    Files.writeString(adapterStringH, LlvmWasmTypedExportsWriter.renderFreestandingStringHeader(), StandardCharsets.UTF_8)
+
+    val adapterCore = adapterGenDir.resolve("typed_exports_adapter.core.wasm")
+    val adapterComponent = adapterGenDir.resolve("typed_exports_adapter.component.wasm")
+    val componentTypeObj = adapterGenDir.resolve("adapter_component_type.o")
+
+    linkTypedExportAdapter(adapterCore, wasmDir, optFlag, adapterGenDir.resolve("adapter.c"), adapterImpl, adapterShim, componentTypeObj, adapterGenDir)
+    componentize(adapterCore, adapterComponent, wasmDir)
+
+    val composeWac = adapterWorkDir.resolve("compose.wac")
+    Files.writeString(composeWac, LlvmWasmTypedExportsWriter.renderCompositionWac(), StandardCharsets.UTF_8)
+
+    val typedComponent = LlvmWasmTypedExportsWriter.typedComponentPath(outputPath, artifactName)
+    composeTypedExportComponent(baseComponentWasm, adapterComponent, typedComponent, composeWac, wasmDir)
+
+    Some((typedComponent, typedWitDir))
   }
 
   private def resolveWitGlue(outDir: Path): Path = {

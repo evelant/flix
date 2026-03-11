@@ -23,6 +23,7 @@ import ca.uwaterloo.flix.language.ast.SemanticOp.{BinaryOp, UnaryOp}
 import ca.uwaterloo.flix.language.ast.shared.{Constant, ExpPosition}
 import ca.uwaterloo.flix.language.ast.{ExnKindId, LoweredAst, Name, SemanticOp, SimpleType, Symbol}
 import ca.uwaterloo.flix.language.dbg.AstPrinter.DebugNoOp
+import ca.uwaterloo.flix.language.phase.ExportAbi
 import ca.uwaterloo.flix.language.phase.llvm.LlvmIr.{Decl, Instr, Module as IrModule, Op, Terminator, Type, Value}
 import ca.uwaterloo.flix.util.CompilationTarget
 
@@ -366,8 +367,9 @@ object LlvmBackend {
 
       // Wasm-only: def-id based invocation dispatch used by the component runtime.
       if (target == CompilationTarget.LlvmWasm) {
-        addExtraFunction(emitWasmInvokeDef(LlvmWasmDefs.compute(root)))
-        addExtraFunction(emitWasmResumeOkDef())
+        val wasmDefs = LlvmWasmDefs.compute(root)
+        addExtraFunction(emitWasmInvokeDef(wasmDefs))
+        addExtraFunction(emitWasmResumeOkDef(wasmDefs))
         addExtraFunction(emitWasmResumeThrowDef())
       }
 
@@ -926,18 +928,26 @@ object LlvmBackend {
     }
 
     private def emitExportWrapper(defn: LoweredAst.Def): LlvmIr.Function = {
+      val sig = defn.exportedSignature.getOrElse {
+        throw new IllegalStateException(s"Missing portable export signature for '${defn.sym}'.")
+      }
       val wrapperName = LlvmNames.exportName(defn.sym)
       val defName = LlvmNames.defName(defn.sym)
-
-      val params = LlvmIr.Param("ctx", Type.Ptr) :: (defn.cparams ::: defn.fparams).zipWithIndex.map {
-        case (p, i) => LlvmIr.Param(LlvmNames.paramName(i), exportAbiTypeOf(p.tpe))
+      val outParamOpt = sig.result match {
+        case ExportAbi.AbiType.Unit => None
+        case _ => Some(LlvmIr.Param("out", Type.Ptr))
       }
+
+      val params = LlvmIr.Param("ctx", Type.Ptr) :: ((defn.cparams ::: defn.fparams).zipWithIndex.map {
+        case (p, i) => LlvmIr.Param(LlvmNames.paramName(i), exportAbiTypeOf(p.tpe))
+      } ::: outParamOpt.toList)
 
       val fb = new FunBuilder()
       val entry = fb.newBlock("entry")
       fb.setCurrent(entry)
 
       val ctxPtr = Value.Local("ctx", Type.Ptr)
+      val outPtrOpt = outParamOpt.map(_ => Value.Local("out", Type.Ptr))
       val abiArgs = (defn.cparams ::: defn.fparams).zipWithIndex.map {
         case (p, i) => Value.Local(LlvmNames.paramName(i), exportAbiTypeOf(p.tpe))
       }
@@ -966,9 +976,6 @@ object LlvmBackend {
       fb.current.emitAssign(callTmp, Op.Call(flixResultType, defName, ctxPtr :: args))
 
       val r0 = unwindThunkToResult(callTmp, ctxPtr, fb)
-      val returnsHandle = isHandleAbiType(defn.unboxedType.tpe)
-
-      // Convert pointer-like payloads to stable handles at the public ABI boundary.
       val tag = freshTmp(Type.I64)
       fb.current.emitAssign(tag, Op.ExtractValue(Type.I64, flixResultType, r0, index = 0))
       val payload = freshTmp(Type.I64)
@@ -986,26 +993,11 @@ object LlvmBackend {
 
       val valueBlock = fb.newBlock(valueLabel)
       fb.setCurrent(valueBlock)
-      if (returnsHandle) {
-        val ptr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(ptr, Op.Cast("inttoptr", Type.Ptr, payload))
-        val h = freshTmp(Type.I64)
-        fb.current.emitAssign(h, Op.Call(Type.I64, "flix_handle_new", List(ctxPtr, ptr)))
-        val r1 = packResultTagged(ResultTagValue, h, fb)
-        val predLabel = fb.current.label
-        fb.current.setTerminator(Terminator.Br(endLabel))
-        incomings.addOne((r1, predLabel))
-      } else if (isImmediateType(defn.unboxedType.tpe)) {
-        val unboxedPayload = exportUnboxValuePayload(payload, defn.unboxedType.tpe, fb)
-        val r1 = packResultTagged(ResultTagValue, unboxedPayload, fb)
-        val predLabel = fb.current.label
-        fb.current.setTerminator(Terminator.Br(endLabel))
-        incomings.addOne((r1, predLabel))
-      } else {
-        val predLabel = fb.current.label
-        fb.current.setTerminator(Terminator.Br(endLabel))
-        incomings.addOne((r0, predLabel))
-      }
+      outPtrOpt.foreach(outPtr => emitStoreExportOkValue(ctxPtr, outPtr, payload, defn.unboxedType.tpe, sig.result, fb))
+      val okResult = packResultTagged(ResultTagValue, Value.IntConst(0L, Type.I64), fb)
+      val okPred = fb.current.label
+      fb.current.setTerminator(Terminator.Br(endLabel))
+      incomings.addOne((okResult, okPred))
 
       val notValueBlock = fb.newBlock(notValueLabel)
       fb.setCurrent(notValueBlock)
@@ -1048,9 +1040,8 @@ object LlvmBackend {
 
       val otherBlock = fb.newBlock(otherLabel)
       fb.setCurrent(otherBlock)
-      val otherPred = fb.current.label
-      fb.current.setTerminator(Terminator.Br(endLabel))
-      incomings.addOne((r0, otherPred))
+      fb.current.emitTrap()
+      fb.current.setTerminator(Terminator.Unreachable)
 
       val endBlock = fb.newBlock(endLabel)
       fb.setCurrent(endBlock)
@@ -1133,7 +1124,7 @@ object LlvmBackend {
         val callTmp = freshTmp(flixResultType)
         fb.current.emitAssign(callTmp, Op.Call(flixResultType, LlvmNames.defName(e.sym), ctxPtr :: args))
         val r0 = unwindThunkToResult(callTmp, ctxPtr, fb)
-        val r = wrapResultForWasmRuntime(r0, ctxPtr, fb)
+        val r = wrapResultForWasmRuntime(r0, ctxPtr, fb, wasmRuntimeValuePayloadIsPtr(e.defn))
         fb.current.setTerminator(Terminator.Ret(flixResultType, r))
 
         // Fallthrough continuation (for the next check).
@@ -1160,7 +1151,7 @@ object LlvmBackend {
       * The wasm component runtime stores these handles inside tasks and returns them to the host as `value`
       * resources. The host can then unbox values via WIT helpers.
       */
-    private def wrapResultForWasmRuntime(r0: Value, ctxPtr: Value, fb: FunBuilder): Value = {
+    private def wrapResultForWasmRuntime(r0: Value, ctxPtr: Value, fb: FunBuilder, valuePayloadIsPtr: Boolean): Value = {
       val tag = freshTmp(Type.I64)
       fb.current.emitAssign(tag, Op.ExtractValue(Type.I64, flixResultType, r0, index = 0))
       val payload = freshTmp(Type.I64)
@@ -1177,11 +1168,17 @@ object LlvmBackend {
 
       val incomings = mutable.ArrayBuffer.empty[(Value, String)]
 
-      // VALUE => allocate an i64 handle containing the raw value bits.
+      // VALUE => materialize a stable handle for the returned Flix value.
       val valueBlock = fb.newBlock(valueLabel)
       fb.setCurrent(valueBlock)
       val valueHandle = freshTmp(Type.I64)
-      fb.current.emitAssign(valueHandle, Op.Call(Type.I64, "flix_handle_new_i64", List(ctxPtr, payload)))
+      if (valuePayloadIsPtr) {
+        val valuePtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(valuePtr, Op.Cast("inttoptr", Type.Ptr, payload))
+        fb.current.emitAssign(valueHandle, Op.Call(Type.I64, "flix_handle_new", List(ctxPtr, valuePtr)))
+      } else {
+        fb.current.emitAssign(valueHandle, Op.Call(Type.I64, "flix_handle_new_i64", List(ctxPtr, payload)))
+      }
       val valueResult = packResultTagged(ResultTagValue, valueHandle, fb)
       val valuePred = fb.current.label
       fb.current.setTerminator(Terminator.Br(endLabel))
@@ -1245,7 +1242,7 @@ object LlvmBackend {
       *
       * Signature matches the Zig runtime's `extern fn flix_wasm_resume_ok_def`.
       */
-    private def emitWasmResumeOkDef(): LlvmIr.Function = {
+    private def emitWasmResumeOkDef(entries: List[LlvmWasmDefs.Entry]): LlvmIr.Function = {
       val params = List(
         LlvmIr.Param("ctx", Type.Ptr),
         LlvmIr.Param("defId", Type.I64),
@@ -1271,11 +1268,46 @@ object LlvmBackend {
       fb.current.emitAssign(callTmp, Op.Call(flixResultType, "flix_resume_suspension", List(ctxPtr, suspPtr, resumePayload)))
 
       val r0 = unwindThunkToResult(callTmp, ctxPtr, fb)
-      val r = wrapResultForWasmRuntime(r0, ctxPtr, fb)
-      fb.current.setTerminator(Terminator.Ret(flixResultType, r))
+
+      if (entries.isEmpty) {
+        fb.current.emitTrap()
+        fb.current.setTerminator(Terminator.Unreachable)
+      } else {
+        var currentCheck = fb.current
+        entries.zipWithIndex.foreach { case (e, idx) =>
+          val caseLabel = s"resume_def_${e.defId}"
+          val nextLabel = if (idx == entries.length - 1) "resume_default" else s"resume_check_def_${entries(idx + 1).defId}"
+          val cmp = Value.Local(s"resume_cmp_def_${e.defId}", Type.I1)
+
+          currentCheck.emitAssign(cmp, Op.ICmp("eq", Value.Local("defId", Type.I64), Value.IntConst(e.defId, Type.I64)))
+          currentCheck.setTerminator(Terminator.CondBr(cmp, caseLabel, nextLabel))
+
+          val caseBlock = fb.newBlock(caseLabel)
+          fb.setCurrent(caseBlock)
+          val r = wrapResultForWasmRuntime(r0, ctxPtr, fb, wasmRuntimeValuePayloadIsPtr(e.defn))
+          fb.current.setTerminator(Terminator.Ret(flixResultType, r))
+
+          if (idx < entries.length - 1) {
+            val nextCheck = fb.newBlock(nextLabel)
+            currentCheck = nextCheck
+            fb.setCurrent(nextCheck)
+          }
+        }
+
+        val defaultBlock = fb.newBlock("resume_default")
+        fb.setCurrent(defaultBlock)
+        fb.current.emitTrap()
+        fb.current.setTerminator(Terminator.Unreachable)
+      }
 
       LlvmIr.Function("flix_wasm_resume_ok_def", flixResultType, params, fb.result())
     }
+
+    private def wasmRuntimeValuePayloadIsPtr(defn: LoweredAst.Def): Boolean =
+      defn.exportedSignature match {
+        case Some(sig) => sig.result != ca.uwaterloo.flix.language.phase.ExportAbi.AbiType.Unit
+        case None => defn.unboxedType.tpe != SimpleType.Unit
+      }
 
     /**
       * Resumes a suspension by throwing an exception.
@@ -1312,13 +1344,20 @@ object LlvmBackend {
     }
 
     private def emitExportResumeWrapper(defn: LoweredAst.Def): LlvmIr.Function = {
+      val sig = defn.exportedSignature.getOrElse {
+        throw new IllegalStateException(s"Missing portable export signature for '${defn.sym}'.")
+      }
       val wrapperName = LlvmNames.exportResumeName(defn.sym)
+      val outParamOpt = sig.result match {
+        case ExportAbi.AbiType.Unit => None
+        case _ => Some(LlvmIr.Param("out", Type.Ptr))
+      }
 
       val params = List(
         LlvmIr.Param("ctx", Type.Ptr),
         LlvmIr.Param("susp", Type.I64),
         LlvmIr.Param("resume", Type.I64)
-      )
+      ) ::: outParamOpt.toList
 
       val fb = new FunBuilder()
       val entry = fb.newBlock("entry")
@@ -1327,6 +1366,7 @@ object LlvmBackend {
       val ctxPtr = Value.Local("ctx", Type.Ptr)
       val suspHandle = Value.Local("susp", Type.I64)
       val resumeHandle = Value.Local("resume", Type.I64)
+      val outPtrOpt = outParamOpt.map(_ => Value.Local("out", Type.Ptr))
 
       val suspPtr = freshTmp(Type.Ptr)
       fb.current.emitAssign(suspPtr, Op.Call(Type.Ptr, "flix_handle_get", List(ctxPtr, suspHandle)))
@@ -1338,9 +1378,6 @@ object LlvmBackend {
       fb.current.emitAssign(callTmp, Op.Call(flixResultType, "flix_resume_suspension", List(ctxPtr, suspPtr, resumePayload)))
 
       val r0 = unwindThunkToResult(callTmp, ctxPtr, fb)
-      val returnsHandle = isHandleAbiType(defn.unboxedType.tpe)
-
-      // Convert pointer-like payloads to stable handles at the public ABI boundary.
       val tag = freshTmp(Type.I64)
       fb.current.emitAssign(tag, Op.ExtractValue(Type.I64, flixResultType, r0, index = 0))
       val payload = freshTmp(Type.I64)
@@ -1358,26 +1395,11 @@ object LlvmBackend {
 
       val valueBlock = fb.newBlock(valueLabel)
       fb.setCurrent(valueBlock)
-      if (returnsHandle) {
-        val ptr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(ptr, Op.Cast("inttoptr", Type.Ptr, payload))
-        val h = freshTmp(Type.I64)
-        fb.current.emitAssign(h, Op.Call(Type.I64, "flix_handle_new", List(ctxPtr, ptr)))
-        val r1 = packResultTagged(ResultTagValue, h, fb)
-        val predLabel = fb.current.label
-        fb.current.setTerminator(Terminator.Br(endLabel))
-        incomings.addOne((r1, predLabel))
-      } else if (isImmediateType(defn.unboxedType.tpe)) {
-        val unboxedPayload = exportUnboxValuePayload(payload, defn.unboxedType.tpe, fb)
-        val r1 = packResultTagged(ResultTagValue, unboxedPayload, fb)
-        val predLabel = fb.current.label
-        fb.current.setTerminator(Terminator.Br(endLabel))
-        incomings.addOne((r1, predLabel))
-      } else {
-        val predLabel = fb.current.label
-        fb.current.setTerminator(Terminator.Br(endLabel))
-        incomings.addOne((r0, predLabel))
-      }
+      outPtrOpt.foreach(outPtr => emitStoreExportOkValue(ctxPtr, outPtr, payload, defn.unboxedType.tpe, sig.result, fb))
+      val okResult = packResultTagged(ResultTagValue, Value.IntConst(0L, Type.I64), fb)
+      val okPred = fb.current.label
+      fb.current.setTerminator(Terminator.Br(endLabel))
+      incomings.addOne((okResult, okPred))
 
       val notValueBlock = fb.newBlock(notValueLabel)
       fb.setCurrent(notValueBlock)
@@ -1420,9 +1442,8 @@ object LlvmBackend {
 
       val otherBlock = fb.newBlock(otherLabel)
       fb.setCurrent(otherBlock)
-      val otherPred = fb.current.label
-      fb.current.setTerminator(Terminator.Br(endLabel))
-      incomings.addOne((r0, otherPred))
+      fb.current.emitTrap()
+      fb.current.setTerminator(Terminator.Unreachable)
 
       val endBlock = fb.newBlock(endLabel)
       fb.setCurrent(endBlock)
@@ -2429,6 +2450,23 @@ object LlvmBackend {
       // For `@Export` we use handles for such values at the public ABI boundary.
       case SimpleType.Object => true
       case _ => false
+    }
+
+    private def emitStoreExportOkValue(ctxPtr: Value, outPtr: Value, payload: Value, loweredTpe: SimpleType, abiTpe: ExportAbi.AbiType, fb: FunBuilder): Unit = abiTpe match {
+      case ExportAbi.AbiType.Unit =>
+        ()
+
+      case ExportAbi.AbiType.String | ExportAbi.AbiType.Bytes =>
+        val ptr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(ptr, Op.Cast("inttoptr", Type.Ptr, payload))
+        val handle = freshTmp(Type.I64)
+        fb.current.emitAssign(handle, Op.Call(Type.I64, "flix_handle_new", List(ctxPtr, ptr)))
+        fb.current.emitStore(handle, outPtr)
+
+      case _ =>
+        val bits = exportUnboxValuePayload(payload, loweredTpe, fb)
+        val value = unboxFromI64(bits, loweredTpe, fb)
+        fb.current.emitStore(value, outPtr)
     }
 
     private def exportAbiTypeOf(tpe: SimpleType): Type =

@@ -478,10 +478,39 @@ void __wasm_export_exports_flix_runtime_runtime_suspension_request_post_return(u
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 __attribute__((__weak__, __export_name__("cabi_post_flix:runtime/runtime@0.1.0#unbox-string")))
 void __wasm_export_exports_flix_runtime_runtime_unbox_string_post_return(uint8_t * arg0) {
   if ((*((size_t*) (arg0 + sizeof(void*)))) > 0) {
     free(*((uint8_t **) (arg0 + 0)));
+  }
+}
+
+
+__attribute__((__weak__, __export_name__("cabi_post_flix:runtime/runtime@0.1.0#unbox-bytes")))
+void __wasm_export_exports_flix_runtime_runtime_unbox_bytes_post_return(uint8_t * arg0) {
+  size_t len = *((size_t*) (arg0 + sizeof(void*)));
+  if (len > 0) {
+    uint8_t *ptr = *((uint8_t **) (arg0 + 0));
+    for (size_t i = 0; i < len; i++) {
+      uint8_t *base = ptr + i * 1;
+      (void) base;
+    }
+    free(ptr);
   }
 }
 
@@ -1473,6 +1502,24 @@ uint8_t * __wasm_export_exports_flix_runtime_runtime_suspension_request(int32_t 
   return ptr;
 }
 
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#suspension-arg-count")))
+int32_t __wasm_export_exports_flix_runtime_runtime_suspension_arg_count(int32_t arg, int32_t arg0) {
+  uint32_t ret = exports_flix_runtime_runtime_suspension_arg_count(((exports_flix_runtime_runtime_ctx_t*) arg), ((exports_flix_runtime_runtime_suspension_t*) arg0));
+  return (int32_t) (ret);
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#suspension-arg-as-i64")))
+int32_t __wasm_export_exports_flix_runtime_runtime_suspension_arg_as_i64(int32_t arg, int32_t arg0, int32_t arg1) {
+  exports_flix_runtime_runtime_own_value_t ret = exports_flix_runtime_runtime_suspension_arg_as_i64(((exports_flix_runtime_runtime_ctx_t*) arg), ((exports_flix_runtime_runtime_suspension_t*) arg0), (uint32_t) (arg1));
+  return (ret).__handle;
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#suspension-arg-as-ptr")))
+int32_t __wasm_export_exports_flix_runtime_runtime_suspension_arg_as_ptr(int32_t arg, int32_t arg0, int32_t arg1) {
+  exports_flix_runtime_runtime_own_value_t ret = exports_flix_runtime_runtime_suspension_arg_as_ptr(((exports_flix_runtime_runtime_ctx_t*) arg), ((exports_flix_runtime_runtime_suspension_t*) arg0), (uint32_t) (arg1));
+  return (ret).__handle;
+}
+
 __attribute__((__export_name__("flix:runtime/runtime@0.1.0#resume-ok")))
 void __wasm_export_exports_flix_runtime_runtime_resume_ok(int32_t arg, int32_t arg0, int32_t arg1) {
   exports_flix_runtime_runtime_resume_ok(((exports_flix_runtime_runtime_ctx_t*) arg), (exports_flix_runtime_runtime_own_suspension_t) { arg0 }, ((exports_flix_runtime_runtime_value_t*) arg1));
@@ -1481,6 +1528,64 @@ void __wasm_export_exports_flix_runtime_runtime_resume_ok(int32_t arg, int32_t a
 __attribute__((__export_name__("flix:runtime/runtime@0.1.0#resume-throw")))
 void __wasm_export_exports_flix_runtime_runtime_resume_throw(int32_t arg, int32_t arg0, int32_t arg1) {
   exports_flix_runtime_runtime_resume_throw(((exports_flix_runtime_runtime_ctx_t*) arg), (exports_flix_runtime_runtime_own_suspension_t) { arg0 }, ((exports_flix_runtime_runtime_value_t*) arg1));
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#resume-ok-sync")))
+uint8_t * __wasm_export_exports_flix_runtime_runtime_resume_ok_sync(int32_t arg, int32_t arg0, int32_t arg1) {
+  exports_flix_runtime_runtime_exec_t ret;
+  exports_flix_runtime_runtime_resume_ok_sync(((exports_flix_runtime_runtime_ctx_t*) arg), (exports_flix_runtime_runtime_own_suspension_t) { arg0 }, ((exports_flix_runtime_runtime_value_t*) arg1), &ret);
+  uint8_t *ptr = (uint8_t *) &RET_AREA;
+  switch ((int32_t) (ret).tag) {
+    case 0: {
+      const exports_flix_runtime_runtime_own_value_t *payload = &(ret).val.ok;
+      *((int8_t*)(ptr + 0)) = 0;
+      *((int32_t*)(ptr + 8)) = (*payload).__handle;
+      break;
+    }
+    case 1: {
+      const exports_flix_runtime_runtime_own_value_t *payload2 = &(ret).val.thrown;
+      *((int8_t*)(ptr + 0)) = 1;
+      *((int32_t*)(ptr + 8)) = (*payload2).__handle;
+      break;
+    }
+    case 2: {
+      const exports_flix_runtime_runtime_suspended_exec_t *payload3 = &(ret).val.suspended;
+      *((int8_t*)(ptr + 0)) = 2;
+      *((int64_t*)(ptr + 8)) = (int64_t) ((*payload3).task);
+      *((int32_t*)(ptr + 16)) = ((*payload3).suspension).__handle;
+      break;
+    }
+  }
+  return ptr;
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#resume-throw-sync")))
+uint8_t * __wasm_export_exports_flix_runtime_runtime_resume_throw_sync(int32_t arg, int32_t arg0, int32_t arg1) {
+  exports_flix_runtime_runtime_exec_t ret;
+  exports_flix_runtime_runtime_resume_throw_sync(((exports_flix_runtime_runtime_ctx_t*) arg), (exports_flix_runtime_runtime_own_suspension_t) { arg0 }, ((exports_flix_runtime_runtime_value_t*) arg1), &ret);
+  uint8_t *ptr = (uint8_t *) &RET_AREA;
+  switch ((int32_t) (ret).tag) {
+    case 0: {
+      const exports_flix_runtime_runtime_own_value_t *payload = &(ret).val.ok;
+      *((int8_t*)(ptr + 0)) = 0;
+      *((int32_t*)(ptr + 8)) = (*payload).__handle;
+      break;
+    }
+    case 1: {
+      const exports_flix_runtime_runtime_own_value_t *payload2 = &(ret).val.thrown;
+      *((int8_t*)(ptr + 0)) = 1;
+      *((int32_t*)(ptr + 8)) = (*payload2).__handle;
+      break;
+    }
+    case 2: {
+      const exports_flix_runtime_runtime_suspended_exec_t *payload3 = &(ret).val.suspended;
+      *((int8_t*)(ptr + 0)) = 2;
+      *((int64_t*)(ptr + 8)) = (int64_t) ((*payload3).task);
+      *((int32_t*)(ptr + 16)) = ((*payload3).suspension).__handle;
+      break;
+    }
+  }
+  return ptr;
 }
 
 __attribute__((__export_name__("flix:runtime/runtime@0.1.0#resume-timer-sleep")))
@@ -2109,6 +2214,30 @@ void __wasm_export_exports_flix_runtime_runtime_resume_tcp_server_close_err(int3
   exports_flix_runtime_runtime_resume_tcp_server_close_err(((exports_flix_runtime_runtime_ctx_t*) arg), (exports_flix_runtime_runtime_own_suspension_t) { arg0 }, &arg4);
 }
 
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#box-i8")))
+int32_t __wasm_export_exports_flix_runtime_runtime_box_i8(int32_t arg, int32_t arg0) {
+  exports_flix_runtime_runtime_own_value_t ret = exports_flix_runtime_runtime_box_i8(((exports_flix_runtime_runtime_ctx_t*) arg), (int8_t) (arg0));
+  return (ret).__handle;
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#unbox-i8")))
+int32_t __wasm_export_exports_flix_runtime_runtime_unbox_i8(int32_t arg, int32_t arg0) {
+  int8_t ret = exports_flix_runtime_runtime_unbox_i8(((exports_flix_runtime_runtime_ctx_t*) arg), ((exports_flix_runtime_runtime_value_t*) arg0));
+  return (int32_t) (ret);
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#box-i16")))
+int32_t __wasm_export_exports_flix_runtime_runtime_box_i16(int32_t arg, int32_t arg0) {
+  exports_flix_runtime_runtime_own_value_t ret = exports_flix_runtime_runtime_box_i16(((exports_flix_runtime_runtime_ctx_t*) arg), (int16_t) (arg0));
+  return (ret).__handle;
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#unbox-i16")))
+int32_t __wasm_export_exports_flix_runtime_runtime_unbox_i16(int32_t arg, int32_t arg0) {
+  int16_t ret = exports_flix_runtime_runtime_unbox_i16(((exports_flix_runtime_runtime_ctx_t*) arg), ((exports_flix_runtime_runtime_value_t*) arg0));
+  return (int32_t) (ret);
+}
+
 __attribute__((__export_name__("flix:runtime/runtime@0.1.0#box-i32")))
 int32_t __wasm_export_exports_flix_runtime_runtime_box_i32(int32_t arg, int32_t arg0) {
   exports_flix_runtime_runtime_own_value_t ret = exports_flix_runtime_runtime_box_i32(((exports_flix_runtime_runtime_ctx_t*) arg), arg0);
@@ -2118,6 +2247,42 @@ int32_t __wasm_export_exports_flix_runtime_runtime_box_i32(int32_t arg, int32_t 
 __attribute__((__export_name__("flix:runtime/runtime@0.1.0#unbox-i32")))
 int32_t __wasm_export_exports_flix_runtime_runtime_unbox_i32(int32_t arg, int32_t arg0) {
   int32_t ret = exports_flix_runtime_runtime_unbox_i32(((exports_flix_runtime_runtime_ctx_t*) arg), ((exports_flix_runtime_runtime_value_t*) arg0));
+  return ret;
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#box-i64")))
+int32_t __wasm_export_exports_flix_runtime_runtime_box_i64(int32_t arg, int64_t arg0) {
+  exports_flix_runtime_runtime_own_value_t ret = exports_flix_runtime_runtime_box_i64(((exports_flix_runtime_runtime_ctx_t*) arg), arg0);
+  return (ret).__handle;
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#unbox-i64")))
+int64_t __wasm_export_exports_flix_runtime_runtime_unbox_i64(int32_t arg, int32_t arg0) {
+  int64_t ret = exports_flix_runtime_runtime_unbox_i64(((exports_flix_runtime_runtime_ctx_t*) arg), ((exports_flix_runtime_runtime_value_t*) arg0));
+  return ret;
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#box-f32")))
+int32_t __wasm_export_exports_flix_runtime_runtime_box_f32(int32_t arg, float arg0) {
+  exports_flix_runtime_runtime_own_value_t ret = exports_flix_runtime_runtime_box_f32(((exports_flix_runtime_runtime_ctx_t*) arg), arg0);
+  return (ret).__handle;
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#unbox-f32")))
+float __wasm_export_exports_flix_runtime_runtime_unbox_f32(int32_t arg, int32_t arg0) {
+  float ret = exports_flix_runtime_runtime_unbox_f32(((exports_flix_runtime_runtime_ctx_t*) arg), ((exports_flix_runtime_runtime_value_t*) arg0));
+  return ret;
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#box-f64")))
+int32_t __wasm_export_exports_flix_runtime_runtime_box_f64(int32_t arg, double arg0) {
+  exports_flix_runtime_runtime_own_value_t ret = exports_flix_runtime_runtime_box_f64(((exports_flix_runtime_runtime_ctx_t*) arg), arg0);
+  return (ret).__handle;
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#unbox-f64")))
+double __wasm_export_exports_flix_runtime_runtime_unbox_f64(int32_t arg, int32_t arg0) {
+  double ret = exports_flix_runtime_runtime_unbox_f64(((exports_flix_runtime_runtime_ctx_t*) arg), ((exports_flix_runtime_runtime_value_t*) arg0));
   return ret;
 }
 
@@ -2144,6 +2309,23 @@ __attribute__((__export_name__("flix:runtime/runtime@0.1.0#unbox-string")))
 uint8_t * __wasm_export_exports_flix_runtime_runtime_unbox_string(int32_t arg, int32_t arg0) {
   flix_string_t ret;
   exports_flix_runtime_runtime_unbox_string(((exports_flix_runtime_runtime_ctx_t*) arg), ((exports_flix_runtime_runtime_value_t*) arg0), &ret);
+  uint8_t *ptr = (uint8_t *) &RET_AREA;
+  *((size_t*)(ptr + sizeof(void*))) = (ret).len;
+  *((uint8_t **)(ptr + 0)) = (uint8_t *) (ret).ptr;
+  return ptr;
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#box-bytes")))
+int32_t __wasm_export_exports_flix_runtime_runtime_box_bytes(int32_t arg, uint8_t * arg0, size_t arg1) {
+  flix_list_u8_t arg2 = (flix_list_u8_t) { (uint8_t*)(arg0), (arg1) };
+  exports_flix_runtime_runtime_own_value_t ret = exports_flix_runtime_runtime_box_bytes(((exports_flix_runtime_runtime_ctx_t*) arg), &arg2);
+  return (ret).__handle;
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#unbox-bytes")))
+uint8_t * __wasm_export_exports_flix_runtime_runtime_unbox_bytes(int32_t arg, int32_t arg0) {
+  flix_list_u8_t ret;
+  exports_flix_runtime_runtime_unbox_bytes(((exports_flix_runtime_runtime_ctx_t*) arg), ((exports_flix_runtime_runtime_value_t*) arg0), &ret);
   uint8_t *ptr = (uint8_t *) &RET_AREA;
   *((size_t*)(ptr + sizeof(void*))) = (ret).len;
   *((uint8_t **)(ptr + 0)) = (uint8_t *) (ret).ptr;

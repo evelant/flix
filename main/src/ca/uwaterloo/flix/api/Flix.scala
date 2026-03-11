@@ -21,7 +21,7 @@ import ca.uwaterloo.flix.language.ast.shared.{AvailableClasses, Input, SecurityC
 import ca.uwaterloo.flix.language.dbg.AstPrinter
 import ca.uwaterloo.flix.language.fmt.FormatOptions
 import ca.uwaterloo.flix.language.phase.*
-import ca.uwaterloo.flix.language.phase.llvm.{LlvmBackend, LlvmExportWriter, LlvmNativeDriver, LlvmWasmDriver, LlvmWasmExportWriter, LlvmWriter}
+import ca.uwaterloo.flix.language.phase.llvm.{LlvmBackend, LlvmExportWriter, LlvmNativeDriver, LlvmWasmBindingWriter, LlvmWasmDriver, LlvmWasmExportWriter, LlvmWasmTypedExportsWriter, LlvmWriter}
 import ca.uwaterloo.flix.language.phase.jvm.{JvmBackend, JvmLoader, JvmLowerer, JvmWriter}
 import ca.uwaterloo.flix.language.phase.monomorph.Specialization
 import ca.uwaterloo.flix.language.phase.optimizer.{LambdaDrop, Optimizer}
@@ -695,7 +695,11 @@ class Flix {
           case CompilationTarget.LlvmWasm =>
             LlvmWasmExportWriter.run(loweredAst)
             val emitJs = requestedEmits.isEmpty || requestedEmits.contains(EmitKind.Js)
-            val artifacts = LlvmWasmDriver.run(LlvmWriter.modulePath(flix.options.outputPath), emitJs = emitJs)
+            val typedExports = LlvmWasmTypedExportsWriter.compute(loweredAst)
+            val artifacts = LlvmWasmDriver.run(LlvmWriter.modulePath(flix.options.outputPath), typedExports = typedExports, emitJs = emitJs)
+            if (emitJs && hasExports) {
+              LlvmWasmBindingWriter.run(loweredAst)
+            }
             val main =
               if (hasMain) {
                 Some((args: Array[String]) => {

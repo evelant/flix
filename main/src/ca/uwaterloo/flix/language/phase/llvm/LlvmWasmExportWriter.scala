@@ -17,8 +17,9 @@
 package ca.uwaterloo.flix.language.phase.llvm
 
 import ca.uwaterloo.flix.api.Flix
-import ca.uwaterloo.flix.language.ast.{LoweredAst, SimpleType}
+import ca.uwaterloo.flix.language.ast.LoweredAst
 import ca.uwaterloo.flix.language.ast.SourceLocation
+import ca.uwaterloo.flix.language.phase.ExportAbi
 import ca.uwaterloo.flix.util.{ArtifactNames, InternalCompilerException}
 
 import java.nio.charset.StandardCharsets
@@ -64,8 +65,15 @@ object LlvmWasmExportWriter {
 
     entries.zipWithIndex.foreach { case (e, idx) =>
       val defn = e.defn
-      val params = (defn.cparams ::: defn.fparams).map(p => p.tpe.toString)
+      val params = defn.exportedSignature match {
+        case Some(sig) => sig.params.map(_.displayName)
+        case None => (defn.cparams ::: defn.fparams).map(p => fallbackTypeNameOf(p.tpe))
+      }
       val arity = params.length
+      val result = defn.exportedSignature match {
+        case Some(sig) => sig.result.displayName
+        case None => fallbackTypeNameOf(defn.unboxedType.tpe)
+      }
 
       sb.append("    {\n")
       sb.append(s"""      "defId": ${e.defId},\n""")
@@ -74,7 +82,7 @@ object LlvmWasmExportWriter {
       sb.append(s"""      "isExport": ${e.isExport},\n""")
       sb.append(s"""      "arity": $arity,\n""")
       sb.append(s"""      "params": [${params.map(p => "\"" + escapeJson(p) + "\"").mkString(", ")}],\n""")
-      sb.append(s"""      "result": "${escapeJson(defn.tpe.toString)}"\n""")
+      sb.append(s"""      "result": "${escapeJson(result)}"\n""")
       sb.append("    }")
       if (idx != entries.length - 1) sb.append(",")
       sb.append("\n")
@@ -103,6 +111,9 @@ object LlvmWasmExportWriter {
     }
     b.toString()
   }
+
+  private def fallbackTypeNameOf(tpe: ca.uwaterloo.flix.language.ast.SimpleType): String =
+    ExportAbi.portableV0FromSimpleType(tpe).map(_.displayName).getOrElse(tpe.toString)
 
   private def writeFile(path: Path, bytes: Array[Byte]): Unit = {
     Files.createDirectories(path.getParent)

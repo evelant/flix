@@ -7,7 +7,7 @@ use wasmtime::{
 
 mod bindings {
     wasmtime::component::bindgen!({
-        path: "../../../docs/planning/native-backend/wit/flix-bindings",
+        path: "../../../runtime/wit/flix-bindings",
         world: "flix",
     });
 }

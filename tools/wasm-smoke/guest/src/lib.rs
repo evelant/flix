@@ -1,5 +1,5 @@
 wit_bindgen::generate!({
-    path: "../../../docs/planning/native-backend/wit/flix-bindings",
+    path: "../../../runtime/wit/flix-bindings",
     world: "flix",
     generate_all,
 });

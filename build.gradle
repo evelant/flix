@@ -130,9 +130,9 @@ jar {
         into 'tools/wasm-runner-rs'
     }
 
-    from('docs/planning/native-backend/wit/flix-bindings') {
+    from('runtime/wit/flix-bindings') {
         include '**/*.wit'
-        into 'docs/planning/native-backend/wit/flix-bindings'
+        into 'runtime/wit/flix-bindings'
     }
 
     duplicatesStrategy = 'exclude'
@@ -151,6 +151,7 @@ test {
     inputs.files(fileTree('main/test/flix') { include '**/*.flix' })
     // LLVM runtime bring-up sources are compiled/used during some tests.
     inputs.files(fileTree('runtime/src') { include '**/*.zig' })
+    inputs.files(fileTree('runtime/wit') { include '**/*.wit' })
     filter {
         // Run leaf suites directly.
         //
@@ -196,6 +197,14 @@ tasks.register('vscode', Copy) {
     dependsOn(['classes', 'jar'])
     from 'build/libs/flix.jar'
     into providers.gradleProperty('dev.flix.vscode.project')
+}
+
+tasks.register('regenWitGlue', Exec) {
+    commandLine 'bash', 'runtime/tools/regenerate_wit_glue.sh'
+}
+
+tasks.register('checkWitGlue', Exec) {
+    commandLine 'bash', 'runtime/tools/regenerate_wit_glue.sh', '--check'
 }
 
 tasks.register('testPackageManager', JavaExec) {
