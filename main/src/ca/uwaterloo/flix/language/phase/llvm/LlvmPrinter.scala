@@ -137,6 +137,9 @@ object LlvmPrinter {
   }
 
   private def printTerminator(term: Terminator, sb: StringBuilder): Unit = term match {
+    case Terminator.Ret(Type.Void, _) =>
+      sb.append("  ret void\n")
+
     case Terminator.Ret(retType, value) =>
       sb.append(s"  ret ${retType.render} ${value.render}\n")
 

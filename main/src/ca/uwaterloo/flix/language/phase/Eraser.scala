@@ -56,7 +56,7 @@ object Eraser {
       val eNew = visitExp(exp)
       val e = ErasedAst.Expr.ApplyAtomic(AtomicOp.Box, List(eNew), box(tpe), exp.purity, loc)
       val exportedSignature =
-        if (ann.isExport) ExportAbi.portableV0Signature(fparams.map(_.tpe), originalTpe.tpe)
+        if (ann.isExport) ExportAbi.portableSignature(fparams.map(_.tpe), originalTpe.tpe)
         else None
       ErasedAst.Def(ann, mod, sym, cparams.map(visitParam), fparams.map(visitParam), e, box(tpe), ErasedAst.UnboxedType(erase(originalTpe.tpe)), exportedSignature, loc)
   }
@@ -273,7 +273,16 @@ object Eraser {
 
   private def visitOp(op: ReducedAst.Op)(implicit ctx: SharedContext, flix: Flix): ErasedAst.Op = op match {
     case ReducedAst.Op(sym, ann, mod, fparams, tpe, purity, loc) =>
-      ErasedAst.Op(sym, ann, mod, fparams.map(visitParam), erase(tpe), purity, loc)
+      ErasedAst.Op(
+        sym,
+        ann,
+        mod,
+        fparams.map(visitParam),
+        erase(tpe),
+        purity,
+        ExportAbi.portableSignature(fparams.map(_.tpe), tpe),
+        loc
+      )
   }
 
   private def visitType(tpe0: SimpleType)(implicit ctx: SharedContext, flix: Flix): SimpleType = {

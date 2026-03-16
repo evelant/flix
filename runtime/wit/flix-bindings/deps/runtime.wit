@@ -745,4 +745,31 @@ interface runtime {
 
   box-bytes: func(ctx: borrow<ctx>, bytes: list<u8>) -> value;
   unbox-bytes: func(ctx: borrow<ctx>, v: borrow<value>) -> list<u8>;
+
+  /// Construct a Flix tuple value from already-boxed field handles.
+  tuple-new: func(ctx: borrow<ctx>, fields: list<borrow<value>>) -> value;
+
+  /// Return the tuple field at `idx` as an owned handle.
+  tuple-field: func(ctx: borrow<ctx>, tup: borrow<value>, idx: u32) -> value;
+
+  /// Construct a Flix tagged enum value from an explicit tag id and boxed field handles.
+  tag-new: func(ctx: borrow<ctx>, tag-id: sym, fields: list<borrow<value>>) -> value;
+
+  /// Return the tag id stored in a tagged enum value.
+  tag-id: func(ctx: borrow<ctx>, tagged: borrow<value>) -> sym;
+
+  /// Return the tagged enum field at `idx` as an owned handle.
+  tag-field: func(ctx: borrow<ctx>, tagged: borrow<value>, idx: u32) -> value;
+
+  /// Count the logical elements in a Flix `List` value identified by the supplied tag ids.
+  list-len: func(ctx: borrow<ctx>, xs: borrow<value>, nil-tag-id: sym, cons-tag-id: sym) -> u32;
+
+  /// Construct a Flix `Array[t, Static]` from boxed element handles.
+  array-new: func(ctx: borrow<ctx>, ptr-elems: bool, elems: list<borrow<value>>) -> value;
+
+  /// Return the logical length of a Flix array value.
+  array-len: func(ctx: borrow<ctx>, arr: borrow<value>) -> u32;
+
+  /// Return the array element at `idx` as an owned handle.
+  array-elem: func(ctx: borrow<ctx>, arr: borrow<value>, idx: u32) -> value;
 }

@@ -24,11 +24,13 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import java.io.IOException
 import java.nio.charset.StandardCharsets
-import java.nio.file.{Files, Path}
+import java.nio.file.{Files, Path, Paths}
 import java.util.concurrent.TimeUnit
 import scala.jdk.CollectionConverters.*
 
 class LlvmWasmExportSuite extends AnyFunSuite {
+
+  private val ArtifactName = "export-smoke"
 
   private val TestOptions: Options =
     Options.TestWithLibAll.copy(
@@ -38,29 +40,11 @@ class LlvmWasmExportSuite extends AnyFunSuite {
       outputJvm = false,
     )
 
-  private val ProgramSource: String =
-    """
-      |mod Test {
-      |    eff HostEcho {
-      |        def echo(s: String): String
-      |    }
-      |
-      |    @Export
-      |    pub def add(x: Int32, y: Int32): Int32 = x + y
-      |
-      |    @Export
-      |    pub def echo(s: String): String = s
-      |
-      |    @Export
-      |    pub def bytesId(a: Array[Int8, Static]): Array[Int8, Static] = a
-      |
-      |    @Export
-      |    pub def suspendEcho(s: String): String \ HostEcho = HostEcho.echo(s)
-      |}
-      |""".stripMargin
+  private val ExampleSourceFile: Path =
+    Paths.get("examples/package-manager/export-smoke/src/Api.flix")
 
   private case class CompiledArtifacts(outDir: Path,
-                                       componentJs: Path,
+                                       sdkManifest: Path,
                                        bindingsJs: Path,
                                        bindingsTypes: Path,
                                        typedExportComponent: Path,
@@ -72,13 +56,32 @@ class LlvmWasmExportSuite extends AnyFunSuite {
     assume(hasJco, "jco not found on PATH (skipping LLVM-wasm export test)")
     assume(hasNode, "node not found on PATH (skipping LLVM-wasm export test)")
     val nodeFile = Files.createTempFile("flix-llvm-wasm-export-bindings-", ".mjs")
-    val compiled = compileArtifacts(ProgramSource)
+    val compiled = compileArtifacts()
     try {
-      if (!Files.exists(compiled.componentJs)) fail(s"Missing wasm JS component artifact: ${compiled.componentJs}")
+      if (!Files.exists(compiled.sdkManifest)) fail(s"Missing wasm export SDK manifest: ${compiled.sdkManifest}")
       if (!Files.exists(compiled.bindingsJs)) fail(s"Missing wasm JS export bindings: ${compiled.bindingsJs}")
       if (!Files.exists(compiled.bindingsTypes)) fail(s"Missing wasm TS export bindings: ${compiled.bindingsTypes}")
       if (!Files.exists(compiled.typedExportComponent)) fail(s"Missing wasm typed export component: ${compiled.typedExportComponent}")
       if (!Files.isDirectory(compiled.typedWitDir)) fail(s"Missing wasm typed export WIT directory: ${compiled.typedWitDir}")
+      val manifestText = Files.readString(compiled.sdkManifest, StandardCharsets.UTF_8)
+      assert(manifestText.contains("flix-export-sdk-v0"))
+      assert(manifestText.contains("\"target\": \"wasm\""))
+      assert(manifestText.contains("\"symbol\": \"Api.add\""))
+      val publicWit = Files.readString(compiled.typedWitDir.resolve("bindings.wit"), StandardCharsets.UTF_8)
+      assert(publicWit.contains("type list-int32 = list<s32>;"))
+      assert(publicWit.contains("type array-int32 = list<s32>;"))
+      assert(publicWit.contains("type array-string = list<string>;"))
+      assert(publicWit.contains("type list-record-name-string-score-int32 = list<record-name-string-score-int32>;"))
+      assert(publicWit.contains("type list-record-label-string-score-int32 = list<record-label-string-score-int32>;"))
+      assert(publicWit.contains("type array-record-name-string-score-int32 = list<record-name-string-score-int32>;"))
+      assert(publicWit.contains("record record-name-string-score-int32 {"))
+      assert(publicWit.contains("name: string,"))
+      assert(publicWit.contains("score: s32,"))
+      assert(publicWit.contains("record record-label-string-score-int32 {"))
+      assert(publicWit.contains("label: string,"))
+      assert(publicWit.contains("record request-api-suspendecho {"))
+      assert(publicWit.contains("request-api-suspendecho: func(s: borrow<suspension>) -> request-api-suspendecho;"))
+      assert(publicWit.contains("resume-api-suspendecho: func(s: suspension, resume: string) -> exec-string;"))
 
       val (witExit, witOutput) = runCmd(List("wasm-tools", "component", "wit", compiled.typedExportComponent.toString))
       if (witExit != 0) {
@@ -118,33 +121,73 @@ class LlvmWasmExportSuite extends AnyFunSuite {
            |
            |const ctx = newCtx();
            |try {
-           |  const add = Exports.Test.add(ctx, 1, 2);
+           |  const add = Exports.Api.add(ctx, 1, 2);
            |  assert(add.tag === "ok" && add.val === 3, `bad add: $${JSON.stringify(add)}`);
            |
-           |  const echo = Exports.Test.echo(ctx, "hello");
+           |  const echo = Exports.Api.echo(ctx, "hello");
            |  assert(echo.tag === "ok" && echo.val === "hello", `bad echo: $${JSON.stringify(echo)}`);
            |
            |  const data = new Uint8Array([0, 1, 2, 255]);
-           |  const bytes = Exports.Test.bytesId(ctx, data);
+           |  const bytes = Exports.Api.bytesId(ctx, data);
            |  assert(bytes.tag === "ok" && eqBytes(bytes.val, data), "bad bytes");
            |
-           |  const susp = Exports.Test.suspendEcho(ctx, "hello");
-           |  assert(susp.tag === "suspended", `bad suspend tag: $${String(susp.tag)}`);
-           |  assert(ctx.suspensionArgCount(susp.val) === 1, "bad suspension argc");
-           |  const arg0 = ctx.suspensionArgAsPtr(susp.val, 0);
-           |  try {
-           |    assert(ctx.unboxString(arg0) === "hello", "bad suspension arg0");
-           |  } finally {
-           |    maybeDispose(arg0);
-           |  }
+           |  const some = Exports.Api.maybeSucc(ctx, 41);
+           |  assert(some.tag === "ok" && some.val === 42, `bad maybeSucc(Some): $${JSON.stringify(some)}`);
+           |  const none = Exports.Api.maybeSucc(ctx, null);
+           |  assert(none.tag === "ok" && none.val === null, `bad maybeSucc(None): $${JSON.stringify(none)}`);
            |
-           |  const ok = ctx.boxString("ok");
-           |  try {
-           |    const resumed = Exports.Test.resumeSuspendEcho(ctx, susp.val, ok);
-           |    assert(resumed.tag === "ok" && resumed.val === "ok", `bad resumed result: $${JSON.stringify(resumed)}`);
-           |  } finally {
-           |    maybeDispose(ok);
-           |  }
+           |  const pair = Exports.Api.flipPair(ctx, [7, "hello"]);
+           |  assert(pair.tag === "ok" && pair.val[0] === "hello" && pair.val[1] === 7, `bad flipPair: $${JSON.stringify(pair)}`);
+           |
+           |  const even = Exports.Api.halfEven(ctx, 8);
+           |  assert(even.tag === "ok" && even.val.tag === "ok" && even.val.val === 4, `bad halfEven(8): $${JSON.stringify(even)}`);
+           |  const odd = Exports.Api.halfEven(ctx, 7);
+           |  assert(odd.tag === "ok" && odd.val.tag === "err" && odd.val.val === "odd", `bad halfEven(7): $${JSON.stringify(odd)}`);
+           |
+           |  const badge = Exports.Api.badge(ctx, { name: "hello", score: 41 });
+           |  assert(badge.tag === "ok" && badge.val.label === "hello" && badge.val.score === 42, `bad badge: $${JSON.stringify(badge)}`);
+           |
+           |  const list = Exports.Api.prependAnswer(ctx, [1, 2, 3]);
+           |  assert(list.tag === "ok" && JSON.stringify(list.val) === JSON.stringify([42, 1, 2, 3]), `bad prependAnswer: $${JSON.stringify(list)}`);
+           |
+           |  const ints = Exports.Api.echoInts(ctx, [1, 2, 3]);
+           |  assert(ints.tag === "ok" && JSON.stringify(ints.val) === JSON.stringify([1, 2, 3]), `bad echoInts: $${JSON.stringify(ints)}`);
+           |
+           |  const names = Exports.Api.echoNames(ctx, ["hello", "world"]);
+           |  assert(names.tag === "ok" && JSON.stringify(names.val) === JSON.stringify(["hello", "world"]), `bad echoNames: $${JSON.stringify(names)}`);
+           |
+           |  const promoted = Exports.Api.promoteUsers(ctx, [
+           |    { name: "hello", score: 41 },
+           |    { name: "world", score: 9 },
+           |  ]);
+           |  assert(
+           |    promoted.tag === "ok" &&
+           |      JSON.stringify(promoted.val) === JSON.stringify([
+           |        { label: "hello", score: 42 },
+           |        { label: "world", score: 10 },
+           |      ]),
+           |    `bad promoteUsers: $${JSON.stringify(promoted)}`
+           |  );
+           |
+           |  const userArray = Exports.Api.echoUserArray(ctx, [
+           |    { name: "hello", score: 41 },
+           |    { name: "world", score: 9 },
+           |  ]);
+           |  assert(
+           |    userArray.tag === "ok" &&
+           |      JSON.stringify(userArray.val) === JSON.stringify([
+           |        { name: "hello", score: 41 },
+           |        { name: "world", score: 9 },
+           |      ]),
+           |    `bad echoUserArray: $${JSON.stringify(userArray)}`
+           |  );
+           |
+           |  const susp = Exports.Api.suspendEcho(ctx, "hello");
+           |  assert(susp.tag === "suspended", `bad suspend tag: $${String(susp.tag)}`);
+           |  assert(Exports.Api.requestSuspendEcho(ctx, susp.val) === "hello", "bad suspension request");
+           |
+           |  const resumed = Exports.Api.resumeSuspendEcho(ctx, susp.val, "ok");
+           |  assert(resumed.tag === "ok" && resumed.val === "ok", `bad resumed result: $${JSON.stringify(resumed)}`);
            |
            |  console.log("OK");
            |} finally {
@@ -173,7 +216,7 @@ class LlvmWasmExportSuite extends AnyFunSuite {
     assume(hasJco, "jco not found on PATH (skipping LLVM-wasm export test)")
     assume(hasCargoStable, "cargo +stable not available (skipping LLVM-wasm Wasmtime export test)")
 
-    val compiled = compileArtifacts(ProgramSource)
+    val compiled = compileArtifacts()
     val hostDir = Files.createTempDirectory("flix-llvm-wasm-export-wasmtime-host-")
     try {
       val cargoToml =
@@ -245,45 +288,120 @@ class LlvmWasmExportSuite extends AnyFunSuite {
            |    let ctx_api = api.ctx();
            |    let ctx = ctx_api.call_constructor(&mut store)?;
            |
-           |    match ctx_api.call_test_add(&mut store, ctx, 1, 2)? {
+           |    match ctx_api.call_api_add(&mut store, ctx, 1, 2)? {
            |        api::ExecInt32::Ok(v) if v == 3 => {}
            |        other => bail!("bad add result: {:?}", other),
            |    }
            |
-           |    match ctx_api.call_test_echo(&mut store, ctx, "hello")? {
+           |    match ctx_api.call_api_echo(&mut store, ctx, "hello")? {
            |        api::ExecString::Ok(v) if v == "hello" => {}
            |        other => bail!("bad echo result: {:?}", other),
            |    }
            |
            |    let data = vec![0u8, 1, 2, 255];
-           |    match ctx_api.call_test_bytesid(&mut store, ctx, &data)? {
+           |    match ctx_api.call_api_bytesid(&mut store, ctx, &data)? {
            |        api::ExecBytes::Ok(v) if v == data => {}
            |        other => bail!("bad bytes result: {:?}", other),
            |    }
            |
-           |    let susp = match ctx_api.call_test_suspendecho(&mut store, ctx, "hello")? {
+           |    let some_in = api::OptionInt32 { is_some: true, val: 41 };
+           |    match ctx_api.call_api_maybesucc(&mut store, ctx, some_in)? {
+           |        api::ExecOptionInt32::Ok(v) if v.is_some && v.val == 42 => {}
+           |        other => bail!("bad maybeSucc(Some): {:?}", other),
+           |    }
+           |
+           |    let none_in = api::OptionInt32 { is_some: false, val: 0 };
+           |    match ctx_api.call_api_maybesucc(&mut store, ctx, none_in)? {
+           |        api::ExecOptionInt32::Ok(v) if !v.is_some => {}
+           |        other => bail!("bad maybeSucc(None): {:?}", other),
+           |    }
+           |
+           |    let pair_in = api::Tuple2Int32String { f0: 7, f1: "hello".to_string() };
+           |    match ctx_api.call_api_flippair(&mut store, ctx, &pair_in)? {
+           |        api::ExecTuple2StringInt32::Ok(v) if v.f0 == "hello" && v.f1 == 7 => {}
+           |        other => bail!("bad flipPair result: {:?}", other),
+           |    }
+           |
+           |    match ctx_api.call_api_halfeven(&mut store, ctx, 8)? {
+           |        api::ExecResultInt32String::Ok(v) if v.is_ok && v.ok == 4 => {}
+           |        other => bail!("bad halfEven(8): {:?}", other),
+           |    }
+           |
+           |    match ctx_api.call_api_halfeven(&mut store, ctx, 7)? {
+           |        api::ExecResultInt32String::Ok(v) if !v.is_ok && v.err == "odd" => {}
+           |        other => bail!("bad halfEven(7): {:?}", other),
+           |    }
+           |
+           |    let badge_in = api::RecordNameStringScoreInt32 {
+           |        name: "hello".to_string(),
+           |        score: 41,
+           |    };
+           |    match ctx_api.call_api_badge(&mut store, ctx, &badge_in)? {
+           |        api::ExecRecordLabelStringScoreInt32::Ok(v) if v.label == "hello" && v.score == 42 => {}
+           |        other => bail!("bad badge result: {:?}", other),
+           |    }
+           |
+           |    let ints = vec![1i32, 2, 3];
+           |    match ctx_api.call_api_prependanswer(&mut store, ctx, &ints)? {
+           |        api::ExecListInt32::Ok(v) if v == vec![42, 1, 2, 3] => {}
+           |        other => bail!("bad prependAnswer result: {:?}", other),
+           |    }
+           |
+           |    match ctx_api.call_api_echoints(&mut store, ctx, &ints)? {
+           |        api::ExecArrayInt32::Ok(v) if v == vec![1, 2, 3] => {}
+           |        other => bail!("bad echoInts result: {:?}", other),
+           |    }
+           |
+           |    let names = vec!["hello".to_string(), "world".to_string()];
+           |    match ctx_api.call_api_echonames(&mut store, ctx, &names)? {
+           |        api::ExecArrayString::Ok(v) if v == names => {}
+           |        other => bail!("bad echoNames result: {:?}", other),
+           |    }
+           |
+           |    let users = vec![
+           |        api::RecordNameStringScoreInt32 {
+           |            name: "hello".to_string(),
+           |            score: 41,
+           |        },
+           |        api::RecordNameStringScoreInt32 {
+           |            name: "world".to_string(),
+           |            score: 9,
+           |        },
+           |    ];
+           |    match ctx_api.call_api_promoteusers(&mut store, ctx, &users)? {
+           |        api::ExecListRecordLabelStringScoreInt32::Ok(v)
+           |            if v.len() == 2
+           |                && v[0].label == "hello"
+           |                && v[0].score == 42
+           |                && v[1].label == "world"
+           |                && v[1].score == 10 => {}
+           |        other => bail!("bad promoteUsers result: {:?}", other),
+           |    }
+           |
+           |    match ctx_api.call_api_echouserarray(&mut store, ctx, &users)? {
+           |        api::ExecArrayRecordNameStringScoreInt32::Ok(v)
+           |            if v.len() == 2
+           |                && v[0].name == "hello"
+           |                && v[0].score == 41
+           |                && v[1].name == "world"
+           |                && v[1].score == 9 => {}
+           |        other => bail!("bad echoUserArray result: {:?}", other),
+           |    }
+           |
+           |    let susp = match ctx_api.call_api_suspendecho(&mut store, ctx, "hello")? {
            |        api::ExecString::Suspended(s) => s,
            |        other => bail!("bad suspend result: {:?}", other),
            |    };
            |
-           |    let argc = ctx_api.call_suspension_arg_count(&mut store, ctx, susp)?;
-           |    if argc != 1 {
-           |        bail!("unexpected suspension arg count: {}", argc);
+           |    let req = ctx_api.call_request_api_suspendecho(&mut store, ctx, susp)?;
+           |    if req.arg0 != "hello" {
+           |        bail!("bad suspension arg: {}", req.arg0);
            |    }
            |
-           |    let arg0 = ctx_api.call_suspension_arg_as_ptr(&mut store, ctx, susp, 0)?;
-           |    let arg0_text = ctx_api.call_unbox_string(&mut store, ctx, arg0)?;
-           |    if arg0_text != "hello" {
-           |        bail!("bad suspension arg: {}", arg0_text);
-           |    }
-           |    arg0.resource_drop(&mut store)?;
-           |
-           |    let ok = ctx_api.call_box_string(&mut store, ctx, "ok")?;
-           |    match ctx_api.call_resume_test_suspendecho(&mut store, ctx, susp, ok)? {
+           |    match ctx_api.call_resume_api_suspendecho(&mut store, ctx, susp, "ok")? {
            |        api::ExecString::Ok(v) if v == "ok" => {}
            |        other => bail!("bad resume result: {:?}", other),
            |    }
-           |    ok.resource_drop(&mut store)?;
            |    ctx.resource_drop(&mut store)?;
            |
            |    println!("OK");
@@ -368,36 +486,28 @@ class LlvmWasmExportSuite extends AnyFunSuite {
       case c => c.toString
     } + "\""
 
-  private def compileArtifacts(program: String): CompiledArtifacts = {
-    val flixFile = Files.createTempFile("flix-llvm-wasm-export-", ".flix")
+  private def compileArtifacts(): CompiledArtifacts = {
     val outDir = Files.createTempDirectory("flix-llvm-wasm-export-out-")
+    val flix = new Flix()
+    flix.setOptions(TestOptions.copy(outputPath = outDir, artifactName = ArtifactName))
+    implicit val sctx: SecurityContext = SecurityContext.Unrestricted
+    flix.addFile(ExampleSourceFile)
 
-    Files.writeString(flixFile, program, StandardCharsets.UTF_8)
-
-    try {
-      val flix = new Flix()
-      flix.setOptions(TestOptions.copy(outputPath = outDir, artifactName = "ffi-smoke"))
-      implicit val sctx: SecurityContext = SecurityContext.Unrestricted
-      flix.addFile(flixFile)
-
-      val (optRoot, errors) = flix.check()
-      if (errors.nonEmpty) {
-        fail(CompilationMessage.formatAll(errors)(flix.getFormatter, optRoot))
-      }
-
-      flix.codeGen(optRoot.get)
-
-      CompiledArtifacts(
-        outDir = outDir,
-        componentJs = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmDriver.componentJsPath(outDir, "ffi-smoke"),
-        bindingsJs = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmBindingWriter.bindingsJsPath(outDir, "ffi-smoke"),
-        bindingsTypes = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmBindingWriter.bindingsTypesPath(outDir, "ffi-smoke"),
-        typedExportComponent = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmTypedExportsWriter.typedComponentPath(outDir, "ffi-smoke"),
-        typedWitDir = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmTypedExportsWriter.typedWitDirPath(outDir, "ffi-smoke")
-      )
-    } finally {
-      Files.deleteIfExists(flixFile)
+    val (optRoot, errors) = flix.check()
+    if (errors.nonEmpty) {
+      fail(CompilationMessage.formatAll(errors)(flix.getFormatter, optRoot))
     }
+
+    flix.codeGen(optRoot.get)
+
+    CompiledArtifacts(
+      outDir = outDir,
+      sdkManifest = ca.uwaterloo.flix.language.phase.llvm.LlvmExportSdkWriter.wasmManifestPath(outDir),
+      bindingsJs = ca.uwaterloo.flix.language.phase.llvm.LlvmExportSdkWriter.wasmBindingsJsPath(outDir, ArtifactName),
+      bindingsTypes = ca.uwaterloo.flix.language.phase.llvm.LlvmExportSdkWriter.wasmBindingsTypesPath(outDir, ArtifactName),
+      typedExportComponent = ca.uwaterloo.flix.language.phase.llvm.LlvmExportSdkWriter.wasmComponentPath(outDir, ArtifactName),
+      typedWitDir = ca.uwaterloo.flix.language.phase.llvm.LlvmExportSdkWriter.wasmWitDir(outDir)
+    )
   }
 
 }

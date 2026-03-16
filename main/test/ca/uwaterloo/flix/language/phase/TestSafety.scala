@@ -707,30 +707,22 @@ class TestSafety extends AnyFunSuite with TestUtils {
     expectError[EntryPointError.IllegalEntryPointEffect](result)
   }
 
-  test("IllegalExportFunction.05") {
+  test("PortableExportFunction.03") {
     val input =
       """
-        |enum Option[t] {
-        |  case Some(t)
-        |  case None
-        |}
         |mod Mod { @Export pub def id(x: Int32): Option[Int32] = Some(x) }
         |""".stripMargin
-    val result = check(input, Options.TestWithLibNix)
-    expectError[EntryPointError.IllegalExportType](result)
+    val result = check(input, LlvmPortableOptions)
+    expectSuccess(result)
   }
 
-  test("IllegalExportFunction.06") {
+  test("PortableExportFunction.04") {
     val input =
       """
-        |enum Option[t] {
-        |  case Some(t)
-        |  case None
-        |}
         |mod Mod { @Export pub def id(x: Int32, _y: Option[Int32]): Int32 = x }
         |""".stripMargin
-    val result = check(input, Options.TestWithLibNix)
-    expectError[EntryPointError.IllegalExportType](result)
+    val result = check(input, LlvmPortableOptions)
+    expectSuccess(result)
   }
 
   test("IllegalExportFunction.07") {
@@ -784,10 +776,105 @@ class TestSafety extends AnyFunSuite with TestUtils {
     expectSuccess(result)
   }
 
-  test("IllegalPortableExportFunction.10") {
+  test("PortableExportFunction.05") {
+    val input =
+      """
+        |mod Mod { @Export pub def flip(pair: (Int32, String)): (String, Int32) = let (n, s) = pair; (s, n) }
+        |""".stripMargin
+    val result = check(input, LlvmPortableOptions)
+    expectSuccess(result)
+  }
+
+  test("PortableExportFunction.06") {
+    val input =
+      """
+        |mod Mod { @Export pub def halfEven(x: Int32): Result[String, Int32] = if (Int32.remainder(x, 2) == 0) Ok(x / 2) else Err("odd") }
+        |""".stripMargin
+    val result = check(input, LlvmPortableOptions)
+    expectSuccess(result)
+  }
+
+  test("PortableExportFunction.07") {
+    val input =
+      """
+        |mod Mod {
+        |    @Export
+        |    pub def badge(r: {name = String, score = Int32}): {label = String, score = Int32} =
+        |        { label = r#name, score = r#score + 1 }
+        |}
+        |""".stripMargin
+    val result = check(input, LlvmPortableOptions)
+    expectSuccess(result)
+  }
+
+  test("PortableExportFunction.08") {
+    val input =
+      """
+        |mod Mod { @Export pub def prepend(xs: List[Int32]): List[Int32] = 42 :: xs }
+        |""".stripMargin
+    val result = check(input, LlvmPortableOptions)
+    expectSuccess(result)
+  }
+
+  test("PortableExportFunction.09") {
+    val input =
+      """
+        |mod Mod {
+        |    @Export
+        |    pub def echo(xs: Array[Int32, Static]): Array[Int32, Static] = xs
+        |}
+        |""".stripMargin
+    val result = check(input, LlvmPortableOptions)
+    expectSuccess(result)
+  }
+
+  test("PortableExportFunction.10") {
+    val input =
+      """
+        |mod Mod { @Export pub def echo(xs: Array[String, Static]): Array[String, Static] = xs }
+        |""".stripMargin
+    val result = check(input, LlvmPortableOptions)
+    expectSuccess(result)
+  }
+
+  test("PortableExportFunction.11") {
+    val input =
+      """
+        |mod Mod {
+        |    @Export
+        |    pub def promote(xs: List[{name = String, score = Int32}]): List[{label = String, score = Int32}] =
+        |        List.map(u -> { label = u#name, score = u#score + 1 }, xs)
+        |}
+        |""".stripMargin
+    val result = check(input, LlvmPortableOptions)
+    expectSuccess(result)
+  }
+
+  test("PortableExportFunction.12") {
+    val input =
+      """
+        |mod Mod {
+        |    @Export
+        |    pub def echo(xs: Array[{name = String, score = Int32}, Static]): Array[{name = String, score = Int32}, Static] = xs
+        |}
+        |""".stripMargin
+    val result = check(input, LlvmPortableOptions)
+    expectSuccess(result)
+  }
+
+  test("IllegalPortableExportFunction.13") {
     val input =
       """
         |mod Mod { @Export pub def id(x: Char): Char = x }
+        |""".stripMargin
+    val result = check(input, LlvmPortableOptions)
+    expectError[EntryPointError.IllegalExportType](result)
+  }
+
+  test("IllegalPortableExportFunction.14") {
+    val input =
+      """
+        |mod Mod { @Export pub def id(x: {ch = Char}): {ch = Char} = x }
         |""".stripMargin
     val result = check(input, LlvmPortableOptions)
     expectError[EntryPointError.IllegalExportType](result)

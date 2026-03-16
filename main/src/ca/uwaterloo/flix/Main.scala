@@ -1071,7 +1071,7 @@ object Main {
         lines += ""
         lines += s"Target ${formatTarget(target)}"
         lines += s"  stdlib: ${formatStdlibProfile(targetOptions.stdlibProfile)}"
-        lines += s"  default emits: ${buildEmits.map(formatEmit).mkString(", ")}"
+        lines += s"  default emits: ${formatDefaultEmits(target, buildEmits)}"
 
         val buildTools = doctorToolStatuses(Command.Build, targetOptions, runner = None)
         if (buildTools.nonEmpty) {
@@ -1288,9 +1288,16 @@ object Main {
 
   private def defaultEmits(target: CompilationTarget): List[EmitKind] = target match {
     case CompilationTarget.Jvm => List(EmitKind.Classes)
-    case CompilationTarget.LlvmNative => List(EmitKind.Exe)
+    case CompilationTarget.LlvmNative => Nil
     case CompilationTarget.LlvmWasm => List(EmitKind.Component, EmitKind.Js)
   }
+
+  private def formatDefaultEmits(target: CompilationTarget, emits: List[EmitKind]): String =
+    if (emits.nonEmpty) emits.map(formatEmit).mkString(", ")
+    else target match {
+      case CompilationTarget.LlvmNative => "auto (exe if main, staticlib/sharedlib if exports)"
+      case _ => "<none>"
+    }
 
   private def resolveBuildEmits(target: CompilationTarget, cmdOpts: CmdOpts, bootstrap: Bootstrap): List[EmitKind] =
     if (cmdOpts.emits.nonEmpty) cmdOpts.emits.distinct
@@ -1502,6 +1509,8 @@ object Main {
       case CompilationTarget.Jvm => None
       case CompilationTarget.LlvmNative =>
         val paths = List(
+          ca.uwaterloo.flix.language.phase.llvm.LlvmExportSdkWriter.nativeSdkDir(options.outputPath),
+          ca.uwaterloo.flix.language.phase.llvm.LlvmExportSdkWriter.nativeManifestPath(options.outputPath),
           llvmDir.resolve("module.ll"),
           ca.uwaterloo.flix.language.phase.llvm.LlvmNativeDriver.executablePath(options.outputPath, options.artifactName),
           ca.uwaterloo.flix.language.phase.llvm.LlvmNativeDriver.staticLibraryPath(options.outputPath, options.artifactName),
@@ -1513,6 +1522,8 @@ object Main {
 
       case CompilationTarget.LlvmWasm =>
         val paths = List(
+          ca.uwaterloo.flix.language.phase.llvm.LlvmExportSdkWriter.wasmSdkDir(options.outputPath),
+          ca.uwaterloo.flix.language.phase.llvm.LlvmExportSdkWriter.wasmManifestPath(options.outputPath),
           llvmDir.resolve("module.ll"),
           ca.uwaterloo.flix.language.phase.llvm.LlvmWasmExportWriter.manifestPath(options.outputPath, options.artifactName),
           ca.uwaterloo.flix.language.phase.llvm.LlvmWasmDriver.coreWasmPath(options.outputPath, options.artifactName),

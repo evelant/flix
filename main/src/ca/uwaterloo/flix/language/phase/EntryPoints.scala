@@ -473,7 +473,7 @@ object EntryPoints {
       case CompilationTarget.Jvm =>
         isExportableJavaType(tpe)
       case CompilationTarget.LlvmNative | CompilationTarget.LlvmWasm =>
-        ExportAbi.portableV0FromType(tpe) match {
+        ExportAbi.portableFromType(tpe) match {
           case Result.Ok(Some(_)) => Result.Ok(true)
           case Result.Ok(None) => Result.Ok(false)
           case Result.Err(_) => Result.Err(ErrorOrMalformed)

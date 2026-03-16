@@ -6475,6 +6475,20 @@ export fn flix_suspension_arg_as_i64(ctx_ptr: *anyopaque, susp_handle: i64, idx0
     return flix_handle_new_i64(ctx_ptr, bits);
 }
 
+export fn flix_suspension_arg_payload(ctx_ptr: *anyopaque, susp_handle: i64, idx0: i64) i64 {
+    if (idx0 < 0) @panic("suspension arg index must be non-negative");
+    const idx: usize = @intCast(idx0);
+
+    const susp_ptr = flix_handle_get(ctx_ptr, susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    const arg_count_i64: i64 = slots[4];
+    if (arg_count_i64 < 0) @panic("invalid suspension argCount");
+    const arg_count: usize = @intCast(arg_count_i64);
+    if (idx >= arg_count) @panic("suspension arg index out of bounds");
+
+    return slots[5 + idx];
+}
+
 export fn flix_suspension_arg_as_ptr(ctx_ptr: *anyopaque, susp_handle: i64, idx0: i64) i64 {
     if (idx0 < 0) @panic("suspension arg index must be non-negative");
     const idx: usize = @intCast(idx0);
@@ -8222,6 +8236,171 @@ fn makeOwnRuntimeValue(ctx_rep: *exports_flix_runtime_runtime_ctx_t, handle: i64
     return exports_flix_runtime_runtime_value_new(rep);
 }
 
+fn flixHandleEntry(ctx_ptr: *anyopaque, handle: i64) FlixHandleEntry {
+    if (handle == 0) @panic("null flix handle");
+    const ctx: *FlixCtx = requireCtx(ctx_ptr);
+    ctx.handles_mutex.lock();
+    defer ctx.handles_mutex.unlock();
+    return ctx.handles.get(handle) orelse @panic("invalid flix handle");
+}
+
+fn objectSlotIsPtr(obj_ptr: *anyopaque, slot_idx: usize) bool {
+    const obj: *FlixObj = @ptrCast(@alignCast(obj_ptr));
+    const ti = obj.typeinfo;
+    const ptr_offs = ti.ptr_offs orelse return false;
+    const count: usize = @intCast(ti.ptr_count);
+    const off: u32 = @intCast(@sizeOf(FlixObj) + slot_idx * @sizeOf(i64));
+    return std.mem.indexOfScalar(u32, ptr_offs[0..count], off) != null;
+}
+
+fn makeHandleForObjectSlot(ctx_ptr: *anyopaque, obj_ptr: *anyopaque, slot_idx: usize) i64 {
+    const payload = objPayloadSlots(obj_ptr)[slot_idx];
+    return if (objectSlotIsPtr(obj_ptr, slot_idx))
+        flix_handle_new(ctx_ptr, nullablePtrFromPayload(payload))
+    else
+        flix_handle_new_i64(ctx_ptr, payload);
+}
+
+fn arrayElementsArePtrs(arr_ptr: *anyopaque) bool {
+    if (flixArrayElemSize(arr_ptr) != @sizeOf(i64)) @panic("expected slot array");
+    const obj: *FlixObj = @ptrCast(@alignCast(arr_ptr));
+    return obj.typeinfo == &flix_ti_array_ptr;
+}
+
+fn makeHandleForArrayElement(ctx_ptr: *anyopaque, arr_ptr: *anyopaque, idx: usize) i64 {
+    const len: usize = flixArrayLen(arr_ptr);
+    if (idx >= len) @panic("array element index out of bounds");
+
+    const payload = flixArraySlots(arr_ptr)[idx];
+    return if (arrayElementsArePtrs(arr_ptr))
+        flix_handle_new(ctx_ptr, nullablePtrFromPayload(payload))
+    else
+        flix_handle_new_i64(ctx_ptr, payload);
+}
+
+fn exportListLengthPtr(list_ptr: *anyopaque, nil_tag_id: i64, cons_tag_id: i64) i64 {
+    var current = list_ptr;
+    var len: i64 = 0;
+    while (true) {
+        const slots = objPayloadSlots(current);
+        const tag_id = slots[0];
+        if (tag_id == nil_tag_id) return len;
+        if (tag_id != cons_tag_id) @panic("expected portable List value");
+        const tail_payload = slots[2];
+        current = ptrFromPayload(tail_payload);
+        len += 1;
+    }
+}
+
+fn exportTupleHandleNew(ctx_ptr: *anyopaque, handles_ptr: ?[*]const i64, arity0: i32) i64 {
+    const arity: usize = if (arity0 < 0) @panic("negative tuple arity") else @intCast(arity0);
+    const handles = if (arity == 0) &[_]i64{} else handles_ptr.?[0..arity];
+    var payloads = rt_alloc.alloc(i64, arity) catch @panic("oom");
+    defer rt_alloc.free(payloads);
+
+    var ptr_mask: u64 = 0;
+    var i: usize = 0;
+    while (i < arity) : (i += 1) {
+        const entry = flixHandleEntry(ctx_ptr, handles[i]);
+        payloads[i] = entry.payload;
+        if (entry.kind == .Ptr) ptr_mask |= (@as(u64, 1) << @intCast(i));
+    }
+
+    const obj_ptr = allocFlixTupleFromPayloads(payloads, ptr_mask);
+    return flix_handle_new(ctx_ptr, obj_ptr);
+}
+
+fn exportTagHandleNew(ctx_ptr: *anyopaque, tag_id: i64, handles_ptr: ?[*]const i64, arity0: i32) i64 {
+    const arity: usize = if (arity0 < 0) @panic("negative tag arity") else @intCast(arity0);
+    const handles = if (arity == 0) &[_]i64{} else handles_ptr.?[0..arity];
+    var payloads = rt_alloc.alloc(i64, arity + 1) catch @panic("oom");
+    defer rt_alloc.free(payloads);
+
+    payloads[0] = tag_id;
+    var ptr_mask: u64 = 0;
+    var i: usize = 0;
+    while (i < arity) : (i += 1) {
+        const entry = flixHandleEntry(ctx_ptr, handles[i]);
+        payloads[i + 1] = entry.payload;
+        if (entry.kind == .Ptr) ptr_mask |= (@as(u64, 1) << @intCast(i + 1));
+    }
+
+    const obj_ptr = allocFlixTupleFromPayloads(payloads, ptr_mask);
+    return flix_handle_new(ctx_ptr, obj_ptr);
+}
+
+export fn flix_export_tuple_new(ctx_ptr: *anyopaque, handles_ptr: ?[*]const i64, arity: i32) i64 {
+    return exportTupleHandleNew(ctx_ptr, handles_ptr, arity);
+}
+
+export fn flix_export_tuple_field(ctx_ptr: *anyopaque, tuple_handle: i64, idx0: i32) i64 {
+    if (idx0 < 0) @panic("negative tuple field index");
+    const tuple_ptr = flix_handle_get(ctx_ptr, tuple_handle);
+    return makeHandleForObjectSlot(ctx_ptr, tuple_ptr, @intCast(idx0));
+}
+
+export fn flix_export_tag_new(ctx_ptr: *anyopaque, tag_id: i64, handles_ptr: ?[*]const i64, arity: i32) i64 {
+    return exportTagHandleNew(ctx_ptr, tag_id, handles_ptr, arity);
+}
+
+export fn flix_export_tag_id(ctx_ptr: *anyopaque, tagged_handle: i64) i64 {
+    const tagged_ptr = flix_handle_get(ctx_ptr, tagged_handle);
+    return objPayloadSlots(tagged_ptr)[0];
+}
+
+export fn flix_export_tag_field(ctx_ptr: *anyopaque, tagged_handle: i64, idx0: i32) i64 {
+    if (idx0 < 0) @panic("negative tag field index");
+    const tagged_ptr = flix_handle_get(ctx_ptr, tagged_handle);
+    return makeHandleForObjectSlot(ctx_ptr, tagged_ptr, @as(usize, @intCast(idx0)) + 1);
+}
+
+export fn flix_export_list_length(ctx_ptr: *anyopaque, list_handle: i64, nil_tag_id: i64, cons_tag_id: i64) i64 {
+    const list_ptr = flix_handle_get(ctx_ptr, list_handle);
+    return exportListLengthPtr(list_ptr, nil_tag_id, cons_tag_id);
+}
+
+export fn flix_export_array_new(ctx_ptr: *anyopaque, ptr_elems0: i32, handles_ptr: ?[*]const i64, len0: i32) i64 {
+    const len: usize = if (len0 < 0) @panic("negative array len") else @intCast(len0);
+    const handles = if (len == 0) &[_]i64{} else handles_ptr.?[0..len];
+    const ptr_elems = ptr_elems0 != 0;
+
+    const arr_ptr = if (ptr_elems) blk: {
+        var ptrs = rt_alloc.alloc(*anyopaque, len) catch @panic("oom");
+        defer rt_alloc.free(ptrs);
+
+        for (handles, 0..) |h, i| {
+            const entry = flixHandleEntry(ctx_ptr, h);
+            if (entry.kind != .Ptr) @panic("expected pointer-like handle for exported array");
+            ptrs[i] = ptrFromPayload(entry.payload);
+        }
+
+        break :blk allocFlixArrayFromPtrPayloads(ptrs);
+    } else blk: {
+        var payloads = rt_alloc.alloc(i64, len) catch @panic("oom");
+        defer rt_alloc.free(payloads);
+
+        for (handles, 0..) |h, i| {
+            const entry = flixHandleEntry(ctx_ptr, h);
+            payloads[i] = entry.payload;
+        }
+
+        break :blk allocFlixArrayFromPayloads(payloads);
+    };
+
+    return flix_handle_new(ctx_ptr, arr_ptr);
+}
+
+export fn flix_export_array_length(ctx_ptr: *anyopaque, array_handle: i64) i64 {
+    const arr_ptr = flix_handle_get(ctx_ptr, array_handle);
+    return @intCast(flixArrayLen(arr_ptr));
+}
+
+export fn flix_export_array_element(ctx_ptr: *anyopaque, array_handle: i64, idx0: i32) i64 {
+    if (idx0 < 0) @panic("negative array element index");
+    const arr_ptr = flix_handle_get(ctx_ptr, array_handle);
+    return makeHandleForArrayElement(ctx_ptr, arr_ptr, @intCast(idx0));
+}
+
 fn suspensionArgCountRaw(s: exports_flix_runtime_runtime_borrow_suspension_t) usize {
     const susp_ptr = flix_handle_get(s.flix_ctx, s.susp_handle);
     const slots: [*]i64 = objPayloadSlots(susp_ptr);
@@ -8469,6 +8648,99 @@ export fn exports_flix_runtime_runtime_unbox_bytes(ctx: exports_flix_runtime_run
     const bits = flix_handle_payload(v.flix_ctx, v.handle);
     const arr_ptr = ptrFromPayload(bits);
     ret.* = witBytesToOwned(flixInt8ArrayBytesView(arr_ptr));
+}
+
+export fn exports_flix_runtime_runtime_tuple_new(ctx: exports_flix_runtime_runtime_borrow_ctx_t, fields: *exports_flix_runtime_runtime_list_borrow_value_t) exports_flix_runtime_runtime_own_value_t {
+    if (!is_wasm) @panic("tuple-new: wasm-only");
+    witSetCurrentCtx(ctx);
+
+    const slice = if (fields.len == 0) &[_]exports_flix_runtime_runtime_borrow_value_t{} else fields.ptr[0..fields.len];
+    var handles = rt_alloc.alloc(i64, slice.len) catch @panic("oom");
+    defer rt_alloc.free(handles);
+
+    for (slice, 0..) |v, i| {
+        handles[i] = v.handle;
+    }
+
+    const h = exportTupleHandleNew(ctx.flix_ctx, if (handles.len == 0) null else handles.ptr, @intCast(handles.len));
+    return makeOwnRuntimeValue(ctx, h);
+}
+
+export fn exports_flix_runtime_runtime_tuple_field(ctx: exports_flix_runtime_runtime_borrow_ctx_t, tup: exports_flix_runtime_runtime_borrow_value_t, idx: u32) exports_flix_runtime_runtime_own_value_t {
+    if (!is_wasm) @panic("tuple-field: wasm-only");
+    witSetCurrentCtx(ctx);
+
+    const h = flix_export_tuple_field(ctx.flix_ctx, tup.handle, @intCast(idx));
+    return makeOwnRuntimeValue(ctx, h);
+}
+
+export fn exports_flix_runtime_runtime_tag_new(ctx: exports_flix_runtime_runtime_borrow_ctx_t, tag_id: exports_flix_runtime_runtime_sym_t, fields: *exports_flix_runtime_runtime_list_borrow_value_t) exports_flix_runtime_runtime_own_value_t {
+    if (!is_wasm) @panic("tag-new: wasm-only");
+    witSetCurrentCtx(ctx);
+
+    const slice = if (fields.len == 0) &[_]exports_flix_runtime_runtime_borrow_value_t{} else fields.ptr[0..fields.len];
+    var handles = rt_alloc.alloc(i64, slice.len) catch @panic("oom");
+    defer rt_alloc.free(handles);
+
+    for (slice, 0..) |v, i| {
+        handles[i] = v.handle;
+    }
+
+    const h = exportTagHandleNew(ctx.flix_ctx, @intCast(tag_id), if (handles.len == 0) null else handles.ptr, @intCast(handles.len));
+    return makeOwnRuntimeValue(ctx, h);
+}
+
+export fn exports_flix_runtime_runtime_tag_id(ctx: exports_flix_runtime_runtime_borrow_ctx_t, tagged: exports_flix_runtime_runtime_borrow_value_t) exports_flix_runtime_runtime_sym_t {
+    if (!is_wasm) @panic("tag-id: wasm-only");
+    witSetCurrentCtx(ctx);
+
+    return @intCast(flix_export_tag_id(ctx.flix_ctx, tagged.handle));
+}
+
+export fn exports_flix_runtime_runtime_tag_field(ctx: exports_flix_runtime_runtime_borrow_ctx_t, tagged: exports_flix_runtime_runtime_borrow_value_t, idx: u32) exports_flix_runtime_runtime_own_value_t {
+    if (!is_wasm) @panic("tag-field: wasm-only");
+    witSetCurrentCtx(ctx);
+
+    const h = flix_export_tag_field(ctx.flix_ctx, tagged.handle, @intCast(idx));
+    return makeOwnRuntimeValue(ctx, h);
+}
+
+export fn exports_flix_runtime_runtime_list_len(ctx: exports_flix_runtime_runtime_borrow_ctx_t, list: exports_flix_runtime_runtime_borrow_value_t, nil_tag_id: exports_flix_runtime_runtime_sym_t, cons_tag_id: exports_flix_runtime_runtime_sym_t) u32 {
+    if (!is_wasm) @panic("list-len: wasm-only");
+    witSetCurrentCtx(ctx);
+
+    return @intCast(flix_export_list_length(ctx.flix_ctx, list.handle, @intCast(nil_tag_id), @intCast(cons_tag_id)));
+}
+
+export fn exports_flix_runtime_runtime_array_new(ctx: exports_flix_runtime_runtime_borrow_ctx_t, ptr_elems: bool, elems: *exports_flix_runtime_runtime_list_borrow_value_t) exports_flix_runtime_runtime_own_value_t {
+    if (!is_wasm) @panic("array-new: wasm-only");
+    witSetCurrentCtx(ctx);
+
+    const slice = if (elems.len == 0) &[_]exports_flix_runtime_runtime_borrow_value_t{} else elems.ptr[0..elems.len];
+    var handles = rt_alloc.alloc(i64, slice.len) catch @panic("oom");
+    defer rt_alloc.free(handles);
+
+    for (slice, 0..) |v, i| {
+        handles[i] = v.handle;
+    }
+
+    const h = flix_export_array_new(ctx.flix_ctx, if (ptr_elems) 1 else 0, if (handles.len == 0) null else handles.ptr, @intCast(handles.len));
+    return makeOwnRuntimeValue(ctx, h);
+}
+
+export fn exports_flix_runtime_runtime_array_len(ctx: exports_flix_runtime_runtime_borrow_ctx_t, array: exports_flix_runtime_runtime_borrow_value_t) u32 {
+    if (!is_wasm) @panic("array-len: wasm-only");
+    witSetCurrentCtx(ctx);
+
+    return @intCast(flix_export_array_length(ctx.flix_ctx, array.handle));
+}
+
+export fn exports_flix_runtime_runtime_array_elem(ctx: exports_flix_runtime_runtime_borrow_ctx_t, array: exports_flix_runtime_runtime_borrow_value_t, idx: u32) exports_flix_runtime_runtime_own_value_t {
+    if (!is_wasm) @panic("array-elem: wasm-only");
+    witSetCurrentCtx(ctx);
+
+    const h = flix_export_array_element(ctx.flix_ctx, array.handle, @intCast(idx));
+    return makeOwnRuntimeValue(ctx, h);
 }
 
 export fn exports_flix_runtime_runtime_start_task(ctx: exports_flix_runtime_runtime_borrow_ctx_t, def_id: exports_flix_runtime_runtime_def_id_t, args: *exports_flix_runtime_runtime_list_borrow_value_t) exports_flix_runtime_runtime_task_id_t {

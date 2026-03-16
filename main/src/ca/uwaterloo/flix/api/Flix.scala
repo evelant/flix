@@ -21,7 +21,7 @@ import ca.uwaterloo.flix.language.ast.shared.{AvailableClasses, Input, SecurityC
 import ca.uwaterloo.flix.language.dbg.AstPrinter
 import ca.uwaterloo.flix.language.fmt.FormatOptions
 import ca.uwaterloo.flix.language.phase.*
-import ca.uwaterloo.flix.language.phase.llvm.{LlvmBackend, LlvmExportWriter, LlvmNativeDriver, LlvmWasmBindingWriter, LlvmWasmDriver, LlvmWasmExportWriter, LlvmWasmTypedExportsWriter, LlvmWriter}
+import ca.uwaterloo.flix.language.phase.llvm.{LlvmBackend, LlvmExportSdkWriter, LlvmExportWriter, LlvmNativeDriver, LlvmWasmBindingWriter, LlvmWasmDriver, LlvmWasmExportWriter, LlvmWasmTypedExportsWriter, LlvmWriter}
 import ca.uwaterloo.flix.language.phase.jvm.{JvmBackend, JvmLoader, JvmLowerer, JvmWriter}
 import ca.uwaterloo.flix.language.phase.monomorph.Specialization
 import ca.uwaterloo.flix.language.phase.optimizer.{LambdaDrop, Optimizer}
@@ -653,8 +653,8 @@ class Flix {
         val result = flix.options.target match {
           case CompilationTarget.LlvmNative =>
             val emitExe = if (requestedEmits.isEmpty) hasMain else requestedEmits.contains(EmitKind.Exe)
-            val emitStaticLib = if (requestedEmits.isEmpty) !hasMain && hasExports else requestedEmits.contains(EmitKind.StaticLib)
-            val emitSharedLib = if (requestedEmits.isEmpty) !hasMain && hasExports else requestedEmits.contains(EmitKind.SharedLib)
+            val emitStaticLib = if (requestedEmits.isEmpty) hasExports else requestedEmits.contains(EmitKind.StaticLib)
+            val emitSharedLib = if (requestedEmits.isEmpty) hasExports else requestedEmits.contains(EmitKind.SharedLib)
 
             if ((emitStaticLib || emitSharedLib) && !hasExports) {
               throw new RuntimeException("Requested native library emit, but the program has no @Export definitions.")
@@ -664,9 +664,9 @@ class Flix {
               throw new RuntimeException("Requested native executable emit, but the program has no main entry point.")
             }
 
-            if (hasExports && (emitExe || emitStaticLib || emitSharedLib)) {
-              LlvmExportWriter.run(loweredAst)
-            }
+            val exportHeader =
+              if (hasExports && (emitExe || emitStaticLib || emitSharedLib)) LlvmExportWriter.run(loweredAst)
+              else None
 
             val main =
               if (emitExe) {
@@ -682,12 +682,23 @@ class Flix {
                 })
               } else None
 
-            if (emitStaticLib) {
-              LlvmNativeDriver.buildStaticLibrary(LlvmWriter.modulePath(flix.options.outputPath))
-            }
+            val staticLibrary =
+              if (emitStaticLib) Some(LlvmNativeDriver.buildStaticLibrary(LlvmWriter.modulePath(flix.options.outputPath)).staticLibrary)
+              else None
 
-            if (emitSharedLib) {
-              LlvmNativeDriver.buildSharedLibrary(LlvmWriter.modulePath(flix.options.outputPath))
+            val sharedLibrary =
+              if (emitSharedLib) Some(LlvmNativeDriver.buildSharedLibrary(LlvmWriter.modulePath(flix.options.outputPath)).sharedLibrary)
+              else None
+
+            if (hasExports && (staticLibrary.nonEmpty || sharedLibrary.nonEmpty)) {
+              LlvmExportSdkWriter.packageNative(
+                entries = LlvmExportSdkWriter.exportEntries(loweredAst),
+                header = exportHeader.getOrElse(throw new RuntimeException("Missing native export header for export SDK packaging.")),
+                staticLibrary = staticLibrary,
+                sharedLibrary = sharedLibrary,
+                artifactName = flix.options.artifactName,
+                outputPath = flix.options.outputPath
+              )
             }
 
             new CompilationResult(main, Map.empty, typedAst.sources, totalTime, totalSize)
@@ -699,6 +710,17 @@ class Flix {
             val artifacts = LlvmWasmDriver.run(LlvmWriter.modulePath(flix.options.outputPath), typedExports = typedExports, emitJs = emitJs)
             if (emitJs && hasExports) {
               LlvmWasmBindingWriter.run(loweredAst)
+            }
+            if (hasExports) {
+              LlvmExportSdkWriter.packageWasm(
+                entries = LlvmExportSdkWriter.exportEntries(loweredAst),
+                typedEntries = typedExports,
+                typedComponent = artifacts.typedExportComponent.getOrElse(throw new RuntimeException("Missing typed wasm export component for export SDK packaging.")),
+                typedWitDir = artifacts.typedExportWitDir.getOrElse(throw new RuntimeException("Missing typed wasm export WIT directory for export SDK packaging.")),
+                artifactName = flix.options.artifactName,
+                outputPath = flix.options.outputPath,
+                emitJs = emitJs
+              )
             }
             val main =
               if (hasMain) {

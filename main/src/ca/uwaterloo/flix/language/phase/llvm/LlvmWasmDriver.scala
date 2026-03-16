@@ -132,7 +132,7 @@ object LlvmWasmDriver {
     componentize(embeddedCore, componentWasm, wasmDir)
 
     if (emitJs) {
-      transpileToJs(componentWasm, wasmDir)
+      transpileComponentToJs(componentWasm, jsOutDirPath(flix.options.outputPath))
     }
     val jsOutDir = jsOutDirPath(flix.options.outputPath)
     val componentJs = componentJsPath(flix.options.outputPath, flix.options.artifactName)
@@ -141,7 +141,7 @@ object LlvmWasmDriver {
     val typedExportsArtifacts = buildTypedExportComponent(componentWasm, wasmDir, outDir, witBindingsDir, flix.options.outputPath, flix.options.artifactName, typedExports, optFlag)
     if (emitJs) {
       typedExportsArtifacts.foreach { case (typedComponent, _) =>
-        transpileToJs(typedComponent, wasmDir)
+        transpileComponentToJs(typedComponent, jsOutDirPath(flix.options.outputPath))
       }
     }
 
@@ -399,8 +399,7 @@ object LlvmWasmDriver {
     }
   }
 
-  private def transpileToJs(component: Path, wasmDir: Path): Path = {
-    val jsDir = wasmDir.resolve("js")
+  private[llvm] def transpileComponentToJs(component: Path, jsDir: Path): Path = {
     Files.createDirectories(jsDir)
 
     // Ensure a default sys implementation is available for the transpiled output.
@@ -417,7 +416,8 @@ object LlvmWasmDriver {
       "flix:sys/sys=./sys.js"
     )
 
-    val (exit, output) = exec(cmd, wasmDir)
+    val cwd = Option(component.getParent).getOrElse(jsDir)
+    val (exit, output) = exec(cmd, cwd)
     if (exit != 0) {
       throw InternalCompilerException(
         s"jco transpile failed (exit $exit):\n${cmd.mkString(" ")}\n\n$output",

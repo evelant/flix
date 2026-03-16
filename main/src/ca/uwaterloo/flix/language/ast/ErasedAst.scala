@@ -44,7 +44,14 @@ object ErasedAst {
 
   case class Effect(ann: Annotations, mod: Modifiers, sym: Symbol.EffSym, ops: List[Op], loc: SourceLocation)
 
-  case class Op(sym: Symbol.OpSym, ann: Annotations, mod: Modifiers, fparams: List[FormalParam], tpe: SimpleType, purity: Purity, loc: SourceLocation)
+  case class Op(sym: Symbol.OpSym,
+                ann: Annotations,
+                mod: Modifiers,
+                fparams: List[FormalParam],
+                tpe: SimpleType,
+                purity: Purity,
+                portableSignature: Option[ExportAbi.Signature],
+                loc: SourceLocation)
 
   sealed trait Expr {
     def tpe: SimpleType

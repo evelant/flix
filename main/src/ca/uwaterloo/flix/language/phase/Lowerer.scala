@@ -82,7 +82,7 @@ object Lowerer {
 
   private def visitOp(op: ErasedAst.Op): LoweredAst.Op = {
     val fparams = op.fparams.map(visitFormalParam)
-    LoweredAst.Op(op.sym, op.ann, op.mod, fparams, op.tpe, op.purity, op.loc)
+    LoweredAst.Op(op.sym, op.ann, op.mod, fparams, op.tpe, op.purity, op.portableSignature, op.loc)
   }
 
   private def visitExpr(exp0: ErasedAst.Expr, target: CompilationTarget)(implicit lctx: LocalContext, root: ErasedAst.Root): LoweredAst.Expr = exp0 match {

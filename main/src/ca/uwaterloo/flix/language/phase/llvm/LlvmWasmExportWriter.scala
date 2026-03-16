@@ -113,7 +113,7 @@ object LlvmWasmExportWriter {
   }
 
   private def fallbackTypeNameOf(tpe: ca.uwaterloo.flix.language.ast.SimpleType): String =
-    ExportAbi.portableV0FromSimpleType(tpe).map(_.displayName).getOrElse(tpe.toString)
+    ExportAbi.portableFromSimpleType(tpe).map(_.displayName).getOrElse(tpe.toString)
 
   private def writeFile(path: Path, bytes: Array[Byte]): Unit = {
     Files.createDirectories(path.getParent)

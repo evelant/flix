@@ -19,7 +19,7 @@ package ca.uwaterloo.flix.language.phase.llvm
 import ca.uwaterloo.flix.language.ast.LoweredAst
 import ca.uwaterloo.flix.language.phase.ExportAbi
 import ca.uwaterloo.flix.language.phase.ExportAbi.AbiType
-import ca.uwaterloo.flix.util.ArtifactNames
+import ca.uwaterloo.flix.util.{ArtifactNames, InternalCompilerException}
 
 import scala.collection.mutable
 
@@ -37,7 +37,9 @@ object LlvmWasmTypedExportsWriter {
   case class Entry(witName: String,
                    symbol: String,
                    defId: Long,
-                   signature: ExportAbi.Signature)
+                   signature: ExportAbi.Signature,
+                   resumeType: Option[AbiType],
+                   requestSignature: Option[ExportAbi.Signature])
 
   def typedComponentPath(outputPath: java.nio.file.Path, artifactName: String = ArtifactNames.DefaultBaseName): java.nio.file.Path =
     LlvmWasmDriver.wasmDirPath(outputPath).resolve(ArtifactNames.wasmTypedExportComponentFileName(artifactName))
@@ -55,6 +57,7 @@ object LlvmWasmTypedExportsWriter {
     val exports = LlvmWasmDefs.compute(root).filter(_.isExport)
     if (exports.isEmpty) return Nil
 
+    val suspensionSummaries = LlvmExportSuspensionAnalysis.compute(root)
     val used = mutable.HashSet.empty[String]
 
     exports.map { e =>
@@ -67,7 +70,9 @@ object LlvmWasmTypedExportsWriter {
         witName = witName,
         symbol = e.sym.toString,
         defId = e.defId,
-        signature = sig
+        signature = sig,
+        resumeType = LlvmExportSuspensionAnalysis.typedResumeType(e.sym, suspensionSummaries, root),
+        requestSignature = LlvmExportSuspensionAnalysis.typedRequestSignature(e.sym, suspensionSummaries, root)
       )
     }
   }
@@ -102,6 +107,7 @@ object LlvmWasmTypedExportsWriter {
     sb.append("// NOTE: This file is generated per build from the portable export ABI schema.\n")
     sb.append("#include \"adapter.h\"\n")
     sb.append("#include \"stdlib.h\"\n")
+    sb.append("#include \"string.h\"\n")
     sb.append("\n")
     sb.append("typedef struct exports_flix_exports_api_ctx_t {\n")
     sb.append("  flix_runtime_runtime_own_ctx_t runtime_ctx;\n")
@@ -175,6 +181,13 @@ object LlvmWasmTypedExportsWriter {
       sb.append("\n")
     }
 
+    aggregateTypes(entries).foreach { tpe =>
+      sb.append(renderAggregateBoxHelper(tpe))
+      sb.append("\n")
+      sb.append(renderAggregateUnboxHelper(tpe))
+      sb.append("\n")
+    }
+
     sb.append(renderSuspensionPeekMethod())
     sb.append("\n")
     sb.append(renderSuspensionArgCountMethod())
@@ -183,6 +196,12 @@ object LlvmWasmTypedExportsWriter {
     sb.append("\n")
     sb.append(renderSuspensionArgAsPtrMethod())
     sb.append("\n")
+    entries.foreach { e =>
+      e.requestSignature.foreach { sig =>
+        sb.append(renderRequestMethod(e, sig))
+        sb.append("\n")
+      }
+    }
 
     entries.foreach { e =>
       sb.append(renderCallMethod(e))
@@ -329,6 +348,18 @@ object LlvmWasmTypedExportsWriter {
     sb.append("  resource value;\n")
     sb.append("  resource suspension;\n\n")
 
+    aggregateTypes(entries).foreach { tpe =>
+      sb.append(renderAggregateTypeDef(tpe))
+      sb.append("\n")
+    }
+
+    entries.foreach { e =>
+      e.requestSignature.foreach { sig =>
+        sb.append(renderRequestTypeDef(e, sig))
+        sb.append("\n")
+      }
+    }
+
     resultTypes(entries).foreach { tpe =>
       sb.append(s"  variant ${resultVariantName(tpe)} {\n")
       tpe match {
@@ -352,13 +383,22 @@ object LlvmWasmTypedExportsWriter {
     sb.append("    suspension-arg-count: func(s: borrow<suspension>) -> u32;\n")
     sb.append("    suspension-arg-as-i64: func(s: borrow<suspension>, idx: u32) -> value;\n")
     sb.append("    suspension-arg-as-ptr: func(s: borrow<suspension>, idx: u32) -> value;\n")
+    entries.foreach { e =>
+      e.requestSignature.foreach { _ =>
+        sb.append(s"    request-${e.witName}: func(s: borrow<suspension>) -> ${requestTypeName(e)};\n")
+      }
+    }
 
     entries.foreach { e =>
       val params = e.signature.params.zipWithIndex.map {
         case (tpe, idx) => s"a$idx: ${witTypeOf(tpe)}"
       }.mkString(", ")
       sb.append(s"    ${e.witName}: func(${params}) -> ${resultVariantName(e.signature.result)};\n")
-      sb.append(s"    resume-${e.witName}: func(s: suspension, resume: borrow<value>) -> ${resultVariantName(e.signature.result)};\n")
+      val resumeParamType = e.resumeType match {
+        case Some(tpe) => witTypeOf(tpe)
+        case None => "borrow<value>"
+      }
+      sb.append(s"    resume-${e.witName}: func(s: suspension, resume: $resumeParamType) -> ${resultVariantName(e.signature.result)};\n")
     }
 
     sb.append("  }\n")
@@ -427,6 +467,26 @@ object LlvmWasmTypedExportsWriter {
       |}
       |""".stripMargin
 
+  private def renderRequestMethod(entry: Entry, sig: ExportAbi.Signature): String = {
+    val sb = new StringBuilder(1024)
+    val cFuncName = s"exports_flix_exports_api_method_ctx_request_${cIdent(entry.witName)}"
+    val resultCType = requestRecordCType(entry)
+
+    sb.append(s"void $cFuncName(exports_flix_exports_api_borrow_ctx_t self, exports_flix_exports_api_borrow_suspension_t s, $resultCType *ret) {\n")
+    sb.append("  flix_runtime_runtime_borrow_ctx_t ctx = flix_runtime_runtime_borrow_ctx(self->runtime_ctx);\n")
+    sb.append("  flix_runtime_runtime_borrow_suspension_t runtime_s = flix_runtime_runtime_borrow_suspension(s->runtime_suspension);\n")
+    sb.append(s"  if (flix_runtime_runtime_suspension_arg_count(ctx, runtime_s) != ${sig.params.length}u) __builtin_trap();\n")
+    sig.params.zipWithIndex.foreach {
+      case (tpe, idx) =>
+        val getter = suspensionArgGetterName(tpe)
+        sb.append(s"  flix_runtime_runtime_own_value_t arg$idx = $getter(ctx, runtime_s, ${idx}u);\n")
+        sb.append(renderDecodeOwnedValue(tpe, s"arg$idx", s"ret->arg$idx"))
+        sb.append(s"  flix_runtime_runtime_value_drop_own(arg$idx);\n")
+    }
+    sb.append("}\n")
+    sb.toString()
+  }
+
   private def renderCallMethod(entry: Entry): String = {
     val sb = new StringBuilder(2048)
     val cFuncName = s"exports_flix_exports_api_method_ctx_${cIdent(entry.witName)}"
@@ -465,11 +525,22 @@ object LlvmWasmTypedExportsWriter {
     val sb = new StringBuilder(1024)
     val cFuncName = s"exports_flix_exports_api_method_ctx_resume_${cIdent(entry.witName)}"
     val resultCType = s"exports_flix_exports_api_${cIdent(resultVariantName(entry.signature.result))}_t"
-    sb.append(s"void $cFuncName(exports_flix_exports_api_borrow_ctx_t self, exports_flix_exports_api_own_suspension_t s, exports_flix_exports_api_borrow_value_t resume, $resultCType *ret) {\n")
+    val resumeParamDecl = entry.resumeType match {
+      case Some(tpe) => s"${adapterParamCType(tpe)} resume"
+      case None => "exports_flix_exports_api_borrow_value_t resume"
+    }
+    sb.append(s"void $cFuncName(exports_flix_exports_api_borrow_ctx_t self, exports_flix_exports_api_own_suspension_t s, $resumeParamDecl, $resultCType *ret) {\n")
     sb.append("  flix_runtime_runtime_borrow_ctx_t ctx = flix_runtime_runtime_borrow_ctx(self->runtime_ctx);\n")
     sb.append("  flix_runtime_runtime_own_suspension_t runtime_s = flix_api_take_suspension(s);\n")
     sb.append("  flix_runtime_runtime_exec_t exec;\n")
-    sb.append("  flix_runtime_runtime_resume_ok_sync(ctx, runtime_s, flix_api_borrow_value(resume), &exec);\n")
+    entry.resumeType match {
+      case Some(tpe) =>
+        sb.append(s"  flix_runtime_runtime_own_value_t resume_value = ${boxExpr(tpe, "resume")};\n")
+        sb.append("  flix_runtime_runtime_resume_ok_sync(ctx, runtime_s, flix_runtime_runtime_borrow_value(resume_value), &exec);\n")
+        sb.append("  flix_runtime_runtime_value_drop_own(resume_value);\n")
+      case None =>
+        sb.append("  flix_runtime_runtime_resume_ok_sync(ctx, runtime_s, flix_api_borrow_value(resume), &exec);\n")
+    }
     sb.append(renderTranslateRuntimeExec(entry.signature.result, "exec"))
     sb.append("}\n")
     sb.toString()
@@ -515,8 +586,47 @@ object LlvmWasmTypedExportsWriter {
     sb.toString()
   }
 
+  private def aggregateTypes(entries: List[Entry]): List[AbiType] = {
+    val out = mutable.LinkedHashMap.empty[String, AbiType]
+
+    def visit(tpe: AbiType): Unit = tpe match {
+      case seq@AbiType.List(elm) =>
+        visit(elm)
+        out.getOrElseUpdate(seq.stableId, seq)
+      case seq@AbiType.Array(elm) =>
+        visit(elm)
+        out.getOrElseUpdate(seq.stableId, seq)
+      case tup@AbiType.Tuple(elms) =>
+        elms.foreach(visit)
+        out.getOrElseUpdate(tup.stableId, tup)
+      case rec@AbiType.Record(fields) =>
+        fields.foreach { case (_, fieldTpe) => visit(fieldTpe) }
+        out.getOrElseUpdate(rec.stableId, rec)
+      case opt@AbiType.Option(elm) =>
+        visit(elm)
+        out.getOrElseUpdate(opt.stableId, opt)
+      case res@AbiType.Result(ok, err) =>
+        visit(ok)
+        visit(err)
+        out.getOrElseUpdate(res.stableId, res)
+      case _ => ()
+    }
+
+    entries.foreach { e =>
+      e.signature.params.foreach(visit)
+      visit(e.signature.result)
+      e.resumeType.foreach(visit)
+      e.requestSignature.foreach { sig =>
+        sig.params.foreach(visit)
+        visit(sig.result)
+      }
+    }
+
+    out.values.toList
+  }
+
   private def resultTypes(entries: List[Entry]): List[AbiType] =
-    entries.iterator.map(_.signature.result).toSet.toList.sortBy((t: AbiType) => t.displayName)
+    entries.iterator.map(_.signature.result).toList.distinct.sortBy((t: AbiType) => t.displayName)
 
   private def resultVariantName(tpe: AbiType): String = s"exec-${witTypeTag(tpe)}"
 
@@ -531,6 +641,7 @@ object LlvmWasmTypedExportsWriter {
     case AbiType.Float64 => "float64"
     case AbiType.String => "string"
     case AbiType.Bytes => "bytes"
+    case other => other.stableId.replace('_', '-')
   }
 
   private def witTypeOf(tpe: AbiType): String = tpe match {
@@ -544,9 +655,18 @@ object LlvmWasmTypedExportsWriter {
     case AbiType.Float64 => "f64"
     case AbiType.String => "string"
     case AbiType.Bytes => "list<u8>"
+    case other => witTypeTag(other)
   }
 
-  private def adapterParamCType(tpe: AbiType): String = tpe match {
+  private def adapterParamCType(tpe: AbiType): String =
+    if (isByRefBoundaryType(tpe)) s"${adapterValueCType(tpe)} *" else adapterValueCType(tpe)
+
+  private def requestTypeName(entry: Entry): String = s"request-${entry.witName}"
+
+  private def requestRecordCType(entry: Entry): String =
+    s"exports_flix_exports_api_${cIdent(requestTypeName(entry))}_t"
+
+  private def adapterValueCType(tpe: AbiType): String = tpe match {
     case AbiType.Unit => "int32_t"
     case AbiType.Bool => "bool"
     case AbiType.Int8 => "int8_t"
@@ -555,8 +675,15 @@ object LlvmWasmTypedExportsWriter {
     case AbiType.Int64 => "int64_t"
     case AbiType.Float32 => "float"
     case AbiType.Float64 => "double"
-    case AbiType.String => "adapter_string_t *"
-    case AbiType.Bytes => "adapter_list_u8_t *"
+    case AbiType.String => "adapter_string_t"
+    case AbiType.Bytes => "adapter_list_u8_t"
+    case other => s"exports_flix_exports_api_${cIdent(witTypeOf(other))}_t"
+  }
+
+  private def isByRefBoundaryType(tpe: AbiType): Boolean = tpe match {
+    case AbiType.String | AbiType.Bytes => true
+    case t if ExportAbi.isAggregate(t) => true
+    case _ => false
   }
 
   private def runtimeBoxMethodName(tpe: AbiType): String = tpe match {
@@ -585,8 +712,13 @@ object LlvmWasmTypedExportsWriter {
     case other => throw new IllegalStateException(s"Unexpected unbox type: $other")
   }
 
+  private def suspensionArgGetterName(tpe: AbiType): String =
+    if (isByRefBoundaryType(tpe)) "flix_runtime_runtime_suspension_arg_as_ptr"
+    else "flix_runtime_runtime_suspension_arg_as_i64"
+
   private def boxExpr(tpe: AbiType, valueExpr: String): String = tpe match {
     case AbiType.Unit => "flix_runtime_runtime_box_i32(ctx, 0)"
+    case t if ExportAbi.isAggregate(t) => s"${boxHelperName(t)}(ctx, $valueExpr)"
     case other => s"${runtimeBoxMethodName(other)}(ctx, $valueExpr)"
   }
 
@@ -598,8 +730,375 @@ object LlvmWasmTypedExportsWriter {
     case AbiType.Int64 => s"flix_runtime_runtime_unbox_i64(ctx, $borrowExpr)"
     case AbiType.Float32 => s"flix_runtime_runtime_unbox_f32(ctx, $borrowExpr)"
     case AbiType.Float64 => s"flix_runtime_runtime_unbox_f64(ctx, $borrowExpr)"
+    case t if ExportAbi.isAggregate(t) => s"${unboxHelperName(t)}(ctx, $borrowExpr)"
     case other => throw new IllegalStateException(s"Unexpected scalar result type: $other")
   }
+
+  private def renderAggregateTypeDef(tpe: AbiType): String = tpe match {
+    case AbiType.List(elm) =>
+      s"  type ${witTypeOf(tpe)} = list<${witTypeOf(elm)}>;\n"
+
+    case AbiType.Array(elm) =>
+      s"  type ${witTypeOf(tpe)} = list<${witTypeOf(elm)}>;\n"
+
+    case AbiType.Tuple(elms) =>
+      val fields = elms.zipWithIndex.map {
+        case (elm, idx) => s"    f$idx: ${witTypeOf(elm)},"
+      }.mkString("\n")
+      s"""  record ${witTypeOf(tpe)} {
+         |$fields
+         |  }
+         |""".stripMargin
+
+    case AbiType.Record(fields) =>
+      val body = fields.map {
+        case (label, fieldTpe) => s"    ${witRecordFieldName(label)}: ${witTypeOf(fieldTpe)},"
+      }.mkString("\n")
+      s"""  record ${witTypeOf(tpe)} {
+         |$body
+         |  }
+         |""".stripMargin
+
+    case AbiType.Option(elm) =>
+      s"""  record ${witTypeOf(tpe)} {
+         |    is-some: bool,
+         |    val: ${witTypeOf(elm)},
+         |  }
+         |""".stripMargin
+
+    case AbiType.Result(ok, err) =>
+      s"""  record ${witTypeOf(tpe)} {
+         |    is-ok: bool,
+         |    ok: ${witTypeOf(ok)},
+         |    err: ${witTypeOf(err)},
+         |  }
+         |""".stripMargin
+
+    case other =>
+      throw InternalCompilerException(s"Unexpected non-aggregate wasm export ABI type: '$other'.", ca.uwaterloo.flix.language.ast.SourceLocation.Unknown)
+  }
+
+  private def renderRequestTypeDef(entry: Entry, sig: ExportAbi.Signature): String = {
+    val fields = sig.params.zipWithIndex.map {
+      case (tpe, idx) => s"    arg$idx: ${witTypeOf(tpe)},"
+    }
+    val body =
+      if (fields.isEmpty) ""
+      else fields.mkString("\n") + "\n"
+    s"""  record ${requestTypeName(entry)} {
+       |$body  }
+       |""".stripMargin
+  }
+
+  private def renderAggregateBoxHelper(tpe: AbiType): String = tpe match {
+    case AbiType.List(elm) =>
+      val sb = new StringBuilder(1536)
+      sb.append(s"static flix_runtime_runtime_own_value_t ${boxHelperName(tpe)}(flix_runtime_runtime_borrow_ctx_t ctx, const ${adapterValueCType(tpe)} *value) {\n")
+      sb.append("  flix_runtime_runtime_list_borrow_value_t nil_args = { 0, 0 };\n")
+      sb.append(s"  flix_runtime_runtime_own_value_t acc = flix_runtime_runtime_tag_new(ctx, ${portableListNilTagId}u, &nil_args);\n")
+      sb.append("  for (size_t i = value->len; i > 0; i--) {\n")
+      sb.append(indent(renderBoxField(elm, "value->ptr[i - 1]", "field0", "field0_tmp"), 4))
+      sb.append("    flix_runtime_runtime_borrow_value_t fields[2];\n")
+      sb.append("    fields[0] = flix_runtime_runtime_borrow_value(field0);\n")
+      sb.append("    fields[1] = flix_runtime_runtime_borrow_value(acc);\n")
+      sb.append("    flix_runtime_runtime_list_borrow_value_t args = { fields, 2 };\n")
+      sb.append(s"    flix_runtime_runtime_own_value_t next = flix_runtime_runtime_tag_new(ctx, ${portableListConsTagId}u, &args);\n")
+      sb.append("    flix_runtime_runtime_value_drop_own(field0);\n")
+      sb.append("    flix_runtime_runtime_value_drop_own(acc);\n")
+      sb.append("    acc = next;\n")
+      sb.append("  }\n")
+      sb.append("  return acc;\n")
+      sb.append("}\n")
+      sb.toString()
+
+    case AbiType.Array(elm) =>
+      val sb = new StringBuilder(2048)
+      sb.append(s"static flix_runtime_runtime_own_value_t ${boxHelperName(tpe)}(flix_runtime_runtime_borrow_ctx_t ctx, const ${adapterValueCType(tpe)} *value) {\n")
+      sb.append("  flix_runtime_runtime_borrow_value_t *fields = value->len == 0 ? 0 : (flix_runtime_runtime_borrow_value_t *)malloc(sizeof(flix_runtime_runtime_borrow_value_t) * value->len);\n")
+      sb.append("  flix_runtime_runtime_own_value_t *owned = value->len == 0 ? 0 : (flix_runtime_runtime_own_value_t *)malloc(sizeof(flix_runtime_runtime_own_value_t) * value->len);\n")
+      sb.append("  if ((value->len != 0) && (fields == NULL || owned == NULL)) __builtin_trap();\n")
+      sb.append("  for (size_t i = 0; i < value->len; i++) {\n")
+      sb.append(indent(renderBoxField(elm, "value->ptr[i]", "field_i", "field_i_tmp"), 4))
+      sb.append("    owned[i] = field_i;\n")
+      sb.append("    fields[i] = flix_runtime_runtime_borrow_value(field_i);\n")
+      sb.append("  }\n")
+      sb.append("  flix_runtime_runtime_list_borrow_value_t args = { fields, value->len };\n")
+      sb.append(s"  flix_runtime_runtime_own_value_t out = flix_runtime_runtime_array_new(ctx, ${if (elm.isPointerLike) "true" else "false"}, &args);\n")
+      sb.append("  for (size_t i = 0; i < value->len; i++) {\n")
+      sb.append("    flix_runtime_runtime_value_drop_own(owned[i]);\n")
+      sb.append("  }\n")
+      sb.append("  free(fields);\n")
+      sb.append("  free(owned);\n")
+      sb.append("  return out;\n")
+      sb.append("}\n")
+      sb.toString()
+
+    case AbiType.Tuple(elms) =>
+      val sb = new StringBuilder(1024)
+      sb.append(s"static flix_runtime_runtime_own_value_t ${boxHelperName(tpe)}(flix_runtime_runtime_borrow_ctx_t ctx, const ${adapterValueCType(tpe)} *value) {\n")
+      elms.zipWithIndex.foreach { case (elm, idx) =>
+        sb.append(renderBoxField(elm, s"value->f$idx", s"field$idx", s"field${idx}_tmp"))
+      }
+      if (elms.nonEmpty) {
+        sb.append(s"  flix_runtime_runtime_borrow_value_t fields[${elms.length}];\n")
+        elms.indices.foreach { idx =>
+          sb.append(s"  fields[$idx] = flix_runtime_runtime_borrow_value(field$idx);\n")
+        }
+        sb.append(s"  flix_runtime_runtime_list_borrow_value_t args = { fields, ${elms.length} };\n")
+      } else {
+        sb.append("  flix_runtime_runtime_list_borrow_value_t args = { 0, 0 };\n")
+      }
+      sb.append("  flix_runtime_runtime_own_value_t out = flix_runtime_runtime_tuple_new(ctx, &args);\n")
+      elms.indices.foreach { idx =>
+        sb.append(s"  flix_runtime_runtime_value_drop_own(field$idx);\n")
+      }
+      sb.append("  return out;\n")
+      sb.append("}\n")
+      sb.toString()
+
+    case AbiType.Record(fields) =>
+      val sb = new StringBuilder(1024)
+      sb.append(s"static flix_runtime_runtime_own_value_t ${boxHelperName(tpe)}(flix_runtime_runtime_borrow_ctx_t ctx, const ${adapterValueCType(tpe)} *value) {\n")
+      fields.zipWithIndex.foreach { case ((label, fieldTpe), idx) =>
+        sb.append(renderBoxField(fieldTpe, s"value->${adapterRecordFieldName(label)}", s"field$idx", s"field${idx}_tmp"))
+      }
+      sb.append(s"  flix_runtime_runtime_borrow_value_t fields[${fields.length}];\n")
+      fields.indices.foreach { idx =>
+        sb.append(s"  fields[$idx] = flix_runtime_runtime_borrow_value(field$idx);\n")
+      }
+      sb.append(s"  flix_runtime_runtime_list_borrow_value_t args = { fields, ${fields.length} };\n")
+      sb.append("  flix_runtime_runtime_own_value_t out = flix_runtime_runtime_tuple_new(ctx, &args);\n")
+      fields.indices.foreach { idx =>
+        sb.append(s"  flix_runtime_runtime_value_drop_own(field$idx);\n")
+      }
+      sb.append("  return out;\n")
+      sb.append("}\n")
+      sb.toString()
+
+    case AbiType.Option(elm) =>
+      val sb = new StringBuilder(1024)
+      sb.append(s"static flix_runtime_runtime_own_value_t ${boxHelperName(tpe)}(flix_runtime_runtime_borrow_ctx_t ctx, const ${adapterValueCType(tpe)} *value) {\n")
+      sb.append("  if (!value->is_some) {\n")
+      sb.append("    flix_runtime_runtime_list_borrow_value_t args = { 0, 0 };\n")
+      sb.append(s"    return flix_runtime_runtime_tag_new(ctx, ${portableOptionNoneTagId}u, &args);\n")
+      sb.append("  }\n")
+      sb.append(renderBoxField(elm, s"value->${adapterRecordFieldName("val")}", "field0", "field0_tmp"))
+      sb.append("  flix_runtime_runtime_borrow_value_t fields[1];\n")
+      sb.append("  fields[0] = flix_runtime_runtime_borrow_value(field0);\n")
+      sb.append("  flix_runtime_runtime_list_borrow_value_t args = { fields, 1 };\n")
+      sb.append(s"  flix_runtime_runtime_own_value_t out = flix_runtime_runtime_tag_new(ctx, ${portableOptionSomeTagId}u, &args);\n")
+      sb.append("  flix_runtime_runtime_value_drop_own(field0);\n")
+      sb.append("  return out;\n")
+      sb.append("}\n")
+      sb.toString()
+
+    case AbiType.Result(ok, err) =>
+      val sb = new StringBuilder(1024)
+      sb.append(s"static flix_runtime_runtime_own_value_t ${boxHelperName(tpe)}(flix_runtime_runtime_borrow_ctx_t ctx, const ${adapterValueCType(tpe)} *value) {\n")
+      sb.append("  flix_runtime_runtime_borrow_value_t fields[1];\n")
+      sb.append("  flix_runtime_runtime_list_borrow_value_t args = { fields, 1 };\n")
+      sb.append("  if (value->is_ok) {\n")
+      sb.append(indent(renderBoxField(ok, s"value->${adapterRecordFieldName("ok")}", "field0", "field0_tmp"), 4))
+      sb.append("    fields[0] = flix_runtime_runtime_borrow_value(field0);\n")
+      sb.append(s"    flix_runtime_runtime_own_value_t out = flix_runtime_runtime_tag_new(ctx, ${portableResultOkTagId}u, &args);\n")
+      sb.append("    flix_runtime_runtime_value_drop_own(field0);\n")
+      sb.append("    return out;\n")
+      sb.append("  }\n")
+      sb.append(renderBoxField(err, s"value->${adapterRecordFieldName("err")}", "field1", "field1_tmp"))
+      sb.append("  fields[0] = flix_runtime_runtime_borrow_value(field1);\n")
+      sb.append(s"  flix_runtime_runtime_own_value_t out = flix_runtime_runtime_tag_new(ctx, ${portableResultErrTagId}u, &args);\n")
+      sb.append("  flix_runtime_runtime_value_drop_own(field1);\n")
+      sb.append("  return out;\n")
+      sb.append("}\n")
+      sb.toString()
+
+    case other =>
+      throw InternalCompilerException(s"Unexpected non-aggregate wasm export ABI type: '$other'.", ca.uwaterloo.flix.language.ast.SourceLocation.Unknown)
+  }
+
+  private def renderAggregateUnboxHelper(tpe: AbiType): String = tpe match {
+    case AbiType.List(elm) =>
+      val sb = new StringBuilder(2048)
+      sb.append(s"static ${adapterValueCType(tpe)} ${unboxHelperName(tpe)}(flix_runtime_runtime_borrow_ctx_t ctx, flix_runtime_runtime_borrow_value_t value) {\n")
+      sb.append(s"  ${adapterValueCType(tpe)} out;\n")
+      sb.append("  memset(&out, 0, sizeof(out));\n")
+      sb.append(s"  out.len = flix_runtime_runtime_list_len(ctx, value, ${portableListNilTagId}u, ${portableListConsTagId}u);\n")
+      sb.append(s"  out.ptr = out.len == 0 ? 0 : (${adapterValueCType(elm)} *)malloc(sizeof(${adapterValueCType(elm)}) * out.len);\n")
+      sb.append("  if (out.len != 0 && out.ptr == NULL) __builtin_trap();\n")
+      sb.append("  flix_runtime_runtime_borrow_value_t current = value;\n")
+      sb.append("  flix_runtime_runtime_own_value_t owned_current;\n")
+      sb.append("  int current_is_owned = 0;\n")
+      sb.append("  for (size_t i = 0; i < out.len; i++) {\n")
+      sb.append("    flix_runtime_runtime_own_value_t head = flix_runtime_runtime_tag_field(ctx, current, 0);\n")
+      sb.append(indent(renderDecodeOwnedValue(elm, "head", "out.ptr[i]"), 4))
+      sb.append("    flix_runtime_runtime_value_drop_own(head);\n")
+      sb.append("    flix_runtime_runtime_own_value_t tail = flix_runtime_runtime_tag_field(ctx, current, 1);\n")
+      sb.append("    if (current_is_owned) {\n")
+      sb.append("      flix_runtime_runtime_value_drop_own(owned_current);\n")
+      sb.append("    }\n")
+      sb.append("    owned_current = tail;\n")
+      sb.append("    current = flix_runtime_runtime_borrow_value(tail);\n")
+      sb.append("    current_is_owned = 1;\n")
+      sb.append("  }\n")
+      sb.append("  if (current_is_owned) {\n")
+      sb.append("    flix_runtime_runtime_value_drop_own(owned_current);\n")
+      sb.append("  }\n")
+      sb.append("  return out;\n")
+      sb.append("}\n")
+      sb.toString()
+
+    case AbiType.Array(elm) =>
+      val sb = new StringBuilder(1536)
+      sb.append(s"static ${adapterValueCType(tpe)} ${unboxHelperName(tpe)}(flix_runtime_runtime_borrow_ctx_t ctx, flix_runtime_runtime_borrow_value_t value) {\n")
+      sb.append(s"  ${adapterValueCType(tpe)} out;\n")
+      sb.append("  memset(&out, 0, sizeof(out));\n")
+      sb.append("  out.len = flix_runtime_runtime_array_len(ctx, value);\n")
+      sb.append(s"  out.ptr = out.len == 0 ? 0 : (${adapterValueCType(elm)} *)malloc(sizeof(${adapterValueCType(elm)}) * out.len);\n")
+      sb.append("  if (out.len != 0 && out.ptr == NULL) __builtin_trap();\n")
+      sb.append("  for (size_t i = 0; i < out.len; i++) {\n")
+      sb.append("    flix_runtime_runtime_own_value_t elem = flix_runtime_runtime_array_elem(ctx, value, (uint32_t)i);\n")
+      sb.append(indent(renderDecodeOwnedValue(elm, "elem", "out.ptr[i]"), 4))
+      sb.append("    flix_runtime_runtime_value_drop_own(elem);\n")
+      sb.append("  }\n")
+      sb.append("  return out;\n")
+      sb.append("}\n")
+      sb.toString()
+
+    case AbiType.Tuple(elms) =>
+      val sb = new StringBuilder(1024)
+      sb.append(s"static ${adapterValueCType(tpe)} ${unboxHelperName(tpe)}(flix_runtime_runtime_borrow_ctx_t ctx, flix_runtime_runtime_borrow_value_t value) {\n")
+      sb.append(s"  ${adapterValueCType(tpe)} out;\n")
+      sb.append("  memset(&out, 0, sizeof(out));\n")
+      elms.zipWithIndex.foreach { case (elm, idx) =>
+        sb.append(s"  flix_runtime_runtime_own_value_t field$idx = flix_runtime_runtime_tuple_field(ctx, value, $idx);\n")
+        sb.append(renderDecodeOwnedValue(elm, s"field$idx", s"out.f$idx"))
+        sb.append(s"  flix_runtime_runtime_value_drop_own(field$idx);\n")
+      }
+      sb.append("  return out;\n")
+      sb.append("}\n")
+      sb.toString()
+
+    case AbiType.Record(fields) =>
+      val sb = new StringBuilder(1024)
+      sb.append(s"static ${adapterValueCType(tpe)} ${unboxHelperName(tpe)}(flix_runtime_runtime_borrow_ctx_t ctx, flix_runtime_runtime_borrow_value_t value) {\n")
+      sb.append(s"  ${adapterValueCType(tpe)} out;\n")
+      sb.append("  memset(&out, 0, sizeof(out));\n")
+      fields.zipWithIndex.foreach { case ((label, fieldTpe), idx) =>
+        sb.append(s"  flix_runtime_runtime_own_value_t field$idx = flix_runtime_runtime_tuple_field(ctx, value, $idx);\n")
+        sb.append(renderDecodeOwnedValue(fieldTpe, s"field$idx", s"out.${adapterRecordFieldName(label)}"))
+        sb.append(s"  flix_runtime_runtime_value_drop_own(field$idx);\n")
+      }
+      sb.append("  return out;\n")
+      sb.append("}\n")
+      sb.toString()
+
+    case AbiType.Option(elm) =>
+      val sb = new StringBuilder(1024)
+      sb.append(s"static ${adapterValueCType(tpe)} ${unboxHelperName(tpe)}(flix_runtime_runtime_borrow_ctx_t ctx, flix_runtime_runtime_borrow_value_t value) {\n")
+      sb.append(s"  ${adapterValueCType(tpe)} out;\n")
+      sb.append("  memset(&out, 0, sizeof(out));\n")
+      sb.append("  flix_runtime_runtime_sym_t tag = flix_runtime_runtime_tag_id(ctx, value);\n")
+      sb.append("  switch (tag) {\n")
+      sb.append(s"    case ${portableOptionNoneTagId}u:\n")
+      sb.append(s"      out.${adapterRecordFieldName("is_some")} = false;\n")
+      sb.append("      return out;\n")
+      sb.append(s"    case ${portableOptionSomeTagId}u:\n")
+      sb.append(s"      out.${adapterRecordFieldName("is_some")} = true;\n")
+      sb.append("      flix_runtime_runtime_own_value_t field0 = flix_runtime_runtime_tag_field(ctx, value, 0);\n")
+      sb.append(renderDecodeOwnedValue(elm, "field0", s"out.${adapterRecordFieldName("val")}", 6))
+      sb.append("      flix_runtime_runtime_value_drop_own(field0);\n")
+      sb.append("      return out;\n")
+      sb.append("    default:\n")
+      sb.append("      __builtin_trap();\n")
+      sb.append("  }\n")
+      sb.append("}\n")
+      sb.toString()
+
+    case AbiType.Result(ok, err) =>
+      val sb = new StringBuilder(1024)
+      sb.append(s"static ${adapterValueCType(tpe)} ${unboxHelperName(tpe)}(flix_runtime_runtime_borrow_ctx_t ctx, flix_runtime_runtime_borrow_value_t value) {\n")
+      sb.append(s"  ${adapterValueCType(tpe)} out;\n")
+      sb.append("  memset(&out, 0, sizeof(out));\n")
+      sb.append("  flix_runtime_runtime_sym_t tag = flix_runtime_runtime_tag_id(ctx, value);\n")
+      sb.append("  switch (tag) {\n")
+      sb.append(s"    case ${portableResultOkTagId}u:\n")
+      sb.append(s"      out.${adapterRecordFieldName("is_ok")} = true;\n")
+      sb.append("      flix_runtime_runtime_own_value_t ok0 = flix_runtime_runtime_tag_field(ctx, value, 0);\n")
+      sb.append(renderDecodeOwnedValue(ok, "ok0", s"out.${adapterRecordFieldName("ok")}", 6))
+      sb.append("      flix_runtime_runtime_value_drop_own(ok0);\n")
+      sb.append("      return out;\n")
+      sb.append(s"    case ${portableResultErrTagId}u:\n")
+      sb.append(s"      out.${adapterRecordFieldName("is_ok")} = false;\n")
+      sb.append("      flix_runtime_runtime_own_value_t err0 = flix_runtime_runtime_tag_field(ctx, value, 0);\n")
+      sb.append(renderDecodeOwnedValue(err, "err0", s"out.${adapterRecordFieldName("err")}", 6))
+      sb.append("      flix_runtime_runtime_value_drop_own(err0);\n")
+      sb.append("      return out;\n")
+      sb.append("    default:\n")
+      sb.append("      __builtin_trap();\n")
+      sb.append("  }\n")
+      sb.append("}\n")
+      sb.toString()
+
+    case other =>
+      throw InternalCompilerException(s"Unexpected non-aggregate wasm export ABI type: '$other'.", ca.uwaterloo.flix.language.ast.SourceLocation.Unknown)
+  }
+
+  private def renderBoxField(tpe: AbiType, fieldExpr: String, ownedVar: String, tmpVar: String): String = tpe match {
+    case AbiType.Unit =>
+      s"  flix_runtime_runtime_own_value_t $ownedVar = flix_runtime_runtime_box_i32(ctx, 0);\n"
+    case AbiType.String =>
+      s"""  adapter_string_t $tmpVar = $fieldExpr;
+         |  flix_runtime_runtime_own_value_t $ownedVar = flix_runtime_runtime_box_string(ctx, &$tmpVar);
+         |""".stripMargin
+    case AbiType.Bytes =>
+      s"""  adapter_list_u8_t $tmpVar = $fieldExpr;
+         |  flix_runtime_runtime_own_value_t $ownedVar = flix_runtime_runtime_box_bytes(ctx, &$tmpVar);
+         |""".stripMargin
+    case t if ExportAbi.isAggregate(t) =>
+      s"  flix_runtime_runtime_own_value_t $ownedVar = ${boxHelperName(t)}(ctx, &$fieldExpr);\n"
+    case other =>
+      s"  flix_runtime_runtime_own_value_t $ownedVar = ${runtimeBoxMethodName(other)}(ctx, $fieldExpr);\n"
+  }
+
+  private def renderDecodeOwnedValue(tpe: AbiType, ownedVar: String, targetExpr: String, indentSpaces: Int = 2): String = {
+    val prefix = " " * indentSpaces
+    tpe match {
+      case AbiType.Unit =>
+        s"${prefix}$targetExpr = 0;\n"
+      case AbiType.String =>
+        s"${prefix}flix_runtime_runtime_unbox_string(ctx, flix_runtime_runtime_borrow_value($ownedVar), &$targetExpr);\n"
+      case AbiType.Bytes =>
+        s"${prefix}flix_runtime_runtime_unbox_bytes(ctx, flix_runtime_runtime_borrow_value($ownedVar), &$targetExpr);\n"
+      case t if ExportAbi.isAggregate(t) =>
+        s"${prefix}$targetExpr = ${unboxHelperName(t)}(ctx, flix_runtime_runtime_borrow_value($ownedVar));\n"
+      case other =>
+        s"${prefix}$targetExpr = ${runtimeUnboxMethodName(other)}(ctx, flix_runtime_runtime_borrow_value($ownedVar));\n"
+    }
+  }
+
+  private def boxHelperName(tpe: AbiType): String = s"flix_box_${cIdent(witTypeTag(tpe))}"
+
+  private def unboxHelperName(tpe: AbiType): String = s"flix_unbox_${cIdent(witTypeTag(tpe))}"
+
+  private def adapterRecordFieldName(name: String): String = name match {
+    case "err" => "err_"
+    case other => other
+  }
+
+  private def witRecordFieldName(name: String): String =
+    name
+
+  private def indent(s: String, n: Int): String = {
+    val pad = " " * n
+    s.linesIterator.map(pad + _).mkString("", "\n", if (s.endsWith("\n")) "" else "\n")
+  }
+
+  private val portableOptionNoneTagId = 0
+  private val portableOptionSomeTagId = 1
+  private val portableListConsTagId = 0
+  private val portableListNilTagId = 1
+  private val portableResultErrTagId = 0
+  private val portableResultOkTagId = 1
 
   private def resultTag(resultTpe: AbiType, suffix: String): String =
     s"EXPORTS_FLIX_EXPORTS_API_${cIdent(resultVariantName(resultTpe)).toUpperCase}_${suffix}"

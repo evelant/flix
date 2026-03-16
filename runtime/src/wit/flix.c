@@ -514,6 +514,15 @@ void __wasm_export_exports_flix_runtime_runtime_unbox_bytes_post_return(uint8_t 
   }
 }
 
+
+
+
+
+
+
+
+
+
 // Canonical ABI intrinsics
 
 __attribute__((__weak__, __export_name__("cabi_realloc")))
@@ -2330,6 +2339,63 @@ uint8_t * __wasm_export_exports_flix_runtime_runtime_unbox_bytes(int32_t arg, in
   *((size_t*)(ptr + sizeof(void*))) = (ret).len;
   *((uint8_t **)(ptr + 0)) = (uint8_t *) (ret).ptr;
   return ptr;
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#tuple-new")))
+int32_t __wasm_export_exports_flix_runtime_runtime_tuple_new(int32_t arg, uint8_t * arg0, size_t arg1) {
+  exports_flix_runtime_runtime_list_borrow_value_t arg2 = (exports_flix_runtime_runtime_list_borrow_value_t) { (exports_flix_runtime_runtime_borrow_value_t*)(arg0), (arg1) };
+  exports_flix_runtime_runtime_own_value_t ret = exports_flix_runtime_runtime_tuple_new(((exports_flix_runtime_runtime_ctx_t*) arg), &arg2);
+  return (ret).__handle;
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#tuple-field")))
+int32_t __wasm_export_exports_flix_runtime_runtime_tuple_field(int32_t arg, int32_t arg0, int32_t arg1) {
+  exports_flix_runtime_runtime_own_value_t ret = exports_flix_runtime_runtime_tuple_field(((exports_flix_runtime_runtime_ctx_t*) arg), ((exports_flix_runtime_runtime_value_t*) arg0), (uint32_t) (arg1));
+  return (ret).__handle;
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#tag-new")))
+int32_t __wasm_export_exports_flix_runtime_runtime_tag_new(int32_t arg, int64_t arg0, uint8_t * arg1, size_t arg2) {
+  exports_flix_runtime_runtime_list_borrow_value_t arg3 = (exports_flix_runtime_runtime_list_borrow_value_t) { (exports_flix_runtime_runtime_borrow_value_t*)(arg1), (arg2) };
+  exports_flix_runtime_runtime_own_value_t ret = exports_flix_runtime_runtime_tag_new(((exports_flix_runtime_runtime_ctx_t*) arg), (uint64_t) (arg0), &arg3);
+  return (ret).__handle;
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#tag-id")))
+int64_t __wasm_export_exports_flix_runtime_runtime_tag_id(int32_t arg, int32_t arg0) {
+  exports_flix_runtime_runtime_sym_t ret = exports_flix_runtime_runtime_tag_id(((exports_flix_runtime_runtime_ctx_t*) arg), ((exports_flix_runtime_runtime_value_t*) arg0));
+  return (int64_t) (ret);
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#tag-field")))
+int32_t __wasm_export_exports_flix_runtime_runtime_tag_field(int32_t arg, int32_t arg0, int32_t arg1) {
+  exports_flix_runtime_runtime_own_value_t ret = exports_flix_runtime_runtime_tag_field(((exports_flix_runtime_runtime_ctx_t*) arg), ((exports_flix_runtime_runtime_value_t*) arg0), (uint32_t) (arg1));
+  return (ret).__handle;
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#list-len")))
+int32_t __wasm_export_exports_flix_runtime_runtime_list_len(int32_t arg, int32_t arg0, int64_t arg1, int64_t arg2) {
+  uint32_t ret = exports_flix_runtime_runtime_list_len(((exports_flix_runtime_runtime_ctx_t*) arg), ((exports_flix_runtime_runtime_value_t*) arg0), (uint64_t) (arg1), (uint64_t) (arg2));
+  return (int32_t) (ret);
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#array-new")))
+int32_t __wasm_export_exports_flix_runtime_runtime_array_new(int32_t arg, int32_t arg0, uint8_t * arg1, size_t arg2) {
+  exports_flix_runtime_runtime_list_borrow_value_t arg3 = (exports_flix_runtime_runtime_list_borrow_value_t) { (exports_flix_runtime_runtime_borrow_value_t*)(arg1), (arg2) };
+  exports_flix_runtime_runtime_own_value_t ret = exports_flix_runtime_runtime_array_new(((exports_flix_runtime_runtime_ctx_t*) arg), arg0, &arg3);
+  return (ret).__handle;
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#array-len")))
+int32_t __wasm_export_exports_flix_runtime_runtime_array_len(int32_t arg, int32_t arg0) {
+  uint32_t ret = exports_flix_runtime_runtime_array_len(((exports_flix_runtime_runtime_ctx_t*) arg), ((exports_flix_runtime_runtime_value_t*) arg0));
+  return (int32_t) (ret);
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#array-elem")))
+int32_t __wasm_export_exports_flix_runtime_runtime_array_elem(int32_t arg, int32_t arg0, int32_t arg1) {
+  exports_flix_runtime_runtime_own_value_t ret = exports_flix_runtime_runtime_array_elem(((exports_flix_runtime_runtime_ctx_t*) arg), ((exports_flix_runtime_runtime_value_t*) arg0), (uint32_t) (arg1));
+  return (ret).__handle;
 }
 
 // Ensure that the *_component_type.o object is linked in
