@@ -58,6 +58,12 @@ object OccurrenceAnalyzer {
       case Expr.Cst(_, _, _) =>
         (exp0, ExprContext.Empty)
 
+      case Expr.NativeImport(_, _, _, _) =>
+        (exp0, ExprContext.Empty)
+
+      case Expr.WasmImport(_, _, _, _) =>
+        (exp0, ExprContext.Empty)
+
       case Expr.Var(sym, _, _) =>
         (exp0, ExprContext.Empty.addVar(sym, Occur.Once))
 

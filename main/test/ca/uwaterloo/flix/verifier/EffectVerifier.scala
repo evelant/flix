@@ -74,6 +74,8 @@ object EffectVerifier {
     */
   def visitExp(e: Expr)(implicit eqEnv: EqualityEnv, flix: Flix): Unit = e match {
     case Expr.Cst(cst, tpe, loc) => ()
+    case Expr.NativeImport(_, _, _, _) => ()
+    case Expr.WasmImport(_, _, _, _) => ()
     case Expr.Var(sym, tpe, loc) => ()
     case Expr.Hole(sym, env, tpe, eff, loc) => ()
     case Expr.HoleWithExp(exp, env, tpe, eff, loc) =>

@@ -55,6 +55,12 @@ object UseGraph {
     case Expr.Cst(_, _, _) =>
       ListMap.empty
 
+    case Expr.NativeImport(_, _, _, _) =>
+      ListMap.empty
+
+    case Expr.WasmImport(_, _, _, _) =>
+      ListMap.empty
+
     case Expr.Var(_, _, _) =>
       ListMap.empty
 

@@ -129,6 +129,10 @@ object Eraser {
   private def visitExp(exp0: ReducedAst.Expr)(implicit ctx: SharedContext, flix: Flix): ErasedAst.Expr = exp0 match {
     case ReducedAst.Expr.Cst(cst, loc) =>
       ErasedAst.Expr.Cst(cst, loc)
+    case ReducedAst.Expr.NativeImport(spec, tpe, purity, loc) =>
+      ErasedAst.Expr.NativeImport(spec, visitType(tpe), purity, loc)
+    case ReducedAst.Expr.WasmImport(spec, tpe, purity, loc) =>
+      ErasedAst.Expr.WasmImport(spec, visitType(tpe), purity, loc)
     case ReducedAst.Expr.Var(sym, tpe, loc) =>
       ErasedAst.Expr.Var(sym, visitType(tpe), loc)
     case ReducedAst.Expr.ApplyAtomic(op, exps, tpe, purity, loc) =>

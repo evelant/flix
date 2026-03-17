@@ -823,6 +823,12 @@ object Resolver {
     case NamedAst.Expr.Cst(cst, loc) =>
       ResolvedAst.Expr.Cst(cst, loc)
 
+    case NamedAst.Expr.NativeImport(spec, loc) =>
+      ResolvedAst.Expr.NativeImport(spec, loc)
+
+    case NamedAst.Expr.WasmImport(spec, loc) =>
+      ResolvedAst.Expr.WasmImport(spec, loc)
+
     case app@NamedAst.Expr.Apply(NamedAst.Expr.Ambiguous(qname, innerLoc), exps, outerLoc) =>
       // Special Case: We must check if we have a static method call, i.e. Math.abs(123)
       if (qname.namespace.idents.length == 1) {

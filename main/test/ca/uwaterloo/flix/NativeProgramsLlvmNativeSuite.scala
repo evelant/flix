@@ -230,6 +230,24 @@ class NativeProgramsLlvmNativeSuite extends AnyFunSuite {
     }
   }
 
+  test("llvm-native-fixture-extern-native-abs") {
+    assume(hasZig, "zig not found on PATH (skipping LLVM-native real program fixture)")
+
+    val outDir = Files.createTempDirectory("flix-llvm-native-fixture-extern-native-abs-")
+    try {
+      val exe = compileLlvmNative(fixturesDir.resolve("extern_native_abs"), outDir)
+      val (exit, output) = runExecutable(exe, timeoutSeconds = 15)
+      if (exit != 0) {
+        fail(s"Extern native fixture failed with exit $exit:\n$output")
+      }
+      if (!output.contains("extern-native: ok")) {
+        fail(s"Expected success banner, but output was:\n$output")
+      }
+    } finally {
+      deleteRecursive(outDir)
+    }
+  }
+
   test("llvm-native-fixture-array-foreach") {
     assume(hasZig, "zig not found on PATH (skipping LLVM-native real program fixture)")
 

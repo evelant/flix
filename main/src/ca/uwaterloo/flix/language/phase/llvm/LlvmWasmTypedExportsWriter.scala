@@ -77,13 +77,16 @@ object LlvmWasmTypedExportsWriter {
     }
   }
 
-  def renderPublicBindings(entries: List[Entry]): String = {
+  def renderPublicBindings(entries: List[Entry], importedInterfaces: List[String] = Nil): String = {
     val sb = new StringBuilder(8 * 1024)
     sb.append("package flix:exports@0.1.0;\n\n")
     sb.append(renderApiInterface(entries))
     sb.append("\n")
     sb.append("world flix {\n")
     sb.append("  import flix:sys/sys@0.1.0;\n")
+    importedInterfaces.distinct.sorted.foreach { iface =>
+      sb.append(s"  import $iface;\n")
+    }
     sb.append("  export api;\n")
     sb.append("}\n")
     sb.toString()

@@ -325,19 +325,74 @@ object Weeder2 {
       expect(tree, TreeKind.Decl.Def)
       val ann = pickAnnotations(tree)
       val mod = pickModifiers(tree, allowed = allowedModifiers, mustBePublic)
-      mapN(
-        pickDocumentation(tree),
-        pickNameIdent(tree),
-        Types.pickKindedParameters(tree),
-        pickFormalParameters(tree),
-        Exprs.pickExpr(tree),
-        Types.pickType(tree),
-        Types.pickConstraints(tree),
-        pickEqualityConstraints(tree),
-        Types.tryPickEffect(tree)
-      ) {
-        (doc, ident, tparams, fparams, exp, ttype, tconstrs, constrs, eff) =>
-          Declaration.Def(doc, ann, mod, ident, tparams, fparams, exp, ttype, eff, tconstrs, constrs, tree.loc)
+      val maybeExpression = tryPick(TreeKind.Expr.Expr, tree)
+      if (hasToken(TokenKind.KeywordExtern, tree)) {
+        pickExternKind(tree) match {
+          case Some("native") =>
+            mapN(
+              pickDocumentation(tree),
+              pickNameIdent(tree),
+              Types.pickKindedParameters(tree),
+              pickFormalParameters(tree),
+              pickNativeImportSpec(tree),
+              Types.pickType(tree),
+              Types.pickConstraints(tree),
+              pickEqualityConstraints(tree),
+              Types.tryPickEffect(tree)
+            ) {
+              (doc, ident, tparams, fparams, spec, ttype, tconstrs, constrs, eff) =>
+                maybeExpression.foreach(_ => sctx.errors.add(Malformed(NamedTokenSet.Declaration, SyntacticContext.Decl.Module, hint = Some("`extern native` definitions must not have a body."), loc = tree.loc)))
+                val exp = Expr.NativeImport(spec, tree.loc.asSynthetic)
+                Declaration.Def(doc, ann, mod, ident, tparams, fparams, exp, ttype, eff, tconstrs, constrs, tree.loc)
+            }
+          case Some("wasm") =>
+            mapN(
+              pickDocumentation(tree),
+              pickNameIdent(tree),
+              Types.pickKindedParameters(tree),
+              pickFormalParameters(tree),
+              pickWasmImportSpec(tree),
+              Types.pickType(tree),
+              Types.pickConstraints(tree),
+              pickEqualityConstraints(tree),
+              Types.tryPickEffect(tree)
+            ) {
+              (doc, ident, tparams, fparams, spec, ttype, tconstrs, constrs, eff) =>
+                maybeExpression.foreach(_ => sctx.errors.add(Malformed(NamedTokenSet.Declaration, SyntacticContext.Decl.Module, hint = Some("`extern wasm` definitions must not have a body."), loc = tree.loc)))
+                val exp = Expr.WasmImport(spec, tree.loc.asSynthetic)
+                Declaration.Def(doc, ann, mod, ident, tparams, fparams, exp, ttype, eff, tconstrs, constrs, tree.loc)
+            }
+          case _ =>
+            sctx.errors.add(Malformed(NamedTokenSet.Declaration, SyntacticContext.Decl.Module, hint = Some("Only `extern native` and `extern wasm` definitions are supported."), loc = tree.loc))
+            mapN(
+              pickDocumentation(tree),
+              pickNameIdent(tree),
+              Types.pickKindedParameters(tree),
+              pickFormalParameters(tree),
+              Types.pickType(tree),
+              Types.pickConstraints(tree),
+              pickEqualityConstraints(tree),
+              Types.tryPickEffect(tree)
+            ) {
+              (doc, ident, tparams, fparams, ttype, tconstrs, constrs, eff) =>
+                Declaration.Def(doc, ann, mod, ident, tparams, fparams, Expr.Error(Malformed(NamedTokenSet.Declaration, SyntacticContext.Decl.Module, hint = Some("Only `extern native` and `extern wasm` definitions are supported."), loc = tree.loc)), ttype, eff, tconstrs, constrs, tree.loc)
+            }
+        }
+      } else {
+        mapN(
+          pickDocumentation(tree),
+          pickNameIdent(tree),
+          Types.pickKindedParameters(tree),
+          pickFormalParameters(tree),
+          Exprs.pickExpr(tree),
+          Types.pickType(tree),
+          Types.pickConstraints(tree),
+          pickEqualityConstraints(tree),
+          Types.tryPickEffect(tree)
+        ) {
+          (doc, ident, tparams, fparams, exp, ttype, tconstrs, constrs, eff) =>
+            Declaration.Def(doc, ann, mod, ident, tparams, fparams, exp, ttype, eff, tconstrs, constrs, tree.loc)
+        }
       }
     }
 
@@ -3684,6 +3739,54 @@ object Weeder2 {
       case Some(i) if i >= 1 => Success(i)
       case Some(_) => Failure(WeederError.IllegalPredicateArity(token.mkSourceLocation()))
       case None => Failure(WeederError.IllegalPredicateArity(token.mkSourceLocation()))
+    }
+  }
+
+  private def pickNativeImportSpec(tree: Tree)(implicit sctx: SharedContext): Validation[ca.uwaterloo.flix.language.ast.NativeImportSpec, CompilationMessage] = {
+    flatMapN(pick(TreeKind.ArgumentNamed, tree)) { argTree =>
+      mapN(pickToken(TokenKind.LiteralString, argTree)) {
+      token =>
+        Constants.toStringCst(token) match {
+          case Expr.Cst(Constant.Str(symbol), _) => ca.uwaterloo.flix.language.ast.NativeImportSpec(symbol)
+          case Expr.Error(_) => ca.uwaterloo.flix.language.ast.NativeImportSpec(token.text.stripPrefix("\"").stripSuffix("\""))
+          case _ => throw InternalCompilerException("Unexpected non-string extern native symbol.", token.mkSourceLocation())
+        }
+      }
+    }
+  }
+
+  private def pickWasmImportSpec(tree: Tree)(implicit sctx: SharedContext): Validation[ca.uwaterloo.flix.language.ast.WasmImportSpec, CompilationMessage] = {
+    val args = pickAll(TreeKind.ArgumentNamed, tree)
+
+    def pickNamedStringArg(name: String): Validation[String, CompilationMessage] = {
+      args.find(arg => text(arg).headOption.contains(name)) match {
+        case Some(argTree) =>
+          mapN(pickToken(TokenKind.LiteralString, argTree)) { token =>
+            Constants.toStringCst(token) match {
+              case Expr.Cst(Constant.Str(value), _) => value
+              case Expr.Error(_) => token.text.stripPrefix("\"").stripSuffix("\"")
+              case _ => throw InternalCompilerException(s"Unexpected non-string extern wasm $name.", token.mkSourceLocation())
+            }
+          }
+        case None =>
+          Validation.Failure(Chain(NeedAtleastOne(NamedTokenSet.FromKinds(Set(TokenKind.LiteralString)), SyntacticContext.Decl.Module, loc = tree.loc)))
+      }
+    }
+
+    mapN(pickNamedStringArg("interface"), pickNamedStringArg("func")) {
+      (iface, func) => ca.uwaterloo.flix.language.ast.WasmImportSpec(iface, func)
+    }
+  }
+
+  private def pickExternKind(tree: Tree): Option[String] = {
+    val tokens = pickAllTokens(tree)
+    val idx = tokens.indexWhere(_.kind == TokenKind.KeywordExtern)
+    if (idx < 0 || idx + 1 >= tokens.length) None
+    else {
+      tokens(idx + 1) match {
+        case token@Token(TokenKind.NameLowercase, _, _, _, _, _) => Some(token.text)
+        case _ => None
+      }
     }
   }
 

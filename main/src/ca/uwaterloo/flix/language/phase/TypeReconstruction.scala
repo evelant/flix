@@ -21,6 +21,7 @@ import ca.uwaterloo.flix.language.ast.Type.getFlixType
 import ca.uwaterloo.flix.language.ast.shared.{CheckedCastType, Constant}
 import ca.uwaterloo.flix.language.errors.TypeError
 import ca.uwaterloo.flix.language.phase.typer.SubstitutionTree
+import ca.uwaterloo.flix.util.InternalCompilerException
 
 import java.lang.reflect.Executable
 
@@ -32,7 +33,14 @@ object TypeReconstruction {
   def visitDef(defn: KindedAst.Def, subst: SubstitutionTree): TypedAst.Def = defn match {
     case KindedAst.Def(sym, spec0, exp0, loc) =>
       val spec = visitSpec(spec0)
-      val exp = visitExp(exp0)(subst)
+      val exp = exp0 match {
+        case KindedAst.Expr.NativeImport(spec1, loc1) =>
+          TypedAst.Expr.NativeImport(spec1, spec.retTpe, spec.eff, loc1)
+        case KindedAst.Expr.WasmImport(spec1, loc1) =>
+          TypedAst.Expr.WasmImport(spec1, spec.retTpe, spec.eff, loc1)
+        case _ =>
+          visitExp(exp0)(subst)
+      }
       TypedAst.Def(sym, spec, exp, loc)
   }
 
@@ -110,6 +118,12 @@ object TypeReconstruction {
       TypedAst.Expr.Cst(Constant.Null, Type.Null, loc)
 
     case KindedAst.Expr.Cst(cst, loc) => TypedAst.Expr.Cst(cst, Type.constantType(cst), loc)
+
+    case KindedAst.Expr.NativeImport(spec, loc) =>
+      throw InternalCompilerException(s"Unexpected native import outside def reconstruction: '$spec'.", loc)
+
+    case KindedAst.Expr.WasmImport(spec, loc) =>
+      throw InternalCompilerException(s"Unexpected wasm import outside def reconstruction: '$spec'.", loc)
 
     case KindedAst.Expr.ApplyClo(exp1, exp2, tvar, evar, loc) =>
       val e1 = visitExp(exp1)

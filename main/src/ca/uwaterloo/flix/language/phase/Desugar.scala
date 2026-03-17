@@ -501,6 +501,12 @@ object Desugar {
     case WeededAst.Expr.Cst(cst, loc) =>
       Expr.Cst(cst, loc)
 
+    case WeededAst.Expr.NativeImport(spec, loc) =>
+      Expr.NativeImport(spec, loc)
+
+    case WeededAst.Expr.WasmImport(spec, loc) =>
+      Expr.WasmImport(spec, loc)
+
     case WeededAst.Expr.Apply(exp, exps, loc) =>
       val e = visitExp(exp)
       val es = visitExps(exps)

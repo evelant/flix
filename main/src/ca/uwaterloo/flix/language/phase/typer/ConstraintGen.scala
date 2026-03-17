@@ -77,6 +77,12 @@ object ConstraintGen {
         val resEff = Type.Pure
         (resTpe, resEff)
 
+      case Expr.NativeImport(spec, loc) =>
+        throw InternalCompilerException(s"Unexpected native import outside top-level def constraint generation: '$spec'.", loc)
+
+      case Expr.WasmImport(spec, loc) =>
+        throw InternalCompilerException(s"Unexpected wasm import outside top-level def constraint generation: '$spec'.", loc)
+
       case Expr.ApplyClo(exp1, exp2, tvar, evar, loc) =>
         val lambdaBodyType = freshVar(Kind.Star, loc)
         val lambdaBodyEff = freshVar(Kind.Eff, loc)

@@ -10,6 +10,8 @@ The exported Flix surface is in [src/Api.flix](./src/Api.flix). It demonstrates:
 - `List[Int32]`
 - `Array[Int32, Static]`
 - `Array[String, Static]`
+- `List[(Int32, String)]`
+- `Array[Option[Int32], Static]`
 - `List[{ name = String, score = Int32 }]`
 - `Array[{ name = String, score = Int32 }, Static]`
 - `Option[Int32]`
@@ -87,7 +89,7 @@ The Rust host binds against:
   - `Option`
   - `Result`
   - closed records
-- Sequence element types may themselves be aggregates, e.g. `List[Record]` and `Array[Record, Static]`.
+- Sequence element types may themselves be aggregates, e.g. `List[Tuple]`, `Array[Option[T], Static]`, `List[Record]`, and `Array[Record, Static]`.
 - Native C aggregate parameters use `const *` pointer parameters in the generated header.
 - Native C sequence params/results use `{ len, ptr }`.
 - Native C sequence result buffers are released with `flix_free`.

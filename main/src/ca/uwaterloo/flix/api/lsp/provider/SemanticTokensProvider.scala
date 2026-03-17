@@ -368,6 +368,9 @@ object SemanticTokensProvider {
 
     case Expr.HoleWithExp(exp, _, _, _, _) => visitExp(exp)
 
+    case Expr.NativeImport(_, _, _, _) => Iterator.empty
+    case Expr.WasmImport(_, _, _, _) => Iterator.empty
+
     case Expr.OpenAs(RestrictableEnumSymUse(_, loc), exp, _, _) =>
       val t = SemanticToken(SemanticTokenType.Enum, Nil, loc)
       Iterator(t) ++ visitExp(exp)

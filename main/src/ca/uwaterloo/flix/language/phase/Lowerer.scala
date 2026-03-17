@@ -89,6 +89,11 @@ object Lowerer {
     case ErasedAst.Expr.Cst(cst, loc) =>
       LoweredAst.Expr.Cst(cst, loc)
 
+    case ErasedAst.Expr.NativeImport(spec, tpe, purity, loc) =>
+      LoweredAst.Expr.NativeImport(spec, tpe, purity, loc)
+    case ErasedAst.Expr.WasmImport(spec, tpe, purity, loc) =>
+      LoweredAst.Expr.WasmImport(spec, tpe, purity, loc)
+
     case ErasedAst.Expr.Var(sym, tpe, loc) =>
       LoweredAst.Expr.Var(sym, tpe, loc)
 

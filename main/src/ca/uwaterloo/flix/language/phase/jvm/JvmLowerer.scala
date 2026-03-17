@@ -132,6 +132,12 @@ object JvmLowerer {
       case LoweredAst.Expr.Cst(cst, loc) =>
         JvmAst.Expr.Cst(cst, loc)
 
+      case LoweredAst.Expr.NativeImport(_, _, _, loc) =>
+        throw InternalCompilerException("Unexpected native import on JVM target.", loc)
+
+      case LoweredAst.Expr.WasmImport(_, _, _, loc) =>
+        throw InternalCompilerException("Unexpected wasm import on JVM target.", loc)
+
       case LoweredAst.Expr.Var(sym, tpe, loc) =>
         val offset = getVarSymReadOffset(sym)
         JvmAst.Expr.Var(sym, offset, tpe, loc)

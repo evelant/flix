@@ -165,6 +165,51 @@ fn main() -> Result<()> {
         other => bail!("bad echoUserArray result: {:?}", other),
     }
 
+    let pairs = vec![
+        api::Tuple2Int32String {
+            f0: 7,
+            f1: "hello".to_string(),
+        },
+        api::Tuple2Int32String {
+            f0: 9,
+            f1: "world".to_string(),
+        },
+    ];
+    match ctx_api.call_api_flippairs(&mut store, ctx, &pairs)? {
+        api::ExecListTuple2StringInt32::Ok(v)
+            if v.len() == 2
+                && v[0].f0 == "hello"
+                && v[0].f1 == 7
+                && v[1].f0 == "world"
+                && v[1].f1 == 9 => {}
+        other => bail!("bad flipPairs result: {:?}", other),
+    }
+
+    let maybe_ints = vec![
+        api::OptionInt32 {
+            is_some: true,
+            val: 41,
+        },
+        api::OptionInt32 {
+            is_some: false,
+            val: 0,
+        },
+        api::OptionInt32 {
+            is_some: true,
+            val: 9,
+        },
+    ];
+    match ctx_api.call_api_echomaybeints(&mut store, ctx, &maybe_ints)? {
+        api::ExecArrayOptionInt32::Ok(v)
+            if v.len() == 3
+                && v[0].is_some
+                && v[0].val == 41
+                && !v[1].is_some
+                && v[2].is_some
+                && v[2].val == 9 => {}
+        other => bail!("bad echoMaybeInts result: {:?}", other),
+    }
+
     let susp = match ctx_api.call_api_suspendecho(&mut store, ctx, "hello")? {
         api::ExecString::Suspended(s) => s,
         other => bail!("bad suspend result: {:?}", other),

@@ -97,6 +97,8 @@ object LlvmExportSuspensionAnalysis {
 
   private def visitExpr(exp: LoweredAst.Expr, handled: Set[Symbol.EffSym], summaries: Map[Symbol.DefnSym, Summary]): Summary = exp match {
     case _: LoweredAst.Expr.Cst => Summary.Empty
+    case _: LoweredAst.Expr.NativeImport => Summary.Empty
+    case _: LoweredAst.Expr.WasmImport => Summary.Empty
     case _: LoweredAst.Expr.Var => Summary.Empty
 
     case LoweredAst.Expr.ApplyAtomic(_, exps, _, _, _, _) =>

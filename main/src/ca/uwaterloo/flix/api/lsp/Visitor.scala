@@ -328,6 +328,8 @@ object Visitor {
 
     expr match {
       case Expr.Cst(_, _, _) => ()
+      case Expr.NativeImport(_, _, _, _) => ()
+      case Expr.WasmImport(_, _, _, _) => ()
       case Expr.Var(_, _, _) => ()
       case Expr.Hole(_, _, _, _, _) => ()
 

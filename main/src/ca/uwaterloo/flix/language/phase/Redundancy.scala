@@ -245,7 +245,11 @@ object Redundancy {
     // Compute the used symbols inside the definition.
     val usedExp = visitExp(defn.exp, Env.empty ++ defn.spec.fparams.map(_.bnd.sym), RecursionContext.ofDef(defn.sym))
 
-    val unusedFormalParams = findUnusedFormalParameters(defn.spec.fparams, usedExp)
+    val unusedFormalParams = defn.exp match {
+      case Expr.NativeImport(_, _, _, _) => Nil
+      case Expr.WasmImport(_, _, _, _) => Nil
+      case _ => findUnusedFormalParameters(defn.spec.fparams, usedExp)
+    }
     val unusedTypeParams = findUnusedTypeParameters(defn.spec)
 
     // Check for unused parameters and remove all variable symbols.
@@ -329,6 +333,9 @@ object Redundancy {
     */
   private def visitExp(e0: Expr, env0: Env, rc: RecursionContext)(implicit lctx: LocalContext, sctx: SharedContext, root: Root, flix: Flix): Used = e0 match {
     case Expr.Cst(_, _, _) => Used.empty
+
+    case Expr.NativeImport(_, _, _, _) => Used.empty
+    case Expr.WasmImport(_, _, _, _) => Used.empty
 
     case Expr.Var(sym, _, loc) => (sym.isWild, rc.vars.contains(sym)) match {
       // Case 1: Non-wild, non-recursive use of sym.

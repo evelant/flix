@@ -52,6 +52,8 @@ object LiftedAstPrinter {
     */
   def print(e: LiftedAst.Expr): DocAst.Expr = e match {
     case Cst(cst, _, _) => ConstantPrinter.print(cst)
+    case NativeImport(spec, _, _, _) => DocAst.Expr.AsIs(s"""extern native("${spec.symbol}")""")
+    case WasmImport(spec, _, _, _) => DocAst.Expr.AsIs(s"""extern wasm("${spec.interface}", "${spec.func}")""")
     case Var(sym, _, _) => printVarSym(sym)
     case ApplyAtomic(op, exps, tpe, purity, _) => OpPrinter.print(op, exps.map(print), SimpleTypePrinter.print(tpe), PurityPrinter.print(purity))
     case ApplyClo(exp1, exp2, _, _, _) => DocAst.Expr.ApplyClo(print(exp1), List(print(exp2)))

@@ -53,6 +53,9 @@ object ClosureConv {
   private def visitExp(exp0: Expr)(implicit flix: Flix): Expr = exp0 match {
     case Expr.Cst(_, _, _) => exp0
 
+    case Expr.NativeImport(_, _, _, _) => exp0
+    case Expr.WasmImport(_, _, _, _) => exp0
+
     case Expr.Var(_, _, _) => exp0
 
     case Expr.Lambda(fparams, exp, tpe, loc) =>
@@ -191,6 +194,9 @@ object ClosureConv {
   private def freeVars(exp0: Expr): SortedSet[FreeVar] = exp0 match {
     case Expr.Cst(_, _, _) => SortedSet.empty
 
+    case Expr.NativeImport(_, _, _, _) => SortedSet.empty
+    case Expr.WasmImport(_, _, _, _) => SortedSet.empty
+
     case Expr.Var(sym, tpe, _) => SortedSet(FreeVar(sym, tpe))
 
     case Expr.Lambda(args, body, _, _) =>
@@ -291,6 +297,9 @@ object ClosureConv {
 
     def visitExp(e: Expr): Expr = e match {
       case Expr.Cst(_, _, _) => e
+
+      case Expr.NativeImport(_, _, _, _) => e
+      case Expr.WasmImport(_, _, _, _) => e
 
       case Expr.Var(sym, tpe, loc) => subst.get(sym) match {
         case None => Expr.Var(sym, tpe, loc)
@@ -512,6 +521,9 @@ object ClosureConv {
   private def rewriteApplyLocalDef(expr00: Expr, sym0: Symbol.VarSym, freeVars: List[FreeVar]): Expr = {
     def visit(expr0: Expr): Expr = expr0 match {
       case Expr.Cst(_, _, _) => expr0
+
+      case Expr.NativeImport(_, _, _, _) => expr0
+      case Expr.WasmImport(_, _, _, _) => expr0
 
       case Expr.Var(_, _, _) => expr0
 

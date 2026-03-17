@@ -47,6 +47,9 @@ object TypeVerifier {
   private def visitExpr(expr: Expr)(implicit root: Root, env: Map[Symbol.VarSym, SimpleType], lenv: Map[Symbol.LabelSym, SimpleType]): SimpleType = expr match {
     case Expr.Cst(cst, _) => cst.tpe
 
+    case Expr.NativeImport(_, tpe, _, _) => tpe
+    case Expr.WasmImport(_, tpe, _, _) => tpe
+
     case Expr.Var(sym, tpe1, loc) => env.get(sym) match {
       case None => throw InternalCompilerException(s"Unknown variable sym: '$sym'", sym.loc)
       case Some(tpe2) =>

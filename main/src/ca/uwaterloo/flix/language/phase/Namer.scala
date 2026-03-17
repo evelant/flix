@@ -739,6 +739,12 @@ object Namer {
     case DesugaredAst.Expr.Cst(cst, loc) =>
       NamedAst.Expr.Cst(cst, loc)
 
+    case DesugaredAst.Expr.NativeImport(spec, loc) =>
+      NamedAst.Expr.NativeImport(spec, loc)
+
+    case DesugaredAst.Expr.WasmImport(spec, loc) =>
+      NamedAst.Expr.WasmImport(spec, loc)
+
     case DesugaredAst.Expr.Apply(exp, exps, loc) =>
       val e = visitExp(exp)
       val es = exps.map(visitExp(_))

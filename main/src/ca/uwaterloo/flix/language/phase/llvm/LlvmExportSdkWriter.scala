@@ -150,6 +150,7 @@ object LlvmExportSdkWriter {
 
   def packageWasm(entries: List[ExportEntry],
                   typedEntries: List[LlvmWasmTypedExportsWriter.Entry],
+                  wasmImports: List[LlvmWasmImportsWriter.Entry],
                   typedComponent: Path,
                   typedWitDir: Path,
                   artifactName: String,
@@ -173,8 +174,8 @@ object LlvmExportSdkWriter {
     val jsArtifacts =
       if (emitJs) {
         val sdkJsDir = wasmJsDir(outputPath)
-        LlvmWasmDriver.transpileComponentToJs(typedComponent, sdkJsDir)
-        val bindings = LlvmWasmBindingWriter.write(typedEntries, sdkJsDir, artifactName)
+        LlvmWasmDriver.transpileComponentToJs(typedComponent, sdkJsDir, wasmImports)
+        val bindings = LlvmWasmBindingWriter.write(typedEntries, wasmImports, sdkJsDir, artifactName)
         Some((sdkJsDir, bindings.js, bindings.dts, wasmTypedComponentJsPath(outputPath, artifactName), wasmTypedComponentTypesPath(outputPath, artifactName)))
       } else None
 

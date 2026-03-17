@@ -52,6 +52,8 @@ object ReducedAstPrinter {
     */
   def print(e: ReducedAst.Expr): DocAst.Expr = e match {
     case Expr.Cst(cst, _) => ConstantPrinter.print(cst)
+    case Expr.NativeImport(spec, _, _, _) => DocAst.Expr.AsIs(s"""extern native("${spec.symbol}")""")
+    case Expr.WasmImport(spec, _, _, _) => DocAst.Expr.AsIs(s"""extern wasm("${spec.interface}", "${spec.func}")""")
     case Expr.Var(sym, _, _) => printVarSym(sym)
     case Expr.ApplyAtomic(op, exps, tpe, purity, _) => OpPrinter.print(op, exps.map(print), SimpleTypePrinter.print(tpe), PurityPrinter.print(purity))
     case Expr.ApplyClo(exp1, exp2, ct, _, _, _) => DocAst.Expr.ApplyCloWithTail(print(exp1), List(print(exp2)), ct)

@@ -94,6 +94,9 @@ object LambdaLift {
   private def visitExp(e: SimplifiedAst.Expr)(implicit sym0: Symbol.DefnSym, liftedLocalDefs: Map[Symbol.VarSym, Symbol.DefnSym], sctx: SharedContext, flix: Flix): LiftedAst.Expr = e match {
     case SimplifiedAst.Expr.Cst(cst, tpe, loc) => LiftedAst.Expr.Cst(cst, tpe, loc)
 
+    case SimplifiedAst.Expr.NativeImport(spec, tpe, purity, loc) => LiftedAst.Expr.NativeImport(spec, tpe, purity, loc)
+    case SimplifiedAst.Expr.WasmImport(spec, tpe, purity, loc) => LiftedAst.Expr.WasmImport(spec, tpe, purity, loc)
+
     case SimplifiedAst.Expr.Var(sym, tpe, loc) => LiftedAst.Expr.Var(sym, tpe, loc)
 
     case SimplifiedAst.Expr.LambdaClosure(cparams, fparams, freeVars, exp, tpe, loc) =>

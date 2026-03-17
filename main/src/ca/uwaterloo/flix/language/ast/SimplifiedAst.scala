@@ -59,6 +59,9 @@ object SimplifiedAst {
       def purity: Purity = Pure
     }
 
+    case class NativeImport(spec: NativeImportSpec, tpe: SimpleType, purity: Purity, loc: SourceLocation) extends Expr
+    case class WasmImport(spec: WasmImportSpec, tpe: SimpleType, purity: Purity, loc: SourceLocation) extends Expr
+
     case class Var(sym: Symbol.VarSym, tpe: SimpleType, loc: SourceLocation) extends Expr {
       def purity: Purity = Pure
     }

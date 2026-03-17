@@ -52,5 +52,15 @@ mod Api {
     pub def echoUserArray(xs: Array[{name = String, score = Int32}, Static]): Array[{name = String, score = Int32}, Static] = xs
 
     @Export
+    pub def flipPairs(xs: List[(Int32, String)]): List[(String, Int32)] =
+        List.map(pair -> {
+            let (n, s) = pair;
+            (s, n)
+        }, xs)
+
+    @Export
+    pub def echoMaybeInts(xs: Array[Option[Int32], Static]): Array[Option[Int32], Static] = xs
+
+    @Export
     pub def suspendEcho(s: String): String \ HostEcho = HostEcho.echo(s)
 }

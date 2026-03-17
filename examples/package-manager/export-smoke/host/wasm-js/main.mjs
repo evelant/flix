@@ -90,6 +90,26 @@ try {
     `bad echoUserArray: ${JSON.stringify(userArray)}`
   );
 
+  const flippedPairs = Exports.Api.flipPairs(ctx, [
+    [7, "hello"],
+    [9, "world"],
+  ]);
+  assert(
+    flippedPairs.tag === "ok" &&
+      JSON.stringify(flippedPairs.val) === JSON.stringify([
+        ["hello", 7],
+        ["world", 9],
+      ]),
+    `bad flipPairs: ${JSON.stringify(flippedPairs)}`
+  );
+
+  const maybeInts = Exports.Api.echoMaybeInts(ctx, [41, null, 9]);
+  assert(
+    maybeInts.tag === "ok" &&
+      JSON.stringify(maybeInts.val) === JSON.stringify([41, null, 9]),
+    `bad echoMaybeInts: ${JSON.stringify(maybeInts)}`
+  );
+
   const susp = Exports.Api.suspendEcho(ctx, "hello");
   assert(susp.tag === "suspended", `bad suspend tag: ${String(susp.tag)}`);
   assert(Exports.Api.requestSuspendEcho(ctx, susp.val) === "hello", "bad suspension request");

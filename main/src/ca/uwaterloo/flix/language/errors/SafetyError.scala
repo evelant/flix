@@ -118,6 +118,197 @@ object SafetyError {
   }
 
   /**
+    * An error raised to indicate that `extern native` is only available on the native target.
+    */
+  case class NativeImportNotSupportedOnTarget(target: CompilationTarget, loc: SourceLocation) extends SafetyError {
+    def code: ErrorCode = ErrorCode.E6023
+
+    def summary: String = "`extern native` is only supported on the native compilation target."
+
+    def message(fmt: Formatter)(implicit root: Option[TypedAst.Root]): String = {
+      import fmt.*
+      val targetText = target match {
+        case CompilationTarget.Jvm => "jvm"
+        case CompilationTarget.LlvmNative => "native"
+        case CompilationTarget.LlvmWasm => "wasm"
+      }
+      s""">> `extern native` is only supported on the native compilation target.
+         |
+         |${highlight(loc, "unsupported target", fmt)}
+         |
+         |Target: ${red(targetText)}
+         |
+         |${underline("Explanation:")} `extern native` is a direct C ABI import mechanism.
+         |That mechanism only makes sense when compiling to a native binary. It is not
+         |available on the JVM or wasm targets.
+         |
+         |${underline("To fix:")}
+         |
+         |  - Compile with: ${cyan("--target native")}
+         |  - Or replace the import with a target-appropriate mechanism.
+         |""".stripMargin
+    }
+  }
+
+  /**
+    * An error raised to indicate that `extern native` does not support polymorphic signatures.
+    */
+  case class NativeImportTypeParametersNotSupported(loc: SourceLocation) extends SafetyError {
+    def code: ErrorCode = ErrorCode.E6024
+
+    def summary: String = "`extern native` does not support type parameters."
+
+    def message(fmt: Formatter)(implicit root: Option[TypedAst.Root]): String = {
+      import fmt.*
+      s""">> `extern native` does not support type parameters.
+         |
+         |${highlight(loc, "type parameters not supported", fmt)}
+         |
+         |${underline("Explanation:")} The v0 native import ABI is a direct raw C ABI.
+         |It only supports monomorphic scalar signatures. Generic type parameters would require
+         |an additional marshalling or specialization contract, which is intentionally not part
+         |of this first implementation.
+         |""".stripMargin
+    }
+  }
+
+  /**
+    * An error raised to indicate that an `extern native` type is not supported by the raw C ABI.
+    */
+  case class IllegalNativeImportType(tpe: Type, loc: SourceLocation)(implicit flix: Flix) extends SafetyError {
+    def code: ErrorCode = ErrorCode.E6026
+
+    def summary: String = "`extern native` uses a type that is not supported by the raw C ABI."
+
+    def message(fmt: Formatter)(implicit root: Option[TypedAst.Root]): String = {
+      import fmt.*
+      s""">> `extern native` uses a type that is not supported by the raw C ABI.
+         |
+         |${highlight(loc, "unsupported type", fmt)}
+         |
+         |Type: ${red(FormatType.formatType(tpe))}
+         |
+         |${underline("Explanation:")} The v0 native import ABI only supports:
+         |
+         |  - Unit
+         |  - Bool
+         |  - Int8 / Int16 / Int32 / Int64
+         |  - Float32 / Float64
+         |
+         |Strings, records, lists, arrays, and polymorphic types are not part of the direct
+         |raw C ABI. Those need a richer import story later.
+         |""".stripMargin
+    }
+  }
+
+  case class WasmImportNotSupportedOnTarget(target: CompilationTarget, loc: SourceLocation) extends SafetyError {
+    def code: ErrorCode = ErrorCode.E6030
+
+    def summary: String = "`extern wasm` is only supported on the wasm compilation target."
+
+    def message(fmt: Formatter)(implicit root: Option[TypedAst.Root]): String = {
+      import fmt.*
+      val targetText = target match {
+        case CompilationTarget.Jvm => "jvm"
+        case CompilationTarget.LlvmNative => "native"
+        case CompilationTarget.LlvmWasm => "wasm"
+      }
+      s""">> `extern wasm` is only supported on the wasm compilation target.
+         |
+         |${highlight(loc, "unsupported target", fmt)}
+         |
+         |Target: ${red(targetText)}
+         |
+         |${underline("Explanation:")} `extern wasm` binds directly to typed component-model imports.
+         |That mechanism only makes sense when compiling to the wasm target.
+         |""".stripMargin
+    }
+  }
+
+  case class WasmImportTypeParametersNotSupported(loc: SourceLocation) extends SafetyError {
+    def code: ErrorCode = ErrorCode.E6027
+
+    def summary: String = "`extern wasm` does not support type parameters."
+
+    def message(fmt: Formatter)(implicit root: Option[TypedAst.Root]): String = {
+      import fmt.*
+      s""">> `extern wasm` does not support type parameters.
+         |
+         |${highlight(loc, "type parameters not supported", fmt)}
+         |
+         |${underline("Explanation:")} The v0 wasm import ABI is deliberately narrow and monomorphic.
+         |Generic imports would require a separate specialization or marshalling contract.
+         |""".stripMargin
+    }
+  }
+
+  case class IllegalWasmImportType(tpe: Type, loc: SourceLocation)(implicit flix: Flix) extends SafetyError {
+    def code: ErrorCode = ErrorCode.E6028
+
+    def summary: String = "`extern wasm` uses a type that is not supported by the v0 direct wasm ABI."
+
+    def message(fmt: Formatter)(implicit root: Option[TypedAst.Root]): String = {
+      import fmt.*
+      s""">> `extern wasm` uses a type that is not supported by the v0 direct wasm ABI.
+         |
+         |${highlight(loc, "unsupported type", fmt)}
+         |
+         |Type: ${red(FormatType.formatType(tpe))}
+         |
+         |${underline("Explanation:")} The v0 direct wasm import path only supports:
+         |
+         |  - Unit
+         |  - Bool
+         |  - Int8 / Int16 / Int32 / Int64
+         |  - Float32 / Float64
+         |
+         |Strings, lists, records, arrays, and other aggregates belong in a richer later ABI.
+         |""".stripMargin
+    }
+  }
+
+  case class MalformedWasmImportInterface(interface: String, loc: SourceLocation) extends SafetyError {
+    def code: ErrorCode = ErrorCode.E6029
+
+    def summary: String = "`extern wasm` requires a valid WIT interface identifier."
+
+    def message(fmt: Formatter)(implicit root: Option[TypedAst.Root]): String = {
+      import fmt.*
+      s""">> `extern wasm` requires a valid WIT interface identifier.
+         |
+         |${highlight(loc, "invalid interface", fmt)}
+         |
+         |Interface: ${red(interface)}
+         |
+         |${underline("Expected shape:")} ${cyan("namespace:package/interface@major.minor.patch")}
+         |
+         |Example: ${cyan("host:math/basic@0.1.0")}
+         |""".stripMargin
+    }
+  }
+
+  case class ConflictingWasmImportSignature(interface: String, func: String, loc: SourceLocation) extends SafetyError {
+    def code: ErrorCode = ErrorCode.E6031
+
+    def summary: String = "`extern wasm` binds the same imported function with conflicting signatures."
+
+    def message(fmt: Formatter)(implicit root: Option[TypedAst.Root]): String = {
+      import fmt.*
+      s""">> `extern wasm` binds the same imported function with conflicting signatures.
+         |
+         |${highlight(loc, "conflicting import signature", fmt)}
+         |
+         |Interface: ${red(interface)}
+         |Function : ${red(func)}
+         |
+         |${underline("Explanation:")} A WIT world can only declare one typed signature for a given
+         |imported function. If multiple Flix defs bind the same imported symbol, they must agree on
+         |the exact parameter and result types.
+         |""".stripMargin
+    }
+  }
+
+  /**
     * An error raised to indicate an illegal checked type cast.
     *
     * @param from the source type.

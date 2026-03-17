@@ -102,6 +102,9 @@ object Stratifier {
   private def visitExp(exp0: Expr)(implicit g: LabelledPrecedenceGraph, sctx: SharedContext, root: Root, flix: Flix): Expr = exp0 match {
     case Expr.Cst(_, _, _) => exp0
 
+    case Expr.NativeImport(_, _, _, _) => exp0
+    case Expr.WasmImport(_, _, _, _) => exp0
+
     case Expr.Var(_, _, _) => exp0
 
     case Expr.Hole(_, _, _, _, _) => exp0

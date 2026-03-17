@@ -136,6 +136,12 @@ object Inliner {
     case Expr.Cst(cst, tpe, loc) =>
       Expr.Cst(cst, tpe, loc)
 
+    case Expr.NativeImport(spec, tpe, eff, loc) =>
+      Expr.NativeImport(spec, tpe, eff, loc)
+
+    case Expr.WasmImport(spec, tpe, eff, loc) =>
+      Expr.WasmImport(spec, tpe, eff, loc)
+
     case Expr.Var(sym, tpe, loc) =>
       // Replace with fresh variable if it is not a parameter
       ctx0.varSubst.get(sym) match {

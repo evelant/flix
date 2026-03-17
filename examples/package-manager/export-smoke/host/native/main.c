@@ -254,11 +254,64 @@ int main(void) {
   flix_handle_release(ctx, user_arr_out.ptr[1].name);
   flix_free(user_arr_out.ptr);
 
+  flix_tuple2_int32_string_t pairs_in_buf[2];
+  pairs_in_buf[0].f0 = 7;
+  pairs_in_buf[0].f1 = hello;
+  pairs_in_buf[1].f0 = 9;
+  pairs_in_buf[1].f1 = world;
+  flix_list_tuple2_int32_string_t pairs_in;
+  pairs_in.len = 2;
+  pairs_in.ptr = pairs_in_buf;
+  flix_list_tuple2_string_int32_t pairs_out;
+  flix_exec_t pairs_r = flix_export_Api_flipPairs(ctx, &pairs_in, &pairs_out);
+  if (pairs_r.tag != FLIX_EXEC_OK || pairs_out.len != 2) {
+    fprintf(stderr, "bad flipPairs metadata\n");
+    return 29;
+  }
+  int64_t pair0_len = 0;
+  int64_t pair1_len = 0;
+  uint8_t *pair0 = flix_string_to_utf8(ctx, pairs_out.ptr[0].f0, &pair0_len);
+  uint8_t *pair1 = flix_string_to_utf8(ctx, pairs_out.ptr[1].f0, &pair1_len);
+  if (pair0_len != 5 || memcmp(pair0, hello_bytes, 5) != 0 || pairs_out.ptr[0].f1 != 7 ||
+      pair1_len != 5 || memcmp(pair1, world_bytes, 5) != 0 || pairs_out.ptr[1].f1 != 9) {
+    fprintf(stderr, "bad flipPairs payload\n");
+    return 30;
+  }
+  flix_free(pair0);
+  flix_free(pair1);
+  flix_handle_release(ctx, pairs_out.ptr[0].f0);
+  flix_handle_release(ctx, pairs_out.ptr[1].f0);
+  flix_free(pairs_out.ptr);
+
+  flix_option_int32_t maybe_in_buf[3];
+  maybe_in_buf[0].is_some = true;
+  maybe_in_buf[0].val = 41;
+  maybe_in_buf[1].is_some = false;
+  maybe_in_buf[1].val = 0;
+  maybe_in_buf[2].is_some = true;
+  maybe_in_buf[2].val = 9;
+  flix_array_option_int32_t maybe_in;
+  maybe_in.len = 3;
+  maybe_in.ptr = maybe_in_buf;
+  flix_array_option_int32_t maybe_out;
+  flix_exec_t maybe_r = flix_export_Api_echoMaybeInts(ctx, &maybe_in, &maybe_out);
+  if (maybe_r.tag != FLIX_EXEC_OK || maybe_out.len != 3) {
+    fprintf(stderr, "bad echoMaybeInts metadata\n");
+    return 31;
+  }
+  if (!maybe_out.ptr[0].is_some || maybe_out.ptr[0].val != 41 ||
+      maybe_out.ptr[1].is_some ||
+      !maybe_out.ptr[2].is_some || maybe_out.ptr[2].val != 9) {
+    fprintf(stderr, "bad echoMaybeInts payload\n");
+    return 32;
+  }
+  flix_free(maybe_out.ptr);
+
   flix_string_t ignored = 0;
   flix_exec_t susp_r = flix_export_Api_suspendEcho(ctx, hello, &ignored);
   if (susp_r.tag != FLIX_EXEC_SUSPENDED) {
     fprintf(stderr, "bad suspendEcho tag: %lld\n", (long long)susp_r.tag);
-    return 29;
+    return 33;
   }
 
   flix_handle_t susp = (flix_handle_t)susp_r.payload;
@@ -269,7 +322,7 @@ int main(void) {
   uint8_t *arg0_out = flix_string_to_utf8(ctx, arg0, &arg0_len);
   if (arg0_len != 5 || memcmp(arg0_out, hello_bytes, 5) != 0) {
     fprintf(stderr, "bad suspension arg0\n");
-    return 30;
+    return 34;
   }
   flix_free(arg0_out);
   flix_handle_release(ctx, arg0);
@@ -280,13 +333,13 @@ int main(void) {
   flix_exec_t resume_r = flix_export_resume_Api_suspendEcho(ctx, susp, ok, &resumed);
   if (resume_r.tag != FLIX_EXEC_OK) {
     fprintf(stderr, "bad suspendEcho resume tag: %lld\n", (long long)resume_r.tag);
-    return 31;
+    return 35;
   }
   int64_t resumed_len = 0;
   uint8_t *resumed_out = flix_string_to_utf8(ctx, resumed, &resumed_len);
   if (resumed_len != 2 || memcmp(resumed_out, ok_bytes, 2) != 0) {
     fprintf(stderr, "bad suspendEcho resume payload\n");
-    return 32;
+    return 36;
   }
   flix_free(resumed_out);
   flix_handle_release(ctx, ok);

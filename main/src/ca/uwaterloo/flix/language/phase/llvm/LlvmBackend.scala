@@ -24,6 +24,8 @@ import ca.uwaterloo.flix.language.ast.shared.{Constant, ExpPosition}
 import ca.uwaterloo.flix.language.ast.{ExnKindId, LoweredAst, Name, SemanticOp, SimpleType, Symbol}
 import ca.uwaterloo.flix.language.dbg.AstPrinter.DebugNoOp
 import ca.uwaterloo.flix.language.phase.ExportAbi
+import ca.uwaterloo.flix.language.phase.DirectImportAbi
+import ca.uwaterloo.flix.language.phase.WasmImportInterface
 import ca.uwaterloo.flix.language.phase.llvm.LlvmIr.{Decl, Instr, Module as IrModule, Op, Terminator, Type, Value}
 import ca.uwaterloo.flix.util.CompilationTarget
 
@@ -126,7 +128,29 @@ object LlvmBackend {
 
       val mallocSizeTpe = if (target == CompilationTarget.LlvmWasm) Type.I32 else Type.I64
 
-      val decls = List(
+      val directImportDecls = target match {
+        case CompilationTarget.LlvmNative =>
+          root.defs.values.toList.flatMap { defn =>
+            extractNativeImportBody(defn.exp).map { body =>
+              val sig = DirectImportAbi.signatureOf(defn.fparams.map(_.tpe), body.resultTpe).getOrElse {
+                throw new IllegalStateException(s"Unsupported lowered native import signature for '${defn.sym}'.")
+              }
+              Decl.DeclareFun(nativeImportLlvmType(sig.result), body.spec.symbol, sig.params.map(nativeImportLlvmType))
+            }
+          }.distinct
+        case CompilationTarget.LlvmWasm =>
+          root.defs.values.toList.flatMap { defn =>
+            extractWasmImportBody(defn.exp).map { body =>
+              val sig = DirectImportAbi.signatureOf(defn.fparams.map(_.tpe), body.resultTpe).getOrElse {
+                throw new IllegalStateException(s"Unsupported lowered wasm import signature for '${defn.sym}'.")
+              }
+              Decl.DeclareFun(nativeImportLlvmType(sig.result), body.cSymbol, sig.params.map(nativeImportLlvmType))
+            }
+          }.distinct
+        case CompilationTarget.Jvm => Nil
+      }
+
+      val decls = (List(
         Decl.DeclareFun(Type.Void, "llvm.trap", Nil),
         Decl.DeclareFun(Type.Float, "llvm.pow.f32", List(Type.Float, Type.Float)),
         Decl.DeclareFun(Type.Double, "llvm.pow.f64", List(Type.Double, Type.Double)),
@@ -361,7 +385,7 @@ object LlvmBackend {
         Decl.DeclareFun(flixResultType, "flix_invoke_thunk", List(Type.Ptr, Type.Ptr, Type.I64)),
         Decl.DeclareFun(Type.Ptr, "malloc", List(mallocSizeTpe)),
         Decl.DeclareFun(Type.Void, "free", List(Type.Ptr))
-      )
+      ) ++ directImportDecls).distinct
 
       // Pre-emit resumption invoke wrappers used to build continuation closures inside handler wrappers.
       //
@@ -1649,9 +1673,128 @@ object LlvmBackend {
       h
     }
 
+    private case class NativeImportBody(spec: ca.uwaterloo.flix.language.ast.NativeImportSpec, resultTpe: SimpleType, boxed: Boolean)
+    private case class WasmImportBody(spec: ca.uwaterloo.flix.language.ast.WasmImportSpec, cSymbol: String, resultTpe: SimpleType, boxed: Boolean)
+
+    private def extractNativeImportBody(exp0: Expr): Option[NativeImportBody] = exp0 match {
+      case Expr.NativeImport(spec, tpe, _, _) =>
+        Some(NativeImportBody(spec, tpe, boxed = false))
+      case Expr.ApplyAtomic(AtomicOp.Box, List(Expr.NativeImport(spec, tpe, _, _)), _, _, _, _) =>
+        Some(NativeImportBody(spec, tpe, boxed = true))
+      case _ =>
+        None
+    }
+
+    private def extractWasmImportBody(exp0: Expr): Option[WasmImportBody] = exp0 match {
+      case Expr.WasmImport(spec, tpe, _, _) =>
+        WasmImportInterface.parse(spec.interface).map(id => WasmImportBody(spec, id.cFunctionName(spec.func), tpe, boxed = false))
+      case Expr.ApplyAtomic(AtomicOp.Box, List(Expr.WasmImport(spec, tpe, _, _)), _, _, _, _) =>
+        WasmImportInterface.parse(spec.interface).map(id => WasmImportBody(spec, id.cFunctionName(spec.func), tpe, boxed = true))
+      case _ =>
+        None
+    }
+
     private def emitDef(defn: LoweredAst.Def): LlvmIr.Function = {
-      if (ca.uwaterloo.flix.language.ast.Purity.isControlImpure(defn.exp.purity) || (target == CompilationTarget.LlvmWasm && !ca.uwaterloo.flix.language.ast.Purity.isPure(defn.exp.purity))) emitDefControlImpure(defn)
-      else emitDefControlPure(defn)
+      extractNativeImportBody(defn.exp) match {
+        case Some(body) =>
+          emitNativeImportDef(defn, body)
+        case None =>
+          extractWasmImportBody(defn.exp) match {
+            case Some(body) =>
+              emitWasmImportDef(defn, body)
+            case None =>
+              if (ca.uwaterloo.flix.language.ast.Purity.isControlImpure(defn.exp.purity) || (target == CompilationTarget.LlvmWasm && !ca.uwaterloo.flix.language.ast.Purity.isPure(defn.exp.purity))) emitDefControlImpure(defn)
+              else emitDefControlPure(defn)
+          }
+      }
+    }
+
+    private def emitNativeImportDef(defn: LoweredAst.Def, body: NativeImportBody): LlvmIr.Function = {
+      if (target != CompilationTarget.LlvmNative) {
+        throw new IllegalStateException(s"Unexpected native import '${defn.sym}' on target '$target'.")
+      }
+      emitDirectImportDef(defn, body.resultTpe, body.boxed, body.spec.symbol)
+    }
+
+    private def emitWasmImportDef(defn: LoweredAst.Def, body: WasmImportBody): LlvmIr.Function = {
+      if (target != CompilationTarget.LlvmWasm) {
+        throw new IllegalStateException(s"Unexpected wasm import '${defn.sym}' on target '$target'.")
+      }
+      emitDirectImportDef(defn, body.resultTpe, body.boxed, body.cSymbol)
+    }
+
+    private def emitDirectImportDef(defn: LoweredAst.Def, resultTpe: SimpleType, boxed: Boolean, cSymbol: String): LlvmIr.Function = {
+      if (defn.cparams.nonEmpty || defn.lparams.nonEmpty) {
+        throw new IllegalStateException(s"Unexpected closure/local params on direct import '${defn.sym}'.")
+      }
+      val sig = DirectImportAbi.signatureOf(defn.fparams.map(_.tpe), resultTpe).getOrElse {
+        throw new IllegalStateException(s"Unsupported lowered direct import signature for '${defn.sym}'.")
+      }
+
+      val fnName = LlvmNames.defName(defn.sym)
+      val params = LlvmIr.Param("ctx", Type.Ptr) :: defn.fparams.zipWithIndex.map {
+        case (_, i) => LlvmIr.Param(LlvmNames.paramName(i), nativeImportLlvmType(sig.params(i)))
+      }
+
+      val fb = new FunBuilder()
+      fb.traceEnabled = true
+      val entry = fb.newBlock("entry")
+      fb.setCurrent(entry)
+      fb.current.emitCallVoid("flix_trace_push", List(Value.Global(LlvmNames.traceName(defn.sym), Type.Ptr)))
+
+      val ctxPtr = Value.Local("ctx", Type.Ptr)
+
+      val loopLabel = freshLabel("loop")
+      fb.current.setTerminator(Terminator.Br(loopLabel))
+
+      val loopBlock = fb.newBlock(loopLabel)
+      fb.setCurrent(loopBlock)
+
+      fb.current.emitCallVoid("flix_gc_pollcheck", List(ctxPtr))
+      val isCancelled = freshTmp(Type.I1)
+      fb.current.emitAssign(isCancelled, Op.Call(Type.I1, "flix_cancel_requested", List(ctxPtr)))
+
+      val pollOkLabel = freshLabel("poll_ok")
+      val pollCancelLabel = freshLabel("poll_cancel")
+      fb.current.setTerminator(Terminator.CondBr(isCancelled, pollCancelLabel, pollOkLabel))
+
+      val pollCancelBlock = fb.newBlock(pollCancelLabel)
+      fb.setCurrent(pollCancelBlock)
+      val cancelExnPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(cancelExnPtr, Op.Call(Type.Ptr, "flix_cancel_exn", List(ctxPtr, Value.IntConst(cancelledKindId, Type.I64), exnExnTypeInfo, Value.IntConst(exnExnTagId, Type.I64))))
+      val tracedCancelExnPtr = freshTmp(Type.Ptr)
+      fb.current.emitAssign(tracedCancelExnPtr, Op.Call(Type.Ptr, "flix_exn_with_trace", List(cancelExnPtr)))
+      val cancelBits = freshTmp(Type.I64)
+      fb.current.emitAssign(cancelBits, Op.Cast("ptrtoint", Type.I64, tracedCancelExnPtr))
+      val cancelResult = packResultTagged(ResultTagException, cancelBits, fb)
+      fb.current.setTerminator(Terminator.Ret(flixResultType, cancelResult))
+
+      val pollOkBlock = fb.newBlock(pollOkLabel)
+      fb.setCurrent(pollOkBlock)
+
+      val args = defn.fparams.zipWithIndex.map {
+        case (_, i) => Value.Local(LlvmNames.paramName(i), nativeImportLlvmType(sig.params(i)))
+      }
+
+      val rawResultValue = sig.result match {
+        case DirectImportAbi.AbiType.Unit =>
+          fb.current.emitCallVoid(cSymbol, args)
+          emitConstant(Constant.Unit, ctxPtr, fb)
+
+        case abiTpe =>
+          val callTpe = nativeImportLlvmType(abiTpe)
+          val tmp = freshTmp(callTpe)
+          fb.current.emitAssign(tmp, Op.Call(callTpe, cSymbol, args))
+          tmp
+      }
+
+      val resultValue =
+        if (boxed) emitApplyAtomic(AtomicOp.Box, List(resultTpe), List(rawResultValue), defn.tpe, ctxPtr, fb, None)
+        else rawResultValue
+
+      val packed = packResult(resultValue, defn.tpe, fb)
+      fb.current.setTerminator(Terminator.Ret(flixResultType, packed))
+      LlvmIr.Function(fnName, flixResultType, params, fb.result())
     }
 
 	    private def emitDefControlPure(defn: LoweredAst.Def): LlvmIr.Function = {
@@ -1931,6 +2074,8 @@ object LlvmBackend {
 
       def visitExp(e: Expr): Unit = e match {
         case Expr.Cst(_, _) => ()
+        case Expr.NativeImport(_, _, _, _) => ()
+        case Expr.WasmImport(_, _, _, _) => ()
         case Expr.Var(_, _, _) => ()
 
         case Expr.Let(_, e1, e2, _) =>
@@ -1996,6 +2141,8 @@ object LlvmBackend {
 
       def visitExp(e: Expr): Unit = e match {
         case Expr.Cst(_, _) => ()
+        case Expr.NativeImport(_, _, _, _) => ()
+        case Expr.WasmImport(_, _, _, _) => ()
         case Expr.Var(_, _, _) => ()
 
         case Expr.Let(_, e1, e2, _) =>
@@ -2058,6 +2205,8 @@ object LlvmBackend {
 
       def visitExp(e: Expr): Unit = e match {
         case Expr.Cst(_, _) => ()
+        case Expr.NativeImport(_, _, _, _) => ()
+        case Expr.WasmImport(_, _, _, _) => ()
         case Expr.Var(_, _, _) => ()
 
         case Expr.Let(_, e1, e2, _) =>
@@ -2120,6 +2269,8 @@ object LlvmBackend {
 
       def visitExp(e: Expr): Unit = e match {
         case Expr.Cst(_, _) => ()
+        case Expr.NativeImport(_, _, _, _) => ()
+        case Expr.WasmImport(_, _, _, _) => ()
         case Expr.Var(_, _, _) => ()
 
         case Expr.Let(_, e1, e2, _) =>
@@ -2218,6 +2369,8 @@ object LlvmBackend {
 
       def visitExp(e: Expr): Unit = e match {
         case Expr.Cst(_, _) => record(e.tpe)
+        case Expr.NativeImport(_, _, _, _) => record(e.tpe)
+        case Expr.WasmImport(_, _, _, _) => record(e.tpe)
         case Expr.Var(_, _, _) => record(e.tpe)
 
         case Expr.Let(_, e1, e2, _) =>
@@ -2303,6 +2456,8 @@ object LlvmBackend {
 
       def visitExp(e: Expr): Unit = e match {
         case Expr.Cst(_, _) => record(e.tpe)
+        case Expr.NativeImport(_, _, _, _) => record(e.tpe)
+        case Expr.WasmImport(_, _, _, _) => record(e.tpe)
         case Expr.Var(_, _, _) => record(e.tpe)
 
         case Expr.Let(_, e1, e2, _) =>
@@ -3330,6 +3485,17 @@ object LlvmBackend {
       case SimpleType.Null => Type.Ptr
       case SimpleType.Object => Type.I64
       case _ => Type.Ptr
+    }
+
+    private def nativeImportLlvmType(tpe: DirectImportAbi.AbiType): Type = tpe match {
+      case DirectImportAbi.AbiType.Unit => Type.Void
+      case DirectImportAbi.AbiType.Bool => Type.I1
+      case DirectImportAbi.AbiType.Int8 => Type.I8
+      case DirectImportAbi.AbiType.Int16 => Type.I16
+      case DirectImportAbi.AbiType.Int32 => Type.I32
+      case DirectImportAbi.AbiType.Int64 => Type.I64
+      case DirectImportAbi.AbiType.Float32 => Type.Float
+      case DirectImportAbi.AbiType.Float64 => Type.Double
     }
 
     private def zeroValueOf(tpe: Type): Value = tpe match {
@@ -4900,6 +5066,8 @@ object LlvmBackend {
       */
     private def maySuspend(exp0: Expr): Boolean = exp0 match {
       case Expr.Cst(_, _) => false
+      case Expr.NativeImport(_, _, _, _) => false
+      case Expr.WasmImport(_, _, _, _) => false
       case Expr.Var(_, _, _) => false
       case Expr.ApplyAtomic(_, exps, pcPointId, _, _, _) =>
         pcPointId > 0 || exps.exists(maySuspend)

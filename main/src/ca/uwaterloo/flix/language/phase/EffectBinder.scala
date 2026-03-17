@@ -136,6 +136,16 @@ object EffectBinder {
       val e = visitExprInnerWithBinders(binders)(exp0)
       bindBinders(binders, e)
 
+    case LiftedAst.Expr.NativeImport(_, _, _, _) =>
+      val binders = mutable.ArrayBuffer.empty[Binder]
+      val e = visitExprInnerWithBinders(binders)(exp0)
+      bindBinders(binders, e)
+
+    case LiftedAst.Expr.WasmImport(_, _, _, _) =>
+      val binders = mutable.ArrayBuffer.empty[Binder]
+      val e = visitExprInnerWithBinders(binders)(exp0)
+      bindBinders(binders, e)
+
     case LiftedAst.Expr.Var(_, _, _) =>
       val binders = mutable.ArrayBuffer.empty[Binder]
       val e = visitExprInnerWithBinders(binders)(exp0)
@@ -228,6 +238,12 @@ object EffectBinder {
   private def visitExprInnerWithBinders(binders: mutable.ArrayBuffer[Binder])(exp0: LiftedAst.Expr)(implicit flix: Flix): ReducedAst.Expr = exp0 match {
     case LiftedAst.Expr.Cst(cst, tpe, loc) =>
       ReducedAst.Expr.Cst(cst, loc)
+
+    case LiftedAst.Expr.NativeImport(spec, tpe, purity, loc) =>
+      ReducedAst.Expr.NativeImport(spec, tpe, purity, loc)
+
+    case LiftedAst.Expr.WasmImport(spec, tpe, purity, loc) =>
+      ReducedAst.Expr.WasmImport(spec, tpe, purity, loc)
 
     case LiftedAst.Expr.Var(sym, tpe, loc) =>
       ReducedAst.Expr.Var(sym, tpe, loc)
@@ -328,6 +344,8 @@ object EffectBinder {
     def bind(e: ReducedAst.Expr): ReducedAst.Expr = e match {
       // trivial expressions
       case ReducedAst.Expr.Cst(_, _) => e
+      case ReducedAst.Expr.NativeImport(_, _, _, _) => e
+      case ReducedAst.Expr.WasmImport(_, _, _, _) => e
       case ReducedAst.Expr.Var(_, _, _) => e
       case ReducedAst.Expr.JumpTo(_, _, _, _) => e
       case ReducedAst.Expr.ApplyAtomic(_, _, _, _, _) => e

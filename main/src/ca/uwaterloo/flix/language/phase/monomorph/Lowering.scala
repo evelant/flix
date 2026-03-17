@@ -203,6 +203,11 @@ object Lowering {
   private def lowerExp(exp0: TypedAst.Expr)(implicit ctx: Context, root: TypedAst.Root, flix: Flix): MonoAst.Expr = exp0 match {
     case TypedAst.Expr.Cst(cst, tpe, loc) => MonoAst.Expr.Cst(cst, lowerType(tpe), loc)
 
+    case TypedAst.Expr.NativeImport(spec, tpe, eff, loc) =>
+      MonoAst.Expr.NativeImport(spec, lowerType(tpe), eff, loc)
+    case TypedAst.Expr.WasmImport(spec, tpe, eff, loc) =>
+      MonoAst.Expr.WasmImport(spec, lowerType(tpe), eff, loc)
+
     case TypedAst.Expr.Var(sym, tpe, loc) => MonoAst.Expr.Var(sym, lowerType(tpe), loc)
 
     case TypedAst.Expr.Hole(sym, _, tpe, eff, loc) =>
@@ -2049,6 +2054,9 @@ object Lowering {
     */
   private def substExp(exp0: MonoAst.Expr, subst: Map[Symbol.VarSym, Symbol.VarSym]): MonoAst.Expr = exp0 match {
     case MonoAst.Expr.Cst(_, _, _) => exp0
+
+    case MonoAst.Expr.NativeImport(_, _, _, _) => exp0
+    case MonoAst.Expr.WasmImport(_, _, _, _) => exp0
 
     case MonoAst.Expr.Var(sym, tpe, loc) =>
       val s = subst.getOrElse(sym, sym)

@@ -96,6 +96,9 @@ object WeededAst {
 
     case class Cst(cst: Constant, loc: SourceLocation) extends Expr
 
+    case class NativeImport(spec: NativeImportSpec, loc: SourceLocation) extends Expr
+    case class WasmImport(spec: WasmImportSpec, loc: SourceLocation) extends Expr
+
     case class Apply(exp: Expr, exps: List[Expr], loc: SourceLocation) extends Expr
 
     case class Infix(exp1: Expr, exp2: Expr, exp3: Expr, loc: SourceLocation) extends Expr

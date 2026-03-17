@@ -495,6 +495,11 @@ object Specialization {
     case Expr.Cst(cst, tpe, loc) =>
       Expr.Cst(cst, subst(tpe), loc)
 
+    case Expr.NativeImport(spec, tpe, eff, loc) =>
+      Expr.NativeImport(spec, subst(tpe), subst(eff), loc)
+    case Expr.WasmImport(spec, tpe, eff, loc) =>
+      Expr.WasmImport(spec, subst(tpe), subst(eff), loc)
+
     case Expr.Hole(sym, scp, tpe, eff, loc) =>
       val t = subst(tpe)
       Expr.Hole(sym, scp, t, subst(eff), loc)

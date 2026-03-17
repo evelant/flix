@@ -92,6 +92,13 @@ object Simplifier {
       val t = visitType(tpe)
       SimplifiedAst.Expr.Cst(cst, t, loc)
 
+    case MonoAst.Expr.NativeImport(spec, tpe, eff, loc) =>
+      val t = visitType(tpe)
+      SimplifiedAst.Expr.NativeImport(spec, t, simplifyEffect(eff), loc)
+    case MonoAst.Expr.WasmImport(spec, tpe, eff, loc) =>
+      val t = visitType(tpe)
+      SimplifiedAst.Expr.WasmImport(spec, t, simplifyEffect(eff), loc)
+
     case MonoAst.Expr.Lambda(fparam, exp, tpe, loc) =>
       val p = visitFormalParam(fparam)
       val e = visitExp(exp)

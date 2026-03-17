@@ -113,6 +113,13 @@ object Dependencies {
     case Expr.Cst(_, tpe, _) =>
       visitType(tpe)
 
+    case Expr.NativeImport(_, tpe, eff, _) =>
+      visitType(tpe)
+      visitType(eff)
+    case Expr.WasmImport(_, tpe, eff, _) =>
+      visitType(tpe)
+      visitType(eff)
+
     case Expr.Var(_, tpe, _) =>
       visitType(tpe)
 

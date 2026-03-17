@@ -19,7 +19,7 @@ package ca.uwaterloo.flix.language.phase
 import ca.uwaterloo.flix.TestUtils
 import ca.uwaterloo.flix.language.ast.shared.SecurityContext
 import ca.uwaterloo.flix.language.errors.{EntryPointError, SafetyError}
-import ca.uwaterloo.flix.language.errors.SafetyError.{Forbidden, IllegalCatchType, IllegalMethodEffect, IllegalNegativelyBoundWildCard, IllegalNonPositivelyBoundVar, IllegalPatternInBodyAtom, IllegalRelationalUseOfLatticeVar, IllegalThrowType}
+import ca.uwaterloo.flix.language.errors.SafetyError.{ConflictingWasmImportSignature, Forbidden, IllegalCatchType, IllegalMethodEffect, IllegalNativeImportType, IllegalNegativelyBoundWildCard, IllegalNonPositivelyBoundVar, IllegalPatternInBodyAtom, IllegalRelationalUseOfLatticeVar, IllegalThrowType, IllegalWasmImportType, MalformedWasmImportInterface, NativeImportNotSupportedOnTarget, NativeImportTypeParametersNotSupported, WasmImportNotSupportedOnTarget, WasmImportTypeParametersNotSupported}
 import ca.uwaterloo.flix.util.{CompilationTarget, Options, StdlibProfile}
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -27,6 +27,7 @@ class TestSafety extends AnyFunSuite with TestUtils {
 
   val DefaultOptions: Options = Options.TestWithLibMin
   val LlvmPortableOptions: Options = Options.TestWithLibAll.copy(target = CompilationTarget.LlvmNative, stdlibProfile = StdlibProfile.Portable)
+  val WasmPortableOptions: Options = Options.TestWithLibAll.copy(target = CompilationTarget.LlvmWasm, stdlibProfile = StdlibProfile.Portable)
 
   test("IllegalCatchType.01") {
     val input =
@@ -91,6 +92,89 @@ class TestSafety extends AnyFunSuite with TestUtils {
       """.stripMargin
     val result = check(input, Options.TestWithLibMin)
     expectError[IllegalThrowType](result)
+  }
+
+  test("NativeImportNotSupportedOnTarget.01") {
+    val input =
+      """
+        |extern native(symbol = "abs")
+        |def cAbs(x: Int32): Int32
+      """.stripMargin
+    val result = check(input, Options.TestWithLibAll)
+    expectError[NativeImportNotSupportedOnTarget](result)
+  }
+
+  test("IllegalNativeImportType.01") {
+    val input =
+      """
+        |extern native(symbol = "strlen")
+        |def strlen(s: String): Int64
+      """.stripMargin
+    val result = check(input, LlvmPortableOptions)
+    expectError[IllegalNativeImportType](result)
+  }
+
+  test("NativeImportTypeParametersNotSupported.01") {
+    val input =
+      """
+        |extern native(symbol = "id")
+        |def id[a](x: a): a
+      """.stripMargin
+    val result = check(input, LlvmPortableOptions)
+    expectError[NativeImportTypeParametersNotSupported](result)
+  }
+
+  test("WasmImportNotSupportedOnTarget.01") {
+    val input =
+      """
+        |extern wasm(interface = "host:math/basic@0.1.0", func = "cos")
+        |def cos(x: Float64): Float64
+      """.stripMargin
+    val result = check(input, Options.TestWithLibAll)
+    expectError[WasmImportNotSupportedOnTarget](result)
+  }
+
+  test("WasmImportTypeParametersNotSupported.01") {
+    val input =
+      """
+        |extern wasm(interface = "host:math/basic@0.1.0", func = "id")
+        |def id[a](x: a): a
+      """.stripMargin
+    val result = check(input, WasmPortableOptions)
+    expectError[WasmImportTypeParametersNotSupported](result)
+  }
+
+  test("IllegalWasmImportType.01") {
+    val input =
+      """
+        |extern wasm(interface = "host:math/basic@0.1.0", func = "strlen")
+        |def strlen(s: String): Int64
+      """.stripMargin
+    val result = check(input, WasmPortableOptions)
+    expectError[IllegalWasmImportType](result)
+  }
+
+  test("MalformedWasmImportInterface.01") {
+    val input =
+      """
+        |extern wasm(interface = "bad-interface", func = "cos")
+        |def cos(x: Float64): Float64
+      """.stripMargin
+    val result = check(input, WasmPortableOptions)
+    expectError[MalformedWasmImportInterface](result)
+  }
+
+  test("ConflictingWasmImportSignature.01") {
+    val input =
+      """
+        |extern wasm(interface = "host:math/basic@0.1.0", func = "cos")
+        |def cos64(x: Float64): Float64
+        |
+        |extern wasm(interface = "host:math/basic@0.1.0", func = "cos")
+        |def cos32(x: Float32): Float32
+      """.stripMargin
+    val result = check(input, WasmPortableOptions)
+    expectError[ConflictingWasmImportSignature](result)
   }
 
   test("UnexpectedBodyAtomPattern.01") {
@@ -862,7 +946,35 @@ class TestSafety extends AnyFunSuite with TestUtils {
     expectSuccess(result)
   }
 
-  test("IllegalPortableExportFunction.13") {
+  test("PortableExportFunction.13") {
+    val input =
+      """
+        |mod Mod {
+        |    @Export
+        |    pub def flip(xs: List[(Int32, String)]): List[(String, Int32)] =
+        |        List.map(pair -> {
+        |            let (n, s) = pair;
+        |            (s, n)
+        |        }, xs)
+        |}
+        |""".stripMargin
+    val result = check(input, LlvmPortableOptions)
+    expectSuccess(result)
+  }
+
+  test("PortableExportFunction.14") {
+    val input =
+      """
+        |mod Mod {
+        |    @Export
+        |    pub def echo(xs: Array[Option[Int32], Static]): Array[Option[Int32], Static] = xs
+        |}
+        |""".stripMargin
+    val result = check(input, LlvmPortableOptions)
+    expectSuccess(result)
+  }
+
+  test("IllegalPortableExportFunction.15") {
     val input =
       """
         |mod Mod { @Export pub def id(x: Char): Char = x }
@@ -871,7 +983,7 @@ class TestSafety extends AnyFunSuite with TestUtils {
     expectError[EntryPointError.IllegalExportType](result)
   }
 
-  test("IllegalPortableExportFunction.14") {
+  test("IllegalPortableExportFunction.16") {
     val input =
       """
         |mod Mod { @Export pub def id(x: {ch = Char}): {ch = Char} = x }

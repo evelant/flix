@@ -21,7 +21,7 @@ import ca.uwaterloo.flix.language.ast.shared.{AvailableClasses, Input, SecurityC
 import ca.uwaterloo.flix.language.dbg.AstPrinter
 import ca.uwaterloo.flix.language.fmt.FormatOptions
 import ca.uwaterloo.flix.language.phase.*
-import ca.uwaterloo.flix.language.phase.llvm.{LlvmBackend, LlvmExportSdkWriter, LlvmExportWriter, LlvmNativeDriver, LlvmWasmBindingWriter, LlvmWasmDriver, LlvmWasmExportWriter, LlvmWasmTypedExportsWriter, LlvmWriter}
+import ca.uwaterloo.flix.language.phase.llvm.{LlvmBackend, LlvmExportSdkWriter, LlvmExportWriter, LlvmNativeDriver, LlvmWasmBindingWriter, LlvmWasmDriver, LlvmWasmExportWriter, LlvmWasmImportsWriter, LlvmWasmTypedExportsWriter, LlvmWriter}
 import ca.uwaterloo.flix.language.phase.jvm.{JvmBackend, JvmLoader, JvmLowerer, JvmWriter}
 import ca.uwaterloo.flix.language.phase.monomorph.Specialization
 import ca.uwaterloo.flix.language.phase.optimizer.{LambdaDrop, Optimizer}
@@ -707,7 +707,8 @@ class Flix {
             LlvmWasmExportWriter.run(loweredAst)
             val emitJs = requestedEmits.isEmpty || requestedEmits.contains(EmitKind.Js)
             val typedExports = LlvmWasmTypedExportsWriter.compute(loweredAst)
-            val artifacts = LlvmWasmDriver.run(LlvmWriter.modulePath(flix.options.outputPath), typedExports = typedExports, emitJs = emitJs)
+            val wasmImports = LlvmWasmImportsWriter.compute(loweredAst)
+            val artifacts = LlvmWasmDriver.run(LlvmWriter.modulePath(flix.options.outputPath), typedExports = typedExports, wasmImports = wasmImports, emitJs = emitJs)
             if (emitJs && hasExports) {
               LlvmWasmBindingWriter.run(loweredAst)
             }
@@ -715,6 +716,7 @@ class Flix {
               LlvmExportSdkWriter.packageWasm(
                 entries = LlvmExportSdkWriter.exportEntries(loweredAst),
                 typedEntries = typedExports,
+                wasmImports = wasmImports,
                 typedComponent = artifacts.typedExportComponent.getOrElse(throw new RuntimeException("Missing typed wasm export component for export SDK packaging.")),
                 typedWitDir = artifacts.typedExportWitDir.getOrElse(throw new RuntimeException("Missing typed wasm export WIT directory for export SDK packaging.")),
                 artifactName = flix.options.artifactName,

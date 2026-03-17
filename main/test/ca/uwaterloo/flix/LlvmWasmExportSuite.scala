@@ -71,6 +71,9 @@ class LlvmWasmExportSuite extends AnyFunSuite {
       assert(publicWit.contains("type list-int32 = list<s32>;"))
       assert(publicWit.contains("type array-int32 = list<s32>;"))
       assert(publicWit.contains("type array-string = list<string>;"))
+      assert(publicWit.contains("type list-tuple2-int32-string = list<tuple2-int32-string>;"))
+      assert(publicWit.contains("type list-tuple2-string-int32 = list<tuple2-string-int32>;"))
+      assert(publicWit.contains("type array-option-int32 = list<option-int32>;"))
       assert(publicWit.contains("type list-record-name-string-score-int32 = list<record-name-string-score-int32>;"))
       assert(publicWit.contains("type list-record-label-string-score-int32 = list<record-label-string-score-int32>;"))
       assert(publicWit.contains("type array-record-name-string-score-int32 = list<record-name-string-score-int32>;"))
@@ -180,6 +183,26 @@ class LlvmWasmExportSuite extends AnyFunSuite {
            |        { name: "world", score: 9 },
            |      ]),
            |    `bad echoUserArray: $${JSON.stringify(userArray)}`
+           |  );
+           |
+           |  const flippedPairs = Exports.Api.flipPairs(ctx, [
+           |    [7, "hello"],
+           |    [9, "world"],
+           |  ]);
+           |  assert(
+           |    flippedPairs.tag === "ok" &&
+           |      JSON.stringify(flippedPairs.val) === JSON.stringify([
+           |        ["hello", 7],
+           |        ["world", 9],
+           |      ]),
+           |    `bad flipPairs: $${JSON.stringify(flippedPairs)}`
+           |  );
+           |
+           |  const maybeInts = Exports.Api.echoMaybeInts(ctx, [41, null, 9]);
+           |  assert(
+           |    maybeInts.tag === "ok" &&
+           |      JSON.stringify(maybeInts.val) === JSON.stringify([41, null, 9]),
+           |    `bad echoMaybeInts: $${JSON.stringify(maybeInts)}`
            |  );
            |
            |  const susp = Exports.Api.suspendEcho(ctx, "hello");
@@ -386,6 +409,36 @@ class LlvmWasmExportSuite extends AnyFunSuite {
            |                && v[1].name == "world"
            |                && v[1].score == 9 => {}
            |        other => bail!("bad echoUserArray result: {:?}", other),
+           |    }
+           |
+           |    let pairs = vec![
+           |        api::Tuple2Int32String { f0: 7, f1: "hello".to_string() },
+           |        api::Tuple2Int32String { f0: 9, f1: "world".to_string() },
+           |    ];
+           |    match ctx_api.call_api_flippairs(&mut store, ctx, &pairs)? {
+           |        api::ExecListTuple2StringInt32::Ok(v)
+           |            if v.len() == 2
+           |                && v[0].f0 == "hello"
+           |                && v[0].f1 == 7
+           |                && v[1].f0 == "world"
+           |                && v[1].f1 == 9 => {}
+           |        other => bail!("bad flipPairs result: {:?}", other),
+           |    }
+           |
+           |    let maybe_ints = vec![
+           |        api::OptionInt32 { is_some: true, val: 41 },
+           |        api::OptionInt32 { is_some: false, val: 0 },
+           |        api::OptionInt32 { is_some: true, val: 9 },
+           |    ];
+           |    match ctx_api.call_api_echomaybeints(&mut store, ctx, &maybe_ints)? {
+           |        api::ExecArrayOptionInt32::Ok(v)
+           |            if v.len() == 3
+           |                && v[0].is_some
+           |                && v[0].val == 41
+           |                && !v[1].is_some
+           |                && v[2].is_some
+           |                && v[2].val == 9 => {}
+           |        other => bail!("bad echoMaybeInts result: {:?}", other),
            |    }
            |
            |    let susp = match ctx_api.call_api_suspendecho(&mut store, ctx, "hello")? {

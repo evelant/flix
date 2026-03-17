@@ -39,6 +39,8 @@ object TypedAstOps {
     */
   def sigSymsOf(exp0: Expr): Set[Symbol.SigSym] = exp0 match {
     case Expr.Cst(_, _, _) => Set.empty
+    case Expr.NativeImport(_, _, _, _) => Set.empty
+    case Expr.WasmImport(_, _, _, _) => Set.empty
     case Expr.Var(_, _, _) => Set.empty
     case Expr.Hole(_, _, _, _, _) => Set.empty
     case Expr.HoleWithExp(exp, _, _, _, _) => sigSymsOf(exp)
@@ -153,6 +155,8 @@ object TypedAstOps {
     */
   def freeVars(exp0: Expr): Map[Symbol.VarSym, Type] = exp0 match {
     case Expr.Cst(_, _, _) => Map.empty
+    case Expr.NativeImport(_, _, _, _) => Map.empty
+    case Expr.WasmImport(_, _, _, _) => Map.empty
 
     case Expr.Var(sym, tpe, _) => Map(sym -> tpe)
 

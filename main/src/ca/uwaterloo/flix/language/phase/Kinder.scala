@@ -412,6 +412,12 @@ object Kinder {
       case ResolvedAst.Expr.Cst(cst, loc) =>
         KindedAst.Expr.Cst(cst, loc)
 
+      case ResolvedAst.Expr.NativeImport(spec, loc) =>
+        KindedAst.Expr.NativeImport(spec, loc)
+
+      case ResolvedAst.Expr.WasmImport(spec, loc) =>
+        KindedAst.Expr.WasmImport(spec, loc)
+
       case ResolvedAst.Expr.ApplyClo(exp10, exp20, loc) =>
         val exp1 = visitExp(exp10, kenv0, root)
         val exp2 = visitExp(exp20, kenv0, root)

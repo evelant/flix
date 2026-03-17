@@ -14,6 +14,7 @@ import ca.uwaterloo.flix.util.{CompilationTarget, JvmUtils, ParOps, StdlibProfil
 import java.math.BigInteger
 import java.util.concurrent.ConcurrentLinkedQueue
 import scala.annotation.tailrec
+import scala.collection.mutable
 import scala.jdk.CollectionConverters.CollectionHasAsScala
 
 /** Checks safety and well-formedness not captured by the type system. */
@@ -56,6 +57,36 @@ object Safety {
     implicit val renv: RigidityEnv = RigidityEnv.ofRigidVars(defn.spec.tparams.map(_.sym))
     checkSpecPermissions(defn.spec)
     checkSpecPortable(defn.spec)
+    defn.exp match {
+      case Expr.NativeImport(_, _, _, loc) =>
+        if (defn.spec.tparams.nonEmpty) {
+          sctx.errors.add(SafetyError.NativeImportTypeParametersNotSupported(loc))
+        }
+        defn.spec.fparams.foreach { fp =>
+          if (!DirectImportAbi.supportsParam(fp.tpe)) {
+            sctx.errors.add(SafetyError.IllegalNativeImportType(fp.tpe, fp.loc))
+          }
+        }
+        if (!DirectImportAbi.supportsResult(defn.spec.retTpe)) {
+          sctx.errors.add(SafetyError.IllegalNativeImportType(defn.spec.retTpe, defn.spec.retTpe.loc))
+        }
+      case Expr.WasmImport(spec, _, _, loc) =>
+        if (defn.spec.tparams.nonEmpty) {
+          sctx.errors.add(SafetyError.WasmImportTypeParametersNotSupported(loc))
+        }
+        if (WasmImportInterface.parse(spec.interface).isEmpty || !WasmImportInterface.isValidFuncName(spec.func)) {
+          sctx.errors.add(SafetyError.MalformedWasmImportInterface(spec.interface, loc))
+        }
+        defn.spec.fparams.foreach { fp =>
+          if (!DirectImportAbi.supportsParam(fp.tpe)) {
+            sctx.errors.add(SafetyError.IllegalWasmImportType(fp.tpe, fp.loc))
+          }
+        }
+        if (!DirectImportAbi.supportsResult(defn.spec.retTpe)) {
+          sctx.errors.add(SafetyError.IllegalWasmImportType(defn.spec.retTpe, defn.spec.retTpe.loc))
+        }
+      case _ => ()
+    }
     visitExp(defn.exp)
     defn
   }
@@ -111,6 +142,18 @@ object Safety {
     exp0 match {
     case Expr.Cst(_, _, _) =>
       ()
+
+    case Expr.NativeImport(_, _, _, loc) =>
+      checkPermissions(loc.security, loc)
+      if (flix.options.target != CompilationTarget.LlvmNative) {
+        sctx.errors.add(SafetyError.NativeImportNotSupportedOnTarget(flix.options.target, loc))
+      }
+
+    case Expr.WasmImport(_, _, _, loc) =>
+      checkPermissions(loc.security, loc)
+      if (flix.options.target != CompilationTarget.LlvmWasm) {
+        sctx.errors.add(SafetyError.WasmImportNotSupportedOnTarget(flix.options.target, loc))
+      }
 
     case Expr.Var(_, _, _) =>
       ()
@@ -544,6 +587,7 @@ object Safety {
     * e.g. in type aliases, enums, structs, and effect op signatures.
     */
   private def checkRootPortable(root: Root)(implicit sctx: SharedContext, flix: Flix): Unit = {
+    checkWasmImportConflicts(root)
     if (!isPortableProfile) return
 
     root.typeAliases.values.foreach(ta => checkPortableType(ta.tpe))
@@ -569,6 +613,29 @@ object Safety {
 
     root.effects.values.foreach { eff =>
       eff.ops.foreach(op => checkSpecPortable(op.spec))
+    }
+  }
+
+  /**
+    * Checks that a program does not bind the same imported wasm function under conflicting signatures.
+    */
+  private def checkWasmImportConflicts(root: Root)(implicit sctx: SharedContext): Unit = {
+    val seen = mutable.Map.empty[(String, String), (DirectImportAbi.Signature, SourceLocation)]
+
+    root.defs.values.foreach {
+      case defn if defn.exp.isInstanceOf[Expr.WasmImport] =>
+        val spec = defn.exp.asInstanceOf[Expr.WasmImport].spec
+        DirectImportAbi.signatureOf(defn.spec.fparams.map(_.tpe), defn.spec.retTpe).foreach { sig =>
+          seen.get((spec.interface, spec.func)) match {
+            case None =>
+              seen.put((spec.interface, spec.func), (sig, defn.exp.loc))
+            case Some((existingSig, existingLoc)) if existingSig != sig =>
+              sctx.errors.add(SafetyError.ConflictingWasmImportSignature(spec.interface, spec.func, defn.exp.loc))
+              sctx.errors.add(SafetyError.ConflictingWasmImportSignature(spec.interface, spec.func, existingLoc))
+            case _ => ()
+          }
+        }
+      case _ => ()
     }
   }
 

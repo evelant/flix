@@ -99,6 +99,9 @@ object TypedAst {
       def eff: Type = Type.Pure
     }
 
+    case class NativeImport(spec: NativeImportSpec, tpe: Type, eff: Type, loc: SourceLocation) extends Expr
+    case class WasmImport(spec: WasmImportSpec, tpe: Type, eff: Type, loc: SourceLocation) extends Expr
+
     case class Var(sym: Symbol.VarSym, tpe: Type, loc: SourceLocation) extends Expr {
       def eff: Type = Type.Pure
     }
