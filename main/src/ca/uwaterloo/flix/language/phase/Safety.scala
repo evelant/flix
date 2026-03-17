@@ -63,11 +63,11 @@ object Safety {
           sctx.errors.add(SafetyError.NativeImportTypeParametersNotSupported(loc))
         }
         defn.spec.fparams.foreach { fp =>
-          if (!DirectImportAbi.supportsParam(fp.tpe)) {
+          if (!NativeImportAbi.supportsParam(fp.tpe)) {
             sctx.errors.add(SafetyError.IllegalNativeImportType(fp.tpe, fp.loc))
           }
         }
-        if (!DirectImportAbi.supportsResult(defn.spec.retTpe)) {
+        if (!NativeImportAbi.supportsResult(defn.spec.retTpe)) {
           sctx.errors.add(SafetyError.IllegalNativeImportType(defn.spec.retTpe, defn.spec.retTpe.loc))
         }
       case Expr.WasmImport(spec, _, _, loc) =>
@@ -78,11 +78,11 @@ object Safety {
           sctx.errors.add(SafetyError.MalformedWasmImportInterface(spec.interface, loc))
         }
         defn.spec.fparams.foreach { fp =>
-          if (!DirectImportAbi.supportsParam(fp.tpe)) {
+          if (!WasmImportAbi.supportsParam(fp.tpe)) {
             sctx.errors.add(SafetyError.IllegalWasmImportType(fp.tpe, fp.loc))
           }
         }
-        if (!DirectImportAbi.supportsResult(defn.spec.retTpe)) {
+        if (!WasmImportAbi.supportsResult(defn.spec.retTpe)) {
           sctx.errors.add(SafetyError.IllegalWasmImportType(defn.spec.retTpe, defn.spec.retTpe.loc))
         }
       case _ => ()
@@ -620,12 +620,12 @@ object Safety {
     * Checks that a program does not bind the same imported wasm function under conflicting signatures.
     */
   private def checkWasmImportConflicts(root: Root)(implicit sctx: SharedContext): Unit = {
-    val seen = mutable.Map.empty[(String, String), (DirectImportAbi.Signature, SourceLocation)]
+    val seen = mutable.Map.empty[(String, String), (WasmImportAbi.Signature, SourceLocation)]
 
     root.defs.values.foreach {
       case defn if defn.exp.isInstanceOf[Expr.WasmImport] =>
         val spec = defn.exp.asInstanceOf[Expr.WasmImport].spec
-        DirectImportAbi.signatureOf(defn.spec.fparams.map(_.tpe), defn.spec.retTpe).foreach { sig =>
+        WasmImportAbi.signatureOf(defn.spec.fparams.map(_.tpe), defn.spec.retTpe).foreach { sig =>
           seen.get((spec.interface, spec.func)) match {
             case None =>
               seen.put((spec.interface, spec.func), (sig, defn.exp.loc))

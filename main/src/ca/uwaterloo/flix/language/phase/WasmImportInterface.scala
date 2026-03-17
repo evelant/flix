@@ -51,4 +51,15 @@ object WasmImportInterface {
     case c if c.isLetterOrDigit => c
     case _ => '_'
   }
+
+  def jsName(s: String): String = {
+    val parts = s.split("-").toList.filter(_.nonEmpty)
+    parts match {
+      case Nil => throw new IllegalStateException("empty wasm import name")
+      case head :: tail => head + tail.map(capitalize).mkString
+    }
+  }
+
+  private def capitalize(s: String): String =
+    if (s.isEmpty) s else s"${s.head.toUpper}${s.tail}"
 }

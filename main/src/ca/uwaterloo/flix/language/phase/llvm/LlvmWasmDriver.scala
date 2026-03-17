@@ -466,7 +466,7 @@ object LlvmWasmDriver {
         body.append("  impl = next ?? {};\n")
         body.append("}\n\n")
         methods.foreach { func =>
-          body.append(s"export function ${WasmImportInterface.sanitize(func)}(...args) {\n")
+          body.append(s"export function ${WasmImportInterface.jsName(func)}(...args) {\n")
           body.append(s"""  const fn = impl[${renderJsString(func)}];\n""")
           body.append("  if (typeof fn !== \"function\") {\n")
           body.append(s"""    throw new Error("Missing JS host implementation for ${escapeJsString(id.qualifiedInterface)}#${escapeJsString(func)}");\n""")

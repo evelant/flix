@@ -147,8 +147,8 @@ class TestSafety extends AnyFunSuite with TestUtils {
   test("IllegalWasmImportType.01") {
     val input =
       """
-        |extern wasm(interface = "host:math/basic@0.1.0", func = "strlen")
-        |def strlen(s: String): Int64
+        |extern wasm(interface = "host:math/basic@0.1.0", func = "upper")
+        |def upper(c: Char): Char
       """.stripMargin
     val result = check(input, WasmPortableOptions)
     expectError[IllegalWasmImportType](result)

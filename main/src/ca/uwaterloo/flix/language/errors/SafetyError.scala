@@ -245,24 +245,29 @@ object SafetyError {
   case class IllegalWasmImportType(tpe: Type, loc: SourceLocation)(implicit flix: Flix) extends SafetyError {
     def code: ErrorCode = ErrorCode.E6028
 
-    def summary: String = "`extern wasm` uses a type that is not supported by the v0 direct wasm ABI."
+    def summary: String = "`extern wasm` uses a type that is not supported by the v0 direct wasm import ABI."
 
     def message(fmt: Formatter)(implicit root: Option[TypedAst.Root]): String = {
       import fmt.*
-      s""">> `extern wasm` uses a type that is not supported by the v0 direct wasm ABI.
+      s""">> `extern wasm` uses a type that is not supported by the v0 direct wasm import ABI.
          |
          |${highlight(loc, "unsupported type", fmt)}
          |
          |Type: ${red(FormatType.formatType(tpe))}
          |
-         |${underline("Explanation:")} The v0 direct wasm import path only supports:
+         |${underline("Explanation:")} The v0 direct wasm import path supports the same portable
+         |sync data shapes as the current export ABI:
          |
          |  - Unit
          |  - Bool
          |  - Int8 / Int16 / Int32 / Int64
          |  - Float32 / Float64
+         |  - String / Bytes
+         |  - List[T] / Array[T, Static]
+         |  - Tuples, closed records, Option[T], and Result[Ok, Err]
          |
-         |Strings, lists, records, arrays, and other aggregates belong in a richer later ABI.
+         |Every nested field type must itself be portable and monomorphic.
+         |Open records, arbitrary ADTs, and polymorphic signatures are still excluded.
          |""".stripMargin
     }
   }

@@ -31,7 +31,17 @@ object ErasedAst {
                   entryPoints: Set[Symbol.DefnSym],
                   sources: Map[Source, SourceLocation])
 
-  case class Def(ann: Annotations, mod: Modifiers, sym: Symbol.DefnSym, cparams: List[FormalParam], fparams: List[FormalParam], exp: Expr, tpe: SimpleType, unboxedType: UnboxedType, exportedSignature: Option[ExportAbi.Signature], loc: SourceLocation) {
+  case class Def(ann: Annotations,
+                 mod: Modifiers,
+                 sym: Symbol.DefnSym,
+                 cparams: List[FormalParam],
+                 fparams: List[FormalParam],
+                 exp: Expr,
+                 tpe: SimpleType,
+                 unboxedType: UnboxedType,
+                 exportedSignature: Option[ExportAbi.Signature],
+                 wasmImportSignature: Option[ExportAbi.Signature],
+                 loc: SourceLocation) {
     val arrowType: SimpleType.Arrow = SimpleType.mkArrow(fparams.map(_.tpe), tpe)
   }
 

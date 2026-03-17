@@ -18,7 +18,7 @@ package ca.uwaterloo.flix.language.phase
 
 import ca.uwaterloo.flix.language.ast.{SimpleType, Type, TypeConstructor}
 
-object DirectImportAbi {
+object NativeImportAbi {
 
   sealed trait AbiType
 

@@ -17,7 +17,7 @@
 package ca.uwaterloo.flix.language.phase.llvm
 
 import ca.uwaterloo.flix.language.ast.{AtomicOp, LoweredAst, WasmImportSpec}
-import ca.uwaterloo.flix.language.phase.{DirectImportAbi, WasmImportInterface}
+import ca.uwaterloo.flix.language.phase.{ExportAbi, WasmImportAbi, WasmImportInterface}
 
 import scala.collection.mutable
 
@@ -28,7 +28,7 @@ object LlvmWasmImportsWriter {
 
   case class Entry(spec: WasmImportSpec,
                    interfaceId: WasmImportInterface.Id,
-                   signature: DirectImportAbi.Signature)
+                   signature: WasmImportAbi.Signature)
 
   def compute(root: LoweredAst.Root): List[Entry] = {
     val entries = mutable.LinkedHashMap.empty[(String, String), Entry]
@@ -38,9 +38,7 @@ object LlvmWasmImportsWriter {
         val interfaceId = WasmImportInterface.parse(body.spec.interface).getOrElse {
           throw new IllegalStateException(s"Malformed lowered wasm import interface '${body.spec.interface}' for '${defn.sym}'.")
         }
-        val sig = DirectImportAbi.signatureOf(defn.fparams.map(_.tpe), body.resultTpe).getOrElse {
-          throw new IllegalStateException(s"Unsupported lowered wasm import signature for '${defn.sym}'.")
-        }
+        val sig = wasmImportSignatureOf(defn)
         entries.getOrElseUpdate((body.spec.interface, body.spec.func), Entry(body.spec, interfaceId, sig))
       }
     }
@@ -71,6 +69,7 @@ object LlvmWasmImportsWriter {
           .toList
           .sortBy(_._1)
           .map { case (ifaceName, ifaceEntries) =>
+            val aggregateDefs = WasmComponentAbi.aggregateTypes(ifaceEntries.map(_.signature)).map(WasmComponentAbi.renderAggregateTypeDef(_)).mkString("\n")
             val methods = ifaceEntries
               .groupBy(_.spec.func)
               .toList
@@ -81,7 +80,7 @@ object LlvmWasmImportsWriter {
               }
               .mkString("\n")
             s"""interface $ifaceName {
-$methods
+${if (aggregateDefs.nonEmpty) aggregateDefs + (if (methods.nonEmpty) "\n" else "") else ""}$methods
 }"""
           }
           .mkString("\n\n")
@@ -92,33 +91,30 @@ $methods
     }.toMap
   }
 
-  private case class Body(spec: WasmImportSpec, resultTpe: ca.uwaterloo.flix.language.ast.SimpleType)
+  private case class Body(spec: WasmImportSpec)
 
   private def extractBody(exp0: LoweredAst.Expr): Option[Body] = exp0 match {
     case LoweredAst.Expr.WasmImport(spec, tpe, _, _) =>
-      Some(Body(spec, tpe))
+      Some(Body(spec))
     case LoweredAst.Expr.ApplyAtomic(AtomicOp.Box, List(LoweredAst.Expr.WasmImport(spec, tpe, _, _)), _, _, _, _) =>
-      Some(Body(spec, tpe))
+      Some(Body(spec))
     case _ =>
       None
   }
 
-  private def renderParams(params: List[DirectImportAbi.AbiType]): String =
+  private def wasmImportSignatureOf(defn: LoweredAst.Def): WasmImportAbi.Signature =
+    defn.wasmImportSignature.getOrElse {
+      throw new IllegalStateException(s"Missing portable wasm import signature for '${defn.sym}'.")
+    }
+
+  private def renderParams(params: List[ExportAbi.AbiType]): String =
     params.zipWithIndex.map { case (tpe, i) => s"p$i: ${renderAbiType(tpe)}" }.mkString(", ")
 
-  private def renderResult(result: DirectImportAbi.AbiType): String = result match {
-    case DirectImportAbi.AbiType.Unit => ""
+  private def renderResult(result: ExportAbi.AbiType): String = result match {
+    case ExportAbi.AbiType.Unit => " -> tuple<>"
     case other => s" -> ${renderAbiType(other)}"
   }
 
-  private def renderAbiType(tpe: DirectImportAbi.AbiType): String = tpe match {
-    case DirectImportAbi.AbiType.Unit => "tuple<>"
-    case DirectImportAbi.AbiType.Bool => "bool"
-    case DirectImportAbi.AbiType.Int8 => "s8"
-    case DirectImportAbi.AbiType.Int16 => "s16"
-    case DirectImportAbi.AbiType.Int32 => "s32"
-    case DirectImportAbi.AbiType.Int64 => "s64"
-    case DirectImportAbi.AbiType.Float32 => "f32"
-    case DirectImportAbi.AbiType.Float64 => "f64"
-  }
+  private def renderAbiType(tpe: ExportAbi.AbiType): String =
+    WasmComponentAbi.witTypeOf(tpe)
 }

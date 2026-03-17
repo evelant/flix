@@ -58,7 +58,11 @@ object Eraser {
       val exportedSignature =
         if (ann.isExport) ExportAbi.portableSignature(fparams.map(_.tpe), originalTpe.tpe)
         else None
-      ErasedAst.Def(ann, mod, sym, cparams.map(visitParam), fparams.map(visitParam), e, box(tpe), ErasedAst.UnboxedType(erase(originalTpe.tpe)), exportedSignature, loc)
+      val wasmImportSignature = exp match {
+        case ReducedAst.Expr.WasmImport(_, _, _, _) => ExportAbi.portableSignature(fparams.map(_.tpe), originalTpe.tpe)
+        case _ => None
+      }
+      ErasedAst.Def(ann, mod, sym, cparams.map(visitParam), fparams.map(visitParam), e, box(tpe), ErasedAst.UnboxedType(erase(originalTpe.tpe)), exportedSignature, wasmImportSignature, loc)
   }
 
   private def specializeEnums(specializations: List[(Symbol.EnumSym, List[SimpleType], Symbol.EnumSym)])(implicit root: ReducedAst.Root, flix: Flix): Map[Symbol.EnumSym, ErasedAst.Enum] = {

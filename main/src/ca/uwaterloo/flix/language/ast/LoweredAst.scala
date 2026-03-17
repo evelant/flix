@@ -51,6 +51,7 @@ object LoweredAst {
                  tpe: SimpleType,
                  unboxedType: UnboxedType,
                  exportedSignature: Option[ExportAbi.Signature],
+                 wasmImportSignature: Option[ExportAbi.Signature],
                  loc: SourceLocation) {
     val arrowType: SimpleType.Arrow = SimpleType.mkArrow(fparams.map(_.tpe), tpe)
   }
