@@ -2895,300 +2895,13 @@ object GenExpression {
 	            mv.visitLabel(after)
 
 	          case IoOp.ProcessStdinWrite =>
-	            import BytecodeInstructions.*
-	            BytecodeInstructions.addLoc(loc)
-
-	            val SimpleType.Tuple(retElmTypes) = tpe
-	            val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
-
-	            val SimpleType.Tuple(argElmTypes) = exp.tpe
-	            val argTupleType = BackendObjType.Tuple(argElmTypes.map(BackendType.toBackendType))
-
-	            val jGlobal = BackendObjType.Global.jvmName
-	            val jProcess = JvmName.ofClass(classOf[java.lang.Process])
-	            val processTpe = BackendType.Reference(BackendObjType.Native(jProcess))
-	            val jOutputStream = JvmName.ofClass(classOf[java.io.OutputStream])
-	            val outputStreamTpe = BackendType.Reference(BackendObjType.Native(jOutputStream))
-	            val jIOException = JvmName.ofClass(classOf[java.io.IOException])
-
-	            // Locals.
-	            val idSlot = 2140
-	            val bufSlot = 2142
-	            val lenSlot = 2143
-	            val exSlot = 2144
-	            val procSlot = 2145
-
-	            // Extract (processId, buffer) from the tuple argument.
-	            compileExpr(exp) // tuple
-	            DUP() // tuple, tuple
-	            GETFIELD(argTupleType.IndexField(0)) // tuple, id
-	            mv.visitVarInsn(LSTORE, idSlot) // tuple
-	            GETFIELD(argTupleType.IndexField(1)) // buffer
-	            ASTORE(bufSlot)
-
-	            // proc = Global.getProcess(id)
-	            LLOAD(idSlot)
-	            INVOKESTATIC(jGlobal, "getProcess", mkDescriptor(BackendType.Int64)(processTpe))
-	            ASTORE(procSlot)
-
-	            val hasProc = new Label()
-	            val after = new Label()
-	            ALOAD(procSlot)
-	            mv.visitJumpInsn(IFNONNULL, hasProc)
-
-	            // Return (false, 0, "invalid process handle.")
-	            NEW(retTupleType.jvmName)
-	            DUP()
-	            pushBool(false)
-	            ICONST_0()
-	            pushString("invalid process handle.")
-	            INVOKESPECIAL(retTupleType.Constructor)
-	            mv.visitJumpInsn(GOTO, after)
-
-	            mv.visitLabel(hasProc)
-
-	            // Try-catch around process I/O.
-	            val tryStart = new Label()
-	            val tryEnd = new Label()
-	            val handlerStart = new Label()
-	            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, jIOException.toInternalName)
-
-	            mv.visitLabel(tryStart)
-	            // proc.getOutputStream().write(buffer)
-	            ALOAD(procSlot)
-	            INVOKEVIRTUAL(jProcess, "getOutputStream", mkDescriptor()(outputStreamTpe))
-	            ALOAD(bufSlot)
-	            INVOKEVIRTUAL(jOutputStream, "write", mkDescriptor(BackendType.Array(BackendType.Int8))(VoidableType.Void))
-
-	            // len = buffer.length
-	            ALOAD(bufSlot)
-	            ARRAYLENGTH()
-	            mv.visitVarInsn(ISTORE, lenSlot)
-
-	            // Return (true, len, "")
-	            NEW(retTupleType.jvmName)
-	            DUP()
-	            pushBool(true)
-	            ILOAD(lenSlot)
-	            pushString("")
-	            INVOKESPECIAL(retTupleType.Constructor)
-	            mv.visitLabel(tryEnd)
-	            mv.visitJumpInsn(GOTO, after)
-
-	            mv.visitLabel(handlerStart)
-	            ASTORE(exSlot)
-	            NEW(retTupleType.jvmName)
-	            DUP()
-	            pushBool(false)
-	            ICONST_0()
-	            ALOAD(exSlot)
-	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
-	            INVOKESPECIAL(retTupleType.Constructor)
-	            mv.visitJumpInsn(GOTO, after)
-
-	            mv.visitLabel(after)
+	            compileProcessStdinWrite(exp, tpe, loc)
 
 	          case IoOp.ProcessStdoutRead =>
-	            import BytecodeInstructions.*
-	            BytecodeInstructions.addLoc(loc)
-
-	            val SimpleType.Tuple(retElmTypes) = tpe
-	            val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
-
-	            val SimpleType.Tuple(argElmTypes) = exp.tpe
-	            val argTupleType = BackendObjType.Tuple(argElmTypes.map(BackendType.toBackendType))
-
-	            val jGlobal = BackendObjType.Global.jvmName
-	            val jProcess = JvmName.ofClass(classOf[java.lang.Process])
-	            val processTpe = BackendType.Reference(BackendObjType.Native(jProcess))
-	            val jInputStream = JvmName.ofClass(classOf[java.io.InputStream])
-	            val inputStreamTpe = BackendType.Reference(BackendObjType.Native(jInputStream))
-	            val jIOException = JvmName.ofClass(classOf[java.io.IOException])
-
-	            // Locals.
-	            val idSlot = 2150
-	            val bufSlot = 2152
-	            val numSlot = 2153
-	            val exSlot = 2154
-	            val procSlot = 2155
-
-	            // Extract (processId, buffer) from the tuple argument.
-	            compileExpr(exp) // tuple
-	            DUP() // tuple, tuple
-	            GETFIELD(argTupleType.IndexField(0)) // tuple, id
-	            mv.visitVarInsn(LSTORE, idSlot) // tuple
-	            GETFIELD(argTupleType.IndexField(1)) // buffer
-	            ASTORE(bufSlot)
-
-	            // proc = Global.getProcess(id)
-	            LLOAD(idSlot)
-	            INVOKESTATIC(jGlobal, "getProcess", mkDescriptor(BackendType.Int64)(processTpe))
-	            ASTORE(procSlot)
-
-	            val hasProc = new Label()
-	            val after = new Label()
-	            ALOAD(procSlot)
-	            mv.visitJumpInsn(IFNONNULL, hasProc)
-
-	            // Return (false, 0, "invalid process handle.")
-	            NEW(retTupleType.jvmName)
-	            DUP()
-	            pushBool(false)
-	            ICONST_0()
-	            pushString("invalid process handle.")
-	            INVOKESPECIAL(retTupleType.Constructor)
-	            mv.visitJumpInsn(GOTO, after)
-
-	            mv.visitLabel(hasProc)
-
-	            // Try-catch around process I/O.
-	            val tryStart = new Label()
-	            val tryEnd = new Label()
-	            val handlerStart = new Label()
-	            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, jIOException.toInternalName)
-
-	            mv.visitLabel(tryStart)
-	            // numRead = proc.getInputStream().read(buffer)
-	            ALOAD(procSlot)
-	            INVOKEVIRTUAL(jProcess, "getInputStream", mkDescriptor()(inputStreamTpe))
-	            ALOAD(bufSlot)
-	            INVOKEVIRTUAL(jInputStream, "read", mkDescriptor(BackendType.Array(BackendType.Int8))(BackendType.Int32))
-
-	            // if (numRead == -1) numRead = 0
-	            val notEof = new Label()
-	            val afterEof = new Label()
-	            DUP()
-	            ICONST_M1()
-	            mv.visitJumpInsn(IF_ICMPNE, notEof)
-	            POP()
-	            ICONST_0()
-	            mv.visitLabel(notEof)
-	            mv.visitLabel(afterEof)
-	            mv.visitVarInsn(ISTORE, numSlot)
-
-	            // Return (true, numRead, "")
-	            NEW(retTupleType.jvmName)
-	            DUP()
-	            pushBool(true)
-	            ILOAD(numSlot)
-	            pushString("")
-	            INVOKESPECIAL(retTupleType.Constructor)
-	            mv.visitLabel(tryEnd)
-	            mv.visitJumpInsn(GOTO, after)
-
-	            mv.visitLabel(handlerStart)
-	            ASTORE(exSlot)
-	            NEW(retTupleType.jvmName)
-	            DUP()
-	            pushBool(false)
-	            ICONST_0()
-	            ALOAD(exSlot)
-	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
-	            INVOKESPECIAL(retTupleType.Constructor)
-	            mv.visitJumpInsn(GOTO, after)
-
-	            mv.visitLabel(after)
+	            compileProcessStreamRead(exp, tpe, loc, stderr = false)
 
 	          case IoOp.ProcessStderrRead =>
-	            import BytecodeInstructions.*
-	            BytecodeInstructions.addLoc(loc)
-
-	            val SimpleType.Tuple(retElmTypes) = tpe
-	            val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
-
-	            val SimpleType.Tuple(argElmTypes) = exp.tpe
-	            val argTupleType = BackendObjType.Tuple(argElmTypes.map(BackendType.toBackendType))
-
-	            val jGlobal = BackendObjType.Global.jvmName
-	            val jProcess = JvmName.ofClass(classOf[java.lang.Process])
-	            val processTpe = BackendType.Reference(BackendObjType.Native(jProcess))
-	            val jInputStream = JvmName.ofClass(classOf[java.io.InputStream])
-	            val inputStreamTpe = BackendType.Reference(BackendObjType.Native(jInputStream))
-	            val jIOException = JvmName.ofClass(classOf[java.io.IOException])
-
-	            // Locals.
-	            val idSlot = 2160
-	            val bufSlot = 2162
-	            val numSlot = 2163
-	            val exSlot = 2164
-	            val procSlot = 2165
-
-	            // Extract (processId, buffer) from the tuple argument.
-	            compileExpr(exp) // tuple
-	            DUP() // tuple, tuple
-	            GETFIELD(argTupleType.IndexField(0)) // tuple, id
-	            mv.visitVarInsn(LSTORE, idSlot) // tuple
-	            GETFIELD(argTupleType.IndexField(1)) // buffer
-	            ASTORE(bufSlot)
-
-	            // proc = Global.getProcess(id)
-	            LLOAD(idSlot)
-	            INVOKESTATIC(jGlobal, "getProcess", mkDescriptor(BackendType.Int64)(processTpe))
-	            ASTORE(procSlot)
-
-	            val hasProc = new Label()
-	            val after = new Label()
-	            ALOAD(procSlot)
-	            mv.visitJumpInsn(IFNONNULL, hasProc)
-
-	            // Return (false, 0, "invalid process handle.")
-	            NEW(retTupleType.jvmName)
-	            DUP()
-	            pushBool(false)
-	            ICONST_0()
-	            pushString("invalid process handle.")
-	            INVOKESPECIAL(retTupleType.Constructor)
-	            mv.visitJumpInsn(GOTO, after)
-
-	            mv.visitLabel(hasProc)
-
-	            // Try-catch around process I/O.
-	            val tryStart = new Label()
-	            val tryEnd = new Label()
-	            val handlerStart = new Label()
-	            mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, jIOException.toInternalName)
-
-	            mv.visitLabel(tryStart)
-	            // numRead = proc.getErrorStream().read(buffer)
-	            ALOAD(procSlot)
-	            INVOKEVIRTUAL(jProcess, "getErrorStream", mkDescriptor()(inputStreamTpe))
-	            ALOAD(bufSlot)
-	            INVOKEVIRTUAL(jInputStream, "read", mkDescriptor(BackendType.Array(BackendType.Int8))(BackendType.Int32))
-
-	            // if (numRead == -1) numRead = 0
-	            val notEof = new Label()
-	            val afterEof = new Label()
-	            DUP()
-	            ICONST_M1()
-	            mv.visitJumpInsn(IF_ICMPNE, notEof)
-	            POP()
-	            ICONST_0()
-	            mv.visitLabel(notEof)
-	            mv.visitLabel(afterEof)
-	            mv.visitVarInsn(ISTORE, numSlot)
-
-	            // Return (true, numRead, "")
-	            NEW(retTupleType.jvmName)
-	            DUP()
-	            pushBool(true)
-	            ILOAD(numSlot)
-	            pushString("")
-	            INVOKESPECIAL(retTupleType.Constructor)
-	            mv.visitLabel(tryEnd)
-	            mv.visitJumpInsn(GOTO, after)
-
-	            mv.visitLabel(handlerStart)
-	            ASTORE(exSlot)
-	            NEW(retTupleType.jvmName)
-	            DUP()
-	            pushBool(false)
-	            ICONST_0()
-	            ALOAD(exSlot)
-	            INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
-	            INVOKESPECIAL(retTupleType.Constructor)
-	            mv.visitJumpInsn(GOTO, after)
-
-	            mv.visitLabel(after)
+	            compileProcessStreamRead(exp, tpe, loc, stderr = true)
 
 	          case IoOp.ProcessRelease =>
 	            import BytecodeInstructions.*
@@ -4796,30 +4509,7 @@ object GenExpression {
         val List(exp) = exps
         addLoc(loc)
         compileExpr(exp)
-
-        // If capacity == 0 then use an unbuffered channel (SynchronousQueue),
-        // otherwise use a bounded buffered channel (ArrayBlockingQueue).
-        DUP()
-        ICONST_0()
-        val unbuffered = new Label()
-        val end = new Label()
-        mv.visitJumpInsn(IF_ICMPEQ, unbuffered)
-
-        // Buffered: new ArrayBlockingQueue(capacity)
-        NEW(JvmName.ArrayBlockingQueue)
-        DUP_X1()
-        SWAP()
-        invokeConstructor(JvmName.ArrayBlockingQueue, mkDescriptor(BackendType.Int32)(VoidableType.Void))
-        mv.visitJumpInsn(GOTO, end)
-
-        // Unbuffered: new SynchronousQueue()
-        mv.visitLabel(unbuffered)
-        POP()
-        NEW(JvmName.SynchronousQueue)
-        DUP()
-        invokeConstructor(JvmName.SynchronousQueue, MethodDescriptor.NothingToVoid)
-
-        mv.visitLabel(end)
+        INVOKESTATIC(JvmName.ChannelSupport, "newChannel", mkDescriptor(BackendType.Int32)(BackendType.Object))
 
       case AtomicOp.ChannelGet =>
         import BytecodeInstructions.*
@@ -4829,8 +4519,7 @@ object GenExpression {
 
         addLoc(loc)
         compileExpr(exp)
-        castIfNotPrim(BackendType.toBackendType(exp.tpe))
-        INVOKEINTERFACE(JvmName.BlockingQueue, "take", mkDescriptor()(BackendType.Object))
+        INVOKESTATIC(JvmName.ChannelSupport, "take", mkDescriptor(BackendType.Object)(BackendType.Object))
         CHECKCAST(BackendObjType.Value.jvmName)
         GETFIELD(valueField)
         castIfNotPrim(returnTpe)
@@ -4843,7 +4532,6 @@ object GenExpression {
 
         addLoc(loc)
         compileExpr(chan)
-        castIfNotPrim(BackendType.toBackendType(chan.tpe))
 
         // Box the element value into dev.flix.runtime.Value.
         compileExpr(value)
@@ -4854,11 +4542,83 @@ object GenExpression {
         xSwap(lowerLarge = erasedValueTpe.is64BitWidth, higherLarge = true) // two objects on top of the stack
         PUTFIELD(valueField)
 
-        // Put the boxed element into the queue.
-        INVOKEINTERFACE(JvmName.BlockingQueue, "put", mkDescriptor(BackendType.Object)(VoidableType.Void))
+        // Put the boxed element into the channel runtime.
+        INVOKESTATIC(JvmName.ChannelSupport, "put", mkDescriptor(BackendType.Object, BackendType.Object)(VoidableType.Void))
 
         // Push Unit on the stack.
         GETSTATIC(BackendObjType.Unit.SingletonField)
+
+      case AtomicOp.ChannelSelect =>
+        import BytecodeInstructions.*
+
+        val channels = exps.dropRight(1)
+        val blocking = exps.last
+        val channelArraySlot = 2300
+
+        addLoc(loc)
+        pushInt(channels.length)
+        ANEWARRAY(JvmName.Object)
+        ASTORE(channelArraySlot)
+
+        channels.zipWithIndex.foreach {
+          case (channelExp, index) =>
+            ALOAD(channelArraySlot)
+            pushInt(index)
+            compileExpr(channelExp)
+            mv.visitInsn(AASTORE)
+        }
+
+        ALOAD(channelArraySlot)
+        compileExpr(blocking)
+        INVOKESTATIC(JvmName.ChannelSupport, "select", mkDescriptor(BackendType.Array(BackendType.Object), BackendType.Bool)(BackendType.Int64))
+
+      case AtomicOp.ChannelSelectIndex =>
+        import BytecodeInstructions.*
+        val List(tokenExp) = exps
+
+        addLoc(loc)
+        compileExpr(tokenExp)
+        INVOKESTATIC(JvmName.ChannelSupport, "selectIndex", mkDescriptor(BackendType.Int64)(BackendType.Int32))
+
+      case AtomicOp.ChannelSelectGet =>
+        import BytecodeInstructions.*
+        val List(tokenExp) = exps
+        val returnTpe = BackendType.toBackendType(tpe)
+        val valueField = BackendObjType.Value.fieldFromType(returnTpe)
+
+        addLoc(loc)
+        compileExpr(tokenExp)
+        INVOKESTATIC(JvmName.ChannelSupport, "getSelected", mkDescriptor(BackendType.Int64)(BackendType.Object))
+        CHECKCAST(BackendObjType.Value.jvmName)
+        GETFIELD(valueField)
+        castIfNotPrim(returnTpe)
+
+      case AtomicOp.ReentrantLockNew =>
+        import BytecodeInstructions.*
+        addLoc(loc)
+        INVOKESTATIC(JvmName.LockSupport, "newLock", mkDescriptor()(BackendType.Object))
+
+      case AtomicOp.ReentrantLockLock =>
+        import BytecodeInstructions.*
+        val List(exp) = exps
+        addLoc(loc)
+        compileExpr(exp)
+        INVOKESTATIC(JvmName.LockSupport, "lock", mkDescriptor(BackendType.Object)(VoidableType.Void))
+        GETSTATIC(BackendObjType.Unit.SingletonField)
+
+      case AtomicOp.ReentrantLockTryLock =>
+        import BytecodeInstructions.*
+        val List(exp) = exps
+        addLoc(loc)
+        compileExpr(exp)
+        INVOKESTATIC(JvmName.LockSupport, "tryLock", mkDescriptor(BackendType.Object)(BackendType.Bool))
+
+      case AtomicOp.ReentrantLockUnlock =>
+        import BytecodeInstructions.*
+        val List(exp) = exps
+        addLoc(loc)
+        compileExpr(exp)
+        INVOKESTATIC(JvmName.LockSupport, "unlock", mkDescriptor(BackendType.Object)(BackendType.Bool))
 
       case AtomicOp.Lazy =>
         import BytecodeInstructions.*
@@ -5272,6 +5032,12 @@ object GenExpression {
 
       // Compile the finally block which gets called if an exception is thrown
       mv.visitLabel(finallyBlock)
+      // On exceptional completion, cancel outstanding child tasks before joining them.
+      // This keeps JVM region behavior aligned with LLVM task cancellation semantics.
+      BytecodeInstructions.xLoad(BackendObjType.Region.toTpe, JvmOps.getIndex(offset, ctx.localOffset))
+      mv.visitTypeInsn(CHECKCAST, BackendObjType.Region.jvmName.toInternalName)
+      mv.visitMethodInsn(INVOKEVIRTUAL, BackendObjType.Region.jvmName.toInternalName, BackendObjType.Region.CancelChildrenMethod.name,
+        BackendObjType.Region.CancelChildrenMethod.d.toDescriptor, false)
       // Always exit the region, even on exceptional completion, to join children and run `onExit`.
       // This ensures child exceptions are observed deterministically at region exit.
       BytecodeInstructions.xLoad(BackendObjType.Region.toTpe, JvmOps.getIndex(offset, ctx.localOffset))
@@ -7021,6 +6787,193 @@ object GenExpression {
     mv.visitLabel(handlerStart)
     POP()
     ACONST_NULL()
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(after)
+  }
+
+  private def compileProcessStdinWrite(exp: Expr, tpe: SimpleType, loc: SourceLocation)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    import BytecodeInstructions.*
+    BytecodeInstructions.addLoc(loc)
+
+    val SimpleType.Tuple(retElmTypes) = tpe
+    val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+    val SimpleType.Tuple(argElmTypes) = exp.tpe
+    val argTupleType = BackendObjType.Tuple(argElmTypes.map(BackendType.toBackendType))
+
+    val jGlobal = BackendObjType.Global.jvmName
+    val jProcess = JvmName.ofClass(classOf[java.lang.Process])
+    val processTpe = BackendType.Reference(BackendObjType.Native(jProcess))
+    val jOutputStream = JvmName.ofClass(classOf[java.io.OutputStream])
+    val outputStreamTpe = BackendType.Reference(BackendObjType.Native(jOutputStream))
+    val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+
+    val idSlot = 2140
+    val bufSlot = 2142
+    val lenSlot = 2143
+    val exSlot = 2144
+    val procSlot = 2145
+
+    compileExpr(exp)
+    DUP()
+    GETFIELD(argTupleType.IndexField(0))
+    mv.visitVarInsn(LSTORE, idSlot)
+    GETFIELD(argTupleType.IndexField(1))
+    ASTORE(bufSlot)
+
+    LLOAD(idSlot)
+    INVOKESTATIC(jGlobal, "getProcess", mkDescriptor(BackendType.Int64)(processTpe))
+    ASTORE(procSlot)
+
+    val hasProc = new Label()
+    val after = new Label()
+    ALOAD(procSlot)
+    mv.visitJumpInsn(IFNONNULL, hasProc)
+
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    ICONST_0()
+    pushInt(14)
+    pushString("invalid process handle.")
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(hasProc)
+
+    val tryStart = new Label()
+    val tryEnd = new Label()
+    val handlerStart = new Label()
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, jIOException.toInternalName)
+
+    mv.visitLabel(tryStart)
+    ALOAD(procSlot)
+    INVOKEVIRTUAL(jProcess, "getOutputStream", mkDescriptor()(outputStreamTpe))
+    ALOAD(bufSlot)
+    INVOKEVIRTUAL(jOutputStream, "write", mkDescriptor(BackendType.Array(BackendType.Int8))(VoidableType.Void))
+
+    ALOAD(bufSlot)
+    ARRAYLENGTH()
+    mv.visitVarInsn(ISTORE, lenSlot)
+
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(true)
+    ILOAD(lenSlot)
+    pushInt(14)
+    pushString("")
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitLabel(tryEnd)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerStart)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    ICONST_0()
+    pushInt(14)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(after)
+  }
+
+  private def compileProcessStreamRead(exp: Expr, tpe: SimpleType, loc: SourceLocation, stderr: Boolean)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    import BytecodeInstructions.*
+    BytecodeInstructions.addLoc(loc)
+
+    val SimpleType.Tuple(retElmTypes) = tpe
+    val retTupleType = BackendObjType.Tuple(retElmTypes.map(BackendType.toBackendType))
+
+    val SimpleType.Tuple(argElmTypes) = exp.tpe
+    val argTupleType = BackendObjType.Tuple(argElmTypes.map(BackendType.toBackendType))
+
+    val jGlobal = BackendObjType.Global.jvmName
+    val jProcess = JvmName.ofClass(classOf[java.lang.Process])
+    val processTpe = BackendType.Reference(BackendObjType.Native(jProcess))
+    val jInputStream = JvmName.ofClass(classOf[java.io.InputStream])
+    val inputStreamTpe = BackendType.Reference(BackendObjType.Native(jInputStream))
+    val jIOException = JvmName.ofClass(classOf[java.io.IOException])
+
+    val idSlot = if (stderr) 2160 else 2150
+    val bufSlot = if (stderr) 2162 else 2152
+    val numSlot = if (stderr) 2163 else 2153
+    val exSlot = if (stderr) 2164 else 2154
+    val procSlot = if (stderr) 2165 else 2155
+
+    compileExpr(exp)
+    DUP()
+    GETFIELD(argTupleType.IndexField(0))
+    mv.visitVarInsn(LSTORE, idSlot)
+    GETFIELD(argTupleType.IndexField(1))
+    ASTORE(bufSlot)
+
+    LLOAD(idSlot)
+    INVOKESTATIC(jGlobal, "getProcess", mkDescriptor(BackendType.Int64)(processTpe))
+    ASTORE(procSlot)
+
+    val hasProc = new Label()
+    val after = new Label()
+    ALOAD(procSlot)
+    mv.visitJumpInsn(IFNONNULL, hasProc)
+
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    ICONST_0()
+    pushInt(14)
+    pushString("invalid process handle.")
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(hasProc)
+
+    val tryStart = new Label()
+    val tryEnd = new Label()
+    val handlerStart = new Label()
+    mv.visitTryCatchBlock(tryStart, tryEnd, handlerStart, jIOException.toInternalName)
+
+    mv.visitLabel(tryStart)
+    ALOAD(procSlot)
+    INVOKEVIRTUAL(jProcess, if (stderr) "getErrorStream" else "getInputStream", mkDescriptor()(inputStreamTpe))
+    ALOAD(bufSlot)
+    INVOKEVIRTUAL(jInputStream, "read", mkDescriptor(BackendType.Array(BackendType.Int8))(BackendType.Int32))
+
+    val notEof = new Label()
+    val afterEof = new Label()
+    DUP()
+    ICONST_M1()
+    mv.visitJumpInsn(IF_ICMPNE, notEof)
+    POP()
+    ICONST_0()
+    mv.visitLabel(notEof)
+    mv.visitLabel(afterEof)
+    mv.visitVarInsn(ISTORE, numSlot)
+
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(true)
+    ILOAD(numSlot)
+    pushInt(14)
+    pushString("")
+    INVOKESPECIAL(retTupleType.Constructor)
+    mv.visitLabel(tryEnd)
+    mv.visitJumpInsn(GOTO, after)
+
+    mv.visitLabel(handlerStart)
+    ASTORE(exSlot)
+    NEW(retTupleType.jvmName)
+    DUP()
+    pushBool(false)
+    ICONST_0()
+    pushInt(14)
+    ALOAD(exSlot)
+    INVOKEVIRTUAL(JvmName.Throwable, "getMessage", mkDescriptor()(BackendType.String))
+    INVOKESPECIAL(retTupleType.Constructor)
     mv.visitJumpInsn(GOTO, after)
 
     mv.visitLabel(after)

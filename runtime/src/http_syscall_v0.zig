@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const wire = @import("http_wire_v0.zig");
-const impl = @import("http_request_xev_wire_v0.zig");
+const impl = @import("http_request_std_wire_v0.zig");
 
 pub const SysStatus = enum(u32) {
     ok = 0,
@@ -29,8 +29,12 @@ pub fn http_request(
 ) SysResult {
     out_resp_len.* = 0;
 
-    const resp_blob = impl.httpRequest(alloc, req) catch {
+    const outcome = impl.httpRequest(alloc, req, null) catch {
         return .{ .status = .err, .err_code = IoErrorKind.other };
+    };
+    const resp_blob = switch (outcome) {
+        .completed => |blob| blob,
+        .canceled => return .{ .status = .err, .err_code = IoErrorKind.other },
     };
     defer alloc.free(resp_blob);
 
@@ -63,4 +67,3 @@ pub fn http_request(
     // Even the minimal error blob doesn't fit.
     return .{ .status = .err, .err_code = IoErrorKind.invalid_input };
 }
-

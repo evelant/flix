@@ -851,6 +851,18 @@ object Redundancy {
       val us2 = visitExp(exp2, env0, rc)
       us1 ++ us2
 
+    case Expr.NewReentrantLock(_, _, _) =>
+      Used.empty
+
+    case Expr.LockReentrantLock(exp, _, _, _) =>
+      visitExp(exp, env0, rc)
+
+    case Expr.TryLockReentrantLock(exp, _, _, _) =>
+      visitExp(exp, env0, rc)
+
+    case Expr.UnlockReentrantLock(exp, _, _, _) =>
+      visitExp(exp, env0, rc)
+
     case Expr.SelectChannel(rules, defaultOpt, _, _, _) =>
       val defaultUsed = defaultOpt match {
         case None => Used.empty

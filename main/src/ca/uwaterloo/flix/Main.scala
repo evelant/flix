@@ -322,6 +322,44 @@ object Main {
           }
           exitOnResult(runDoctor(cwd, cmdOpts, baseOptions))
 
+        case Command.BindWasmEffects =>
+          if (cmdOpts.files.nonEmpty) {
+            println("The 'bind wasm-effects' command does not support file arguments.")
+            System.exit(1)
+          }
+          val witDir = cmdOpts.bindWit.getOrElse {
+            println("The 'bind wasm-effects' command requires --wit <dir>.")
+            System.exit(1)
+            null
+          }
+          val world = cmdOpts.bindWorld.getOrElse {
+            println("The 'bind wasm-effects' command requires --world <name>.")
+            System.exit(1)
+            null
+          }
+          val outDir = cmdOpts.bindOut.getOrElse {
+            println("The 'bind wasm-effects' command requires --out <dir>.")
+            System.exit(1)
+            null
+          }
+          WasmEffectBindingsTool.run(WasmEffectBindingsTool.Config(
+            witDir = witDir,
+            world = world,
+            outDir = outDir,
+            rootModule = cmdOpts.bindRootModule
+          )) match {
+            case Result.Ok(generated) =>
+              println(s"Generated ${generated.flixFile.toAbsolutePath.normalize()}")
+              println(s"Generated ${generated.bindingsFile.toAbsolutePath.normalize()}")
+              println(s"Generated ${generated.jsFile.toAbsolutePath.normalize()}")
+              println(s"Generated ${generated.dtsFile.toAbsolutePath.normalize()}")
+              println(s"Generated ${generated.rustFile.toAbsolutePath.normalize()}")
+              System.exit(0)
+            case Result.Err(msg) =>
+              println(msg)
+              System.exit(1)
+          }
+
         case Command.Doc =>
           if (cmdOpts.files.isEmpty) {
             exitOnResult {
@@ -563,6 +601,10 @@ object Main {
   case class CmdOpts(
     command: Command = Command.None,
     args: List[String] = Nil,
+    bindOut: Option[Path] = None,
+    bindRootModule: String = "Wit",
+    bindWit: Option[Path] = None,
+    bindWorld: Option[String] = None,
     emits: List[EmitKind] = Nil,
     runner: Option[RunnerKind] = None,
     entryPoint: Option[String] = None,
@@ -615,6 +657,8 @@ object Main {
     case object Clean extends Command
 
     case object Doctor extends Command
+
+    case object BindWasmEffects extends Command
 
     case object Doc extends Command
 
@@ -732,6 +776,12 @@ object Main {
 
       cmd("doctor").action((_, c) => c.copy(command = Command.Doctor)).text("  checks toolchains and target configuration.")
 
+      cmd("bind").text("  generates source bindings from external interface definitions.")
+        .children(
+          cmd("wasm-effects").action((_, c) => c.copy(command = Command.BindWasmEffects))
+            .text("  generates Flix async effect bindings from a WIT world.")
+        )
+
       cmd("doc").action((_, c) => c.copy(command = Command.Doc)).text("  generates API documentation.")
 
       cmd("format").action((_, c) => c.copy(command = Command.Format)).text("  formats Flix source code files.")
@@ -790,6 +840,18 @@ object Main {
 
       opt[String]("github-token").action((s, c) => c.copy(githubToken = Some(s))).
         text("API key to use for GitHub dependency resolution.")
+
+      opt[String]("wit").action((s, c) => c.copy(bindWit = Some(Paths.get(s)))).
+        text("WIT package directory for binding generation.")
+
+      opt[String]("world").action((s, c) => c.copy(bindWorld = Some(s))).
+        text("WIT world name for binding generation.")
+
+      opt[String]("out").action((s, c) => c.copy(bindOut = Some(Paths.get(s)))).
+        text("output directory for generated bindings.")
+
+      opt[String]("root-module").action((s, c) => c.copy(bindRootModule = s)).
+        text("root Flix module for generated WIT effect bindings.")
 
       help("help").text("prints this usage information.")
 
@@ -1445,6 +1507,7 @@ object Main {
     case Command.BuildPkg => "package"
     case Command.Clean => "clean"
     case Command.Doctor => "doctor"
+    case Command.BindWasmEffects => "bind wasm-effects"
     case Command.Doc => "doc"
     case Command.Format => "format"
     case Command.Run => "run"

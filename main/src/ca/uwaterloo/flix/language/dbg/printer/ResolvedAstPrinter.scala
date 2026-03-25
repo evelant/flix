@@ -125,6 +125,10 @@ object ResolvedAstPrinter {
     case Expr.NewChannel(_, _) => DocAst.Expr.Unknown
     case Expr.GetChannel(_, _) => DocAst.Expr.Unknown
     case Expr.PutChannel(_, _, _) => DocAst.Expr.Unknown
+    case Expr.NewReentrantLock(_) => DocAst.Expr.Unknown
+    case Expr.LockReentrantLock(_, _) => DocAst.Expr.Unknown
+    case Expr.TryLockReentrantLock(_, _) => DocAst.Expr.Unknown
+    case Expr.UnlockReentrantLock(_, _) => DocAst.Expr.Unknown
     case Expr.SelectChannel(_, _, _) => DocAst.Expr.Unknown
     case Expr.Spawn(_, _, _) => DocAst.Expr.Unknown
     case Expr.ParYield(_, _, _) => DocAst.Expr.Unknown

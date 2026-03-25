@@ -41,6 +41,7 @@ object SimpleTypePrinter {
     case SimpleType.StringBuilderHandle => Type.AsIs("StringBuilderHandle")
     case SimpleType.RegexMatcher => Type.AsIs("RegexMatcher")
     case SimpleType.ChannelHandle => Type.AsIs("ChannelHandle")
+    case SimpleType.ReentrantLockHandle => Type.AsIs("ReentrantLockHandle")
     case SimpleType.Region => Type.Region
     case SimpleType.Null => Type.Null
     case SimpleType.Array(tpe) => Type.Array(print(tpe))

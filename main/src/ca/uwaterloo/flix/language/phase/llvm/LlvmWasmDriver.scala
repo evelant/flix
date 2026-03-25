@@ -22,7 +22,7 @@ import ca.uwaterloo.flix.language.phase.WasmImportInterface
 import ca.uwaterloo.flix.util.{ArtifactNames, Build, InternalCompilerException}
 
 import java.nio.charset.StandardCharsets
-import java.nio.file.{Files, Path, Paths, StandardCopyOption}
+import java.nio.file.{FileSystem, FileSystemNotFoundException, FileSystems, Files, Path, Paths, StandardCopyOption}
 import scala.jdk.CollectionConverters.*
 
 /**
@@ -49,20 +49,21 @@ object LlvmWasmDriver {
                        typedExportComponentJs: Option[Path],
                        typedExportComponentTypes: Option[Path])
 
-  private val BundledRuntimeZigResource: String = "/runtime/src/flix_rt_llvm.zig"
-  private val BundledUnicodeCaseTablesZigResource: String = "/runtime/src/unicode_case_tables.zig"
-  private val BundledRegexRuntimeZigResource: String = "/runtime/src/rt_regex.zig"
+  private val BundledRuntimeSourceDir: String = "/runtime/src"
   private val BundledWitGlueCResource: String = "/runtime/src/wit/flix.c"
   private val BundledWitGlueHResource: String = "/runtime/src/wit/flix.h"
   private val BundledSysJsResource: String = "/tools/wasm-runner-js/sys.js"
   private val BundledRunFlixResource: String = "/tools/wasm-runner-js/run-flix.mjs"
   private val BundledRunnerResource: String = "/tools/wasm-runner-js/runner.mjs"
+  private val BundledEffectHandlersResource: String = "/tools/wasm-runner-js/effect-handlers.mjs"
+  private val BundledWitEffectBindingsResource: String = "/tools/wasm-runner-js/wit-effect-bindings.mjs"
   private val BundledNodeHandlersResource: String = "/tools/wasm-runner-js/node-handlers.mjs"
   private val BundledNodeTcpHandlersResource: String = "/tools/wasm-runner-js/node-tcp-handlers.mjs"
   private val BundledNodeProcessHandlersResource: String = "/tools/wasm-runner-js/node-process-handlers.mjs"
   private val BundledWasmtimeCargoTomlResource: String = "/tools/wasm-runner-rs/Cargo.toml"
   private val BundledWasmtimeCargoLockResource: String = "/tools/wasm-runner-rs/Cargo.lock"
   private val BundledWasmtimeLibResource: String = "/tools/wasm-runner-rs/src/lib.rs"
+  private val BundledWasmtimeEffectsResource: String = "/tools/wasm-runner-rs/src/effects.rs"
   private val BundledWasmtimeHostResource: String = "/tools/wasm-runner-rs/src/host.rs"
   private val BundledWasmtimeRunnerResource: String = "/tools/wasm-runner-rs/src/runner.rs"
   private val BundledWasmtimeBinResource: String = "/tools/wasm-runner-rs/src/bin/run_flix.rs"
@@ -84,6 +85,12 @@ object LlvmWasmDriver {
 
   private val DefaultRunnerModule: Path =
     Paths.get("tools/wasm-runner-js/runner.mjs").toAbsolutePath.normalize()
+
+  private val DefaultEffectHandlersModule: Path =
+    Paths.get("tools/wasm-runner-js/effect-handlers.mjs").toAbsolutePath.normalize()
+
+  private val DefaultWitEffectBindingsModule: Path =
+    Paths.get("tools/wasm-runner-js/wit-effect-bindings.mjs").toAbsolutePath.normalize()
 
   private val DefaultNodeHandlersModule: Path =
     Paths.get("tools/wasm-runner-js/node-handlers.mjs").toAbsolutePath.normalize()
@@ -186,45 +193,69 @@ object LlvmWasmDriver {
     *
     * Bring-up behavior:
     *   1. Prefer `runtime/src/flix_rt_llvm.zig` relative to the current working directory.
-    *   2. Otherwise, extract the bundled resource from `flix.jar` into `outDir`.
+    *   2. Otherwise, extract the bundled runtime source tree from `flix.jar` into `outDir`.
     */
   private def resolveRuntimeZig(outDir: Path): Path = {
-    val cwdRuntime = Paths.get("runtime/src/flix_rt_llvm.zig").toAbsolutePath.normalize()
-    if (Files.exists(cwdRuntime)) return cwdRuntime
+    val runtimeDir = outDir.resolve("runtime/src").toAbsolutePath.normalize()
+    val cwdRuntimeDir = Paths.get("runtime/src").toAbsolutePath.normalize()
 
-    val dest = outDir.resolve("flix_rt_llvm.zig").toAbsolutePath.normalize()
-    val unicodeDest = outDir.resolve("unicode_case_tables.zig").toAbsolutePath.normalize()
-    val regexDest = outDir.resolve("rt_regex.zig").toAbsolutePath.normalize()
-    val is = Option(getClass.getResourceAsStream(BundledRuntimeZigResource)).getOrElse {
+    if (Files.exists(cwdRuntimeDir.resolve("flix_rt_llvm.zig"))) {
+      copyTree(cwdRuntimeDir, runtimeDir)
+    } else {
+      copyBundledTree(BundledRuntimeSourceDir, runtimeDir)
+    }
+
+    runtimeDir.resolve("flix_rt_llvm.zig")
+  }
+
+  private def copyTree(sourceDir: Path, destDir: Path): Unit = {
+    Files.walk(sourceDir).forEach { src =>
+      if (Files.isRegularFile(src)) {
+        val rel = sourceDir.relativize(src)
+        val dest = destDir.resolve(rel.toString).toAbsolutePath.normalize()
+        Option(dest.getParent).foreach(parent => Files.createDirectories(parent))
+        Files.copy(src, dest, StandardCopyOption.REPLACE_EXISTING)
+      }
+    }
+  }
+
+  private def copyBundledTree(resourceDir: String, destDir: Path): Unit = {
+    val resourceUrl = Option(getClass.getResource(resourceDir)).getOrElse {
       throw InternalCompilerException(
-        s"Missing LLVM runtime support file: '$cwdRuntime' and no bundled resource '$BundledRuntimeZigResource' found.",
+        s"Missing bundled LLVM runtime resource tree '$resourceDir'.",
         SourceLocation.Unknown
       )
     }
-    val unicodeIs = Option(getClass.getResourceAsStream(BundledUnicodeCaseTablesZigResource)).getOrElse {
-      throw InternalCompilerException(
-        s"Missing LLVM runtime support file: '$cwdRuntime' and no bundled resource '$BundledUnicodeCaseTablesZigResource' found.",
-        SourceLocation.Unknown
-      )
-    }
-    val regexIs = Option(getClass.getResourceAsStream(BundledRegexRuntimeZigResource)).getOrElse {
-      throw InternalCompilerException(
-        s"Missing LLVM runtime support file: '$cwdRuntime' and no bundled resource '$BundledRegexRuntimeZigResource' found.",
-        SourceLocation.Unknown
-      )
+
+    val resourceUri = resourceUrl.toURI
+
+    def copyFrom(root: Path, closeFs: Option[FileSystem]): Unit = {
+      try {
+        Files.walk(root).forEach { src =>
+          if (Files.isRegularFile(src)) {
+            val rel = root.relativize(src)
+            val dest = destDir.resolve(rel.toString).toAbsolutePath.normalize()
+            Option(dest.getParent).foreach(parent => Files.createDirectories(parent))
+            Files.copy(src, dest, StandardCopyOption.REPLACE_EXISTING)
+          }
+        }
+      } finally {
+        closeFs.foreach(_.close())
+      }
     }
 
-    try {
-      Files.copy(is, dest, StandardCopyOption.REPLACE_EXISTING)
-      Files.copy(unicodeIs, unicodeDest, StandardCopyOption.REPLACE_EXISTING)
-      Files.copy(regexIs, regexDest, StandardCopyOption.REPLACE_EXISTING)
-    } finally {
-      is.close()
-      unicodeIs.close()
-      regexIs.close()
+    if (resourceUri.getScheme == "jar") {
+      val (fs, closeFs) =
+        try (FileSystems.getFileSystem(resourceUri), None)
+        catch {
+          case _: FileSystemNotFoundException =>
+            val created = FileSystems.newFileSystem(resourceUri, Map.empty[String, AnyRef].asJava)
+            (created, Some(created))
+        }
+      copyFrom(fs.getPath(resourceDir), closeFs)
+    } else {
+      copyFrom(Paths.get(resourceUri), None)
     }
-
-    dest
   }
 
   private def compileRuntime(runtimeZig: Path, wasmDir: Path, optFlag: String): Path = {
@@ -412,6 +443,8 @@ object LlvmWasmDriver {
     // Ensure a default sys implementation is available for the transpiled output.
     // Hosts are free to ignore/replace this mapping.
     copyDefaultSysJs(jsDir)
+    copyDefaultEffectHandlersJs(jsDir)
+    copyDefaultWitEffectBindingsJs(jsDir)
     writeJsImportStubs(jsDir, wasmImports)
 
     val cmd = List(
@@ -450,6 +483,26 @@ object LlvmWasmDriver {
     copyBundledResource(BundledSysJsResource, dest)
   }
 
+  private def copyDefaultEffectHandlersJs(jsDir: Path): Unit = {
+    val dest = jsDir.resolve("effect-handlers.mjs")
+    if (Files.exists(DefaultEffectHandlersModule)) {
+      Files.copy(DefaultEffectHandlersModule, dest, StandardCopyOption.REPLACE_EXISTING)
+      return
+    }
+
+    copyBundledResource(BundledEffectHandlersResource, dest)
+  }
+
+  private def copyDefaultWitEffectBindingsJs(jsDir: Path): Unit = {
+    val dest = jsDir.resolve("wit-effect-bindings.mjs")
+    if (Files.exists(DefaultWitEffectBindingsModule)) {
+      Files.copy(DefaultWitEffectBindingsModule, dest, StandardCopyOption.REPLACE_EXISTING)
+      return
+    }
+
+    copyBundledResource(BundledWitEffectBindingsResource, dest)
+  }
+
   private def writeJsImportStubs(jsDir: Path, wasmImports: List[LlvmWasmImportsWriter.Entry]): Unit = {
     wasmImports
       .groupBy(_.interfaceId)
@@ -481,6 +534,8 @@ object LlvmWasmDriver {
   private def resolveNodeRunner(outDir: Path): Path = {
     if (Files.exists(DefaultNodeRunner)
       && Files.exists(DefaultRunnerModule)
+      && Files.exists(DefaultEffectHandlersModule)
+      && Files.exists(DefaultWitEffectBindingsModule)
       && Files.exists(DefaultNodeHandlersModule)
       && Files.exists(DefaultNodeTcpHandlersModule)
       && Files.exists(DefaultNodeProcessHandlersModule)) {
@@ -492,6 +547,8 @@ object LlvmWasmDriver {
 
     copyBundledResource(BundledRunFlixResource, runnerDir.resolve("run-flix.mjs"))
     copyBundledResource(BundledRunnerResource, runnerDir.resolve("runner.mjs"))
+    copyBundledResource(BundledEffectHandlersResource, runnerDir.resolve("effect-handlers.mjs"))
+    copyBundledResource(BundledWitEffectBindingsResource, runnerDir.resolve("wit-effect-bindings.mjs"))
     copyBundledResource(BundledNodeHandlersResource, runnerDir.resolve("node-handlers.mjs"))
     copyBundledResource(BundledNodeTcpHandlersResource, runnerDir.resolve("node-tcp-handlers.mjs"))
     copyBundledResource(BundledNodeProcessHandlersResource, runnerDir.resolve("node-process-handlers.mjs"))
@@ -510,6 +567,7 @@ object LlvmWasmDriver {
     copyBundledResource(BundledWasmtimeCargoTomlResource, runnerDir.resolve("Cargo.toml"))
     copyBundledResource(BundledWasmtimeCargoLockResource, runnerDir.resolve("Cargo.lock"))
     copyBundledResource(BundledWasmtimeLibResource, runnerDir.resolve("src").resolve("lib.rs"))
+    copyBundledResource(BundledWasmtimeEffectsResource, runnerDir.resolve("src").resolve("effects.rs"))
     copyBundledResource(BundledWasmtimeHostResource, runnerDir.resolve("src").resolve("host.rs"))
     copyBundledResource(BundledWasmtimeRunnerResource, runnerDir.resolve("src").resolve("runner.rs"))
     copyBundledResource(BundledWasmtimeBinResource, runnerDir.resolve("src").resolve("bin").resolve("run_flix.rs"))

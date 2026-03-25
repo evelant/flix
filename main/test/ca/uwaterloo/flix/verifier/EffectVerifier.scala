@@ -352,6 +352,17 @@ object EffectVerifier {
       visitExp(exp2)
       // TODO region stuff
       ()
+    case Expr.NewReentrantLock(tpe, eff, loc) =>
+      ()
+    case Expr.LockReentrantLock(exp, tpe, eff, loc) =>
+      visitExp(exp)
+      ()
+    case Expr.TryLockReentrantLock(exp, tpe, eff, loc) =>
+      visitExp(exp)
+      ()
+    case Expr.UnlockReentrantLock(exp, tpe, eff, loc) =>
+      visitExp(exp)
+      ()
     case Expr.SelectChannel(rules, default, tpe, eff, loc) =>
       rules.foreach { r => visitExp(r.exp) }
       default.foreach { d => visitExp(d) }

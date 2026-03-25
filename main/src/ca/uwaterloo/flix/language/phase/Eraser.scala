@@ -56,7 +56,7 @@ object Eraser {
       val eNew = visitExp(exp)
       val e = ErasedAst.Expr.ApplyAtomic(AtomicOp.Box, List(eNew), box(tpe), exp.purity, loc)
       val exportedSignature =
-        if (ann.isExport) ExportAbi.portableSignature(fparams.map(_.tpe), originalTpe.tpe)
+        if (ann.isExport) ExportAbi.portableExportSignature(fparams.map(_.tpe), originalTpe.tpe)
         else None
       val wasmImportSignature = exp match {
         case ReducedAst.Expr.WasmImport(_, _, _, _) => ExportAbi.portableSignature(fparams.map(_.tpe), originalTpe.tpe)
@@ -205,6 +205,13 @@ object Eraser {
         case AtomicOp.ChannelNew => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
         case AtomicOp.ChannelGet => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
         case AtomicOp.ChannelPut => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
+        case AtomicOp.ChannelSelect => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
+        case AtomicOp.ChannelSelectIndex => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
+        case AtomicOp.ChannelSelectGet => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
+        case AtomicOp.ReentrantLockNew => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
+        case AtomicOp.ReentrantLockLock => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
+        case AtomicOp.ReentrantLockTryLock => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
+        case AtomicOp.ReentrantLockUnlock => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
         case AtomicOp.Lazy => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
         case AtomicOp.Force =>
           castExp(ErasedAst.Expr.ApplyAtomic(op, es, erase(tpe), purity, loc), t, purity, loc)
@@ -314,6 +321,7 @@ object Eraser {
       case StringBuilderHandle => StringBuilderHandle
       case RegexMatcher => RegexMatcher
       case ChannelHandle => ChannelHandle
+      case ReentrantLockHandle => ReentrantLockHandle
       case Region => Region
       case Null => Null
       case Array(tpe) => SimpleType.mkArray(visitType(tpe))

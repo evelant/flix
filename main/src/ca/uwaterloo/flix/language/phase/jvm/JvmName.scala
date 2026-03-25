@@ -140,6 +140,7 @@ object JvmName {
 
   val Arrays: JvmName = JvmName(JavaUtil, "Arrays")
   val AtomicLong: JvmName = JvmName(JavaUtil ::: List("concurrent", "atomic"), "AtomicLong")
+  val AtomicReference: JvmName = JvmName(JavaUtil ::: List("concurrent", "atomic"), "AtomicReference")
   val ArrayBlockingQueue: JvmName = JvmName(JavaUtilConcurrent, "ArrayBlockingQueue")
   val BigDecimal: JvmName = JvmName(JavaMath, "BigDecimal")
   val BigInteger: JvmName = JvmName(JavaMath, "BigInteger")
@@ -150,6 +151,9 @@ object JvmName {
   val CallSite: JvmName = JvmName(JavaLangInvoke, "CallSite")
   val CharSequence: JvmName = JvmName(JavaLang, "CharSequence")
   val Character: JvmName = JvmName(JavaLang, "Character")
+  val ChannelSupport: JvmName = JvmName(List("dev", "flix", "runtime"), "ChannelSupport")
+  val CancellationWakeup: JvmName = JvmName(List("dev", "flix", "runtime"), "CancellationWakeup")
+  val LockSupport: JvmName = JvmName(List("dev", "flix", "runtime"), "LockSupport")
   val Class: JvmName = JvmName(JavaLang, "Class")
   val ConcurrentLinkedQueue: JvmName = JvmName(JavaUtilConcurrent, "ConcurrentLinkedQueue")
   val Double: JvmName = JvmName(JavaLang, "Double")
@@ -189,6 +193,7 @@ object JvmName {
   val Regex: JvmName = JvmName(JavaUtilRegex, "Pattern")
 
   val RegexMatcher: JvmName = JvmName(JavaUtilRegex, "Matcher")
+  val RegionSupport: JvmName = JvmName(List("dev", "flix", "runtime"), "RegionSupport")
   val Runnable: JvmName = JvmName(JavaLang, "Runnable")
   val Short: JvmName = JvmName(JavaLang, "Short")
   val String: JvmName = JvmName(JavaLang, "String")

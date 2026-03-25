@@ -43,6 +43,7 @@ object FormatTypeConstructor {
     case TypeConstructor.StringBuilderHandle => "StringBuilderHandle"
     case TypeConstructor.RegexMatcher => "RegexMatcher"
     case TypeConstructor.ChannelHandle => "ChannelHandle"
+    case TypeConstructor.ReentrantLockHandle => "ReentrantLockHandle"
 
     // Arrows
     case TypeConstructor.Arrow(arity) => s"Arrow$arity"

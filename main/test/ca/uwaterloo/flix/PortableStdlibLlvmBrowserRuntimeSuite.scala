@@ -136,6 +136,173 @@ class PortableStdlibLlvmBrowserRuntimeSuite extends AnyFunSuite {
     }
   }
 
+  for (tc <- PortableExceptionParityCases.All) {
+    test(s"portable-exception-parity-llvm-wasm-browser-${tc.id}") {
+      assume(hasZig, s"zig not found on PATH (skipping browser exception parity test: ${tc.id})")
+      assume(hasWasmTools, s"wasm-tools not found on PATH (skipping browser exception parity test: ${tc.id})")
+      assume(hasJco, s"jco not found on PATH (skipping browser exception parity test: ${tc.id})")
+      assume(hasNode, s"node not found on PATH (skipping browser exception parity test: ${tc.id})")
+
+      val chromeOpt = findChromeBinary()
+      assume(chromeOpt.nonEmpty, s"chrome/chromium not found (skipping browser exception parity test: ${tc.id})")
+      val chrome = chromeOpt.get
+
+      val driverFile = Files.createTempFile(s"flix-portable-llvm-wasm-browser-${tc.id}-", ".flix")
+      val outDir = Files.createTempDirectory(Paths.get("build"), s"flix-llvm-wasm-browser-${tc.id}-")
+      val port = findAvailablePort()
+      val server = startServer(port)
+
+      try {
+        Files.writeString(driverFile, tc.source, StandardCharsets.UTF_8)
+
+        val flix = new Flix()
+        flix.setOptions(TestOptions.copy(outputPath = outDir))
+        implicit val sctx: SecurityContext = SecurityContext.Unrestricted
+
+        flix.addFile(driverFile)
+
+        val (optRoot, errors) = flix.check()
+        if (errors.nonEmpty) {
+          fail(CompilationMessage.formatAll(errors)(flix.getFormatter, optRoot))
+        }
+
+        flix.codeGen(optRoot.get)
+
+        val componentJs = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmDriver.componentJsPath(outDir)
+        val exportsManifest = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmExportWriter.manifestPath(outDir)
+
+        waitForPort(port, timeoutMs = 5_000)
+
+        val componentUrlPath = toUrlPath(componentJs)
+        val exportsUrlPath = toUrlPath(exportsManifest)
+        val url =
+          s"http://127.0.0.1:$port$browserHtmlPath?component=$componentUrlPath&exports=$exportsUrlPath&budget=500"
+
+        val (exit, output) = runHeadlessChrome(chrome, url)
+        if (exit != 0) {
+          fail(s"Browser exception parity driver '${tc.id}' failed with exit $exit.\nURL: $url\n$output")
+        }
+        if (output.trim != tc.expectedOutput) {
+          fail(s"Expected exception parity result ${tc.expectedOutput} for '${tc.id}', but got:\n$output")
+        }
+      } finally {
+        Files.deleteIfExists(driverFile)
+        deleteRecursive(outDir)
+        stopServer(server)
+      }
+    }
+  }
+
+  for (tc <- PortableControlParityCases.All) {
+    test(s"portable-control-parity-llvm-wasm-browser-${tc.id}") {
+      assume(hasZig, s"zig not found on PATH (skipping LLVM-wasm browser control parity test: ${tc.id})")
+      assume(hasWasmTools, s"wasm-tools not found on PATH (skipping LLVM-wasm browser control parity test: ${tc.id})")
+      assume(hasJco, s"jco not found on PATH (skipping LLVM-wasm browser control parity test: ${tc.id})")
+      assume(hasNode, s"node not found on PATH (skipping LLVM-wasm browser control parity test: ${tc.id})")
+      val chromeOpt = findChromeBinary()
+      assume(chromeOpt.nonEmpty, s"Chrome/Chromium not found on PATH (skipping LLVM-wasm browser control parity test: ${tc.id})")
+      val chrome = chromeOpt.get
+
+      val driverFile = Files.createTempFile(s"flix-portable-llvm-browser-${tc.id}-", ".flix")
+      val outDir = Files.createTempDirectory(Paths.get("build"), s"flix-llvm-browser-${tc.id}-")
+      val port = findAvailablePort()
+      val server = startServer(port)
+      try {
+        Files.writeString(driverFile, tc.source, StandardCharsets.UTF_8)
+
+        val flix = new Flix()
+        flix.setOptions(TestOptions.copy(outputPath = outDir))
+        implicit val sctx: SecurityContext = SecurityContext.Unrestricted
+
+        flix.addFile(driverFile)
+
+        val (optRoot, errors) = flix.check()
+        if (errors.nonEmpty) {
+          fail(CompilationMessage.formatAll(errors)(flix.getFormatter, optRoot))
+        }
+
+        flix.codeGen(optRoot.get)
+
+        val componentJs = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmDriver.componentJsPath(outDir)
+        val exportsManifest = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmExportWriter.manifestPath(outDir)
+
+        waitForPort(port, timeoutMs = 5_000)
+
+        val componentUrlPath = toUrlPath(componentJs)
+        val exportsUrlPath = toUrlPath(exportsManifest)
+        val url =
+          s"http://127.0.0.1:$port$browserHtmlPath?component=$componentUrlPath&exports=$exportsUrlPath&budget=500"
+
+        val (exit, output) = runHeadlessChrome(chrome, url)
+        if (exit != 0) {
+          fail(s"Browser control parity driver '${tc.id}' failed with exit $exit.\nURL: $url\n$output")
+        }
+        if (output.trim != tc.expectedOutput) {
+          fail(s"Expected control parity result ${tc.expectedOutput} for '${tc.id}', but got:\n$output")
+        }
+      } finally {
+        Files.deleteIfExists(driverFile)
+        deleteRecursive(outDir)
+        stopServer(server)
+      }
+    }
+  }
+
+  for (tc <- PortableCancellationParityCases.All) {
+    test(s"portable-cancellation-parity-llvm-wasm-browser-${tc.id}") {
+      assume(hasZig, s"zig not found on PATH (skipping LLVM-wasm browser cancellation parity test: ${tc.id})")
+      assume(hasWasmTools, s"wasm-tools not found on PATH (skipping LLVM-wasm browser cancellation parity test: ${tc.id})")
+      assume(hasJco, s"jco not found on PATH (skipping LLVM-wasm browser cancellation parity test: ${tc.id})")
+      assume(hasNode, s"node not found on PATH (skipping LLVM-wasm browser cancellation parity test: ${tc.id})")
+      val chromeOpt = findChromeBinary()
+      assume(chromeOpt.nonEmpty, s"Chrome/Chromium not found on PATH (skipping LLVM-wasm browser cancellation parity test: ${tc.id})")
+      val chrome = chromeOpt.get
+
+      val driverFile = Files.createTempFile(s"flix-portable-llvm-browser-${tc.id}-", ".flix")
+      val outDir = Files.createTempDirectory(Paths.get("build"), s"flix-llvm-browser-${tc.id}-")
+      val port = findAvailablePort()
+      val server = startServer(port)
+      try {
+        Files.writeString(driverFile, tc.source, StandardCharsets.UTF_8)
+
+        val flix = new Flix()
+        flix.setOptions(TestOptions.copy(outputPath = outDir))
+        implicit val sctx: SecurityContext = SecurityContext.Unrestricted
+
+        flix.addFile(driverFile)
+
+        val (optRoot, errors) = flix.check()
+        if (errors.nonEmpty) {
+          fail(CompilationMessage.formatAll(errors)(flix.getFormatter, optRoot))
+        }
+
+        flix.codeGen(optRoot.get)
+
+        val componentJs = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmDriver.componentJsPath(outDir)
+        val exportsManifest = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmExportWriter.manifestPath(outDir)
+
+        waitForPort(port, timeoutMs = 5_000)
+
+        val componentUrlPath = toUrlPath(componentJs)
+        val exportsUrlPath = toUrlPath(exportsManifest)
+        val url =
+          s"http://127.0.0.1:$port$browserHtmlPath?component=$componentUrlPath&exports=$exportsUrlPath&budget=500"
+
+        val (exit, output) = runHeadlessChrome(chrome, url)
+        if (exit != 0) {
+          fail(s"Browser cancellation parity driver '${tc.id}' failed with exit $exit.\nURL: $url\n$output")
+        }
+        if (output.trim != tc.expectedOutput) {
+          fail(s"Expected cancellation parity result ${tc.expectedOutput} for '${tc.id}', but got:\n$output")
+        }
+      } finally {
+        Files.deleteIfExists(driverFile)
+        deleteRecursive(outDir)
+        stopServer(server)
+      }
+    }
+  }
+
   private def mkPortableDriverSource(): String = {
     val flix = new Flix()
     flix.setOptions(TestOptions)

@@ -42,6 +42,7 @@ object LlvmExportSdkWriter {
                            manifest: Path,
                            component: Path,
                            witDir: Path,
+                           effectsManifest: Option[Path],
                            jsDir: Option[Path],
                            bindingsJs: Option[Path],
                            bindingsTypes: Option[Path],
@@ -85,6 +86,9 @@ object LlvmExportSdkWriter {
 
   def wasmManifestPath(outputPath: Path): Path =
     wasmSdkDir(outputPath).resolve("manifest.json")
+
+  def wasmEffectsManifestPath(outputPath: Path, artifactName: String = ArtifactNames.DefaultBaseName): Path =
+    wasmSdkDir(outputPath).resolve(ArtifactNames.wasmEffectsManifestFileName(artifactName))
 
   def wasmComponentDir(outputPath: Path): Path =
     wasmSdkDir(outputPath).resolve("component")
@@ -151,6 +155,7 @@ object LlvmExportSdkWriter {
   def packageWasm(entries: List[ExportEntry],
                   typedEntries: List[LlvmWasmTypedExportsWriter.Entry],
                   wasmImports: List[LlvmWasmImportsWriter.Entry],
+                  effectManifest: Option[Path],
                   typedComponent: Path,
                   typedWitDir: Path,
                   artifactName: String,
@@ -171,6 +176,12 @@ object LlvmExportSdkWriter {
     val sdkWitDir = wasmWitDir(outputPath)
     copyDirectory(typedWitDir, sdkWitDir)
 
+    val sdkEffectsManifest = effectManifest.map { src =>
+      val dest = wasmEffectsManifestPath(outputPath, artifactName)
+      copyFile(src, dest)
+      dest
+    }
+
     val jsArtifacts =
       if (emitJs) {
         val sdkJsDir = wasmJsDir(outputPath)
@@ -180,13 +191,14 @@ object LlvmExportSdkWriter {
       } else None
 
     val manifest = wasmManifestPath(outputPath)
-    writeFile(manifest, renderWasmManifest(entries, artifactName, sdkComponent, sdkWitDir, jsArtifacts, root).getBytes(StandardCharsets.UTF_8))
+    writeFile(manifest, renderWasmManifest(entries, artifactName, sdkComponent, sdkWitDir, sdkEffectsManifest, jsArtifacts, root).getBytes(StandardCharsets.UTF_8))
 
     WasmArtifacts(
       root = root,
       manifest = manifest,
       component = sdkComponent,
       witDir = sdkWitDir,
+      effectsManifest = sdkEffectsManifest,
       jsDir = jsArtifacts.map(_._1),
       bindingsJs = jsArtifacts.map(_._2),
       bindingsTypes = jsArtifacts.map(_._3),
@@ -222,6 +234,7 @@ object LlvmExportSdkWriter {
                                  artifactName: String,
                                  component: Path,
                                  witDir: Path,
+                                 effectsManifest: Option[Path],
                                  jsArtifacts: Option[(Path, Path, Path, Path, Path)],
                                  root: Path): String = {
     val sb = new StringBuilder(4096)
@@ -234,6 +247,9 @@ object LlvmExportSdkWriter {
     sb.append("""  "artifacts": {""").append('\n')
     sb.append(s"""    "component": "${escapeJson(relative(root, component))}",""").append('\n')
     sb.append(s"""    "witDir": "${escapeJson(relative(root, witDir))}"""")
+    effectsManifest.foreach { path =>
+      sb.append(",\n").append(s"""    "effectsManifest": "${escapeJson(relative(root, path))}"""")
+    }
     jsArtifacts.foreach { case (jsDir, bindingsJs, bindingsTypes, typedJs, typedTypes) =>
       sb.append(",\n").append(s"""    "jsDir": "${escapeJson(relative(root, jsDir))}",""").append('\n')
       sb.append(s"""    "bindingsJs": "${escapeJson(relative(root, bindingsJs))}",""").append('\n')

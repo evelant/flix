@@ -656,6 +656,14 @@ object SemanticTokensProvider {
 
     case Expr.PutChannel(exp1, exp2, _, _, _) => visitExp(exp1) ++ visitExp(exp2)
 
+    case Expr.NewReentrantLock(_, _, _) => Iterator.empty
+
+    case Expr.LockReentrantLock(exp, _, _, _) => visitExp(exp)
+
+    case Expr.TryLockReentrantLock(exp, _, _, _) => visitExp(exp)
+
+    case Expr.UnlockReentrantLock(exp, _, _, _) => visitExp(exp)
+
     case Expr.SelectChannel(rules, default, _, _, _) =>
       val rs = rules.foldLeft(Iterator.empty[SemanticToken]) {
         case (acc, SelectChannelRule(Binder(sym, _), chan, exp, _)) =>
@@ -917,6 +925,7 @@ object SemanticTokensProvider {
     case TypeConstructor.ArrayWithoutRegion => false
     case TypeConstructor.RegionWithoutRegion => false
     case TypeConstructor.ChannelHandle => false
+    case TypeConstructor.ReentrantLockHandle => false
   }
 
   /**

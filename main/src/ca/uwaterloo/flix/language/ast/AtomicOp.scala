@@ -102,6 +102,20 @@ object AtomicOp {
 
   case object ChannelPut extends AtomicOp
 
+  case object ChannelSelect extends AtomicOp
+
+  case object ChannelSelectIndex extends AtomicOp
+
+  case object ChannelSelectGet extends AtomicOp
+
+  case object ReentrantLockNew extends AtomicOp
+
+  case object ReentrantLockLock extends AtomicOp
+
+  case object ReentrantLockTryLock extends AtomicOp
+
+  case object ReentrantLockUnlock extends AtomicOp
+
   case object Lazy extends AtomicOp
 
   case object Force extends AtomicOp

@@ -873,6 +873,21 @@ object Specialization {
       val e2 = specializeExp(innerExp2, env0, subst)
       Expr.PutChannel(e1, e2, subst(tpe), subst(eff), loc)
 
+    case Expr.NewReentrantLock(tpe, eff, loc) =>
+      Expr.NewReentrantLock(subst(tpe), subst(eff), loc)
+
+    case Expr.LockReentrantLock(innerExp, tpe, eff, loc) =>
+      val e = specializeExp(innerExp, env0, subst)
+      Expr.LockReentrantLock(e, subst(tpe), subst(eff), loc)
+
+    case Expr.TryLockReentrantLock(innerExp, tpe, eff, loc) =>
+      val e = specializeExp(innerExp, env0, subst)
+      Expr.TryLockReentrantLock(e, subst(tpe), subst(eff), loc)
+
+    case Expr.UnlockReentrantLock(innerExp, tpe, eff, loc) =>
+      val e = specializeExp(innerExp, env0, subst)
+      Expr.UnlockReentrantLock(e, subst(tpe), subst(eff), loc)
+
     case Expr.SelectChannel(rules0, default0, tpe, eff, loc0) =>
       val rules = rules0.map {
         case TypedAst.SelectChannelRule(bnd, chan0, exp, loc) =>

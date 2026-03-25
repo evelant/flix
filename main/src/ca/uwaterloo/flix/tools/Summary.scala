@@ -268,6 +268,10 @@ object Summary {
     case Expr.NewChannel(exp, _, _, _) => countCheckedEcasts(exp)
     case Expr.GetChannel(exp, _, _, _) => countCheckedEcasts(exp)
     case Expr.PutChannel(exp1, exp2, _, _, _) => List(exp1, exp2).map(countCheckedEcasts).sum
+    case Expr.NewReentrantLock(_, _, _) => 0
+    case Expr.LockReentrantLock(exp, _, _, _) => countCheckedEcasts(exp)
+    case Expr.TryLockReentrantLock(exp, _, _, _) => countCheckedEcasts(exp)
+    case Expr.UnlockReentrantLock(exp, _, _, _) => countCheckedEcasts(exp)
     case Expr.SelectChannel(rules, default, _, _, _) => default.map(countCheckedEcasts).sum + rules.map {
       case TypedAst.SelectChannelRule(_, chan, exp, _) => countCheckedEcasts(chan) + countCheckedEcasts(exp)
     }.sum

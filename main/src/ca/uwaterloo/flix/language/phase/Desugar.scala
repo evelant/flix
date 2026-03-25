@@ -765,6 +765,21 @@ object Desugar {
       val e2 = visitExp(exp2)
       Expr.PutChannel(e1, e2, loc)
 
+    case WeededAst.Expr.NewReentrantLock(loc) =>
+      Expr.NewReentrantLock(loc)
+
+    case WeededAst.Expr.LockReentrantLock(exp, loc) =>
+      val e = visitExp(exp)
+      Expr.LockReentrantLock(e, loc)
+
+    case WeededAst.Expr.TryLockReentrantLock(exp, loc) =>
+      val e = visitExp(exp)
+      Expr.TryLockReentrantLock(e, loc)
+
+    case WeededAst.Expr.UnlockReentrantLock(exp, loc) =>
+      val e = visitExp(exp)
+      Expr.UnlockReentrantLock(e, loc)
+
     case WeededAst.Expr.SelectChannel(rules, exp, loc) =>
       val rs = rules.map(visitSelectChannelRule)
       val es = exp.map(visitExp)

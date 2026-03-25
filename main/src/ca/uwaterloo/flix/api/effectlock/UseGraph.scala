@@ -247,6 +247,18 @@ object UseGraph {
     case Expr.PutChannel(exp1, exp2, _, _, _) =>
       visitExp(exp1) ++ visitExp(exp2)
 
+    case Expr.NewReentrantLock(_, _, _) =>
+      ListMap.empty
+
+    case Expr.LockReentrantLock(exp, _, _, _) =>
+      visitExp(exp)
+
+    case Expr.TryLockReentrantLock(exp, _, _, _) =>
+      visitExp(exp)
+
+    case Expr.UnlockReentrantLock(exp, _, _, _) =>
+      visitExp(exp)
+
     case Expr.SelectChannel(selects, optExp, _, _, _) =>
       visitExps(selects.map(_.exp)) ++ visitExps(selects.map(_.chan)) ++ optExp.map(visitExp).getOrElse(ListMap.empty)
 

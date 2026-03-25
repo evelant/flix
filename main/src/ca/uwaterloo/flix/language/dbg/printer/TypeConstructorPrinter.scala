@@ -47,6 +47,7 @@ object TypeConstructorPrinter {
     case TypeConstructor.StringBuilderHandle => DocAst.Type.AsIs("StringBuilderHandle")
     case TypeConstructor.RegexMatcher => DocAst.Type.AsIs("RegexMatcher")
     case TypeConstructor.ChannelHandle => DocAst.Type.AsIs("ChannelHandle")
+    case TypeConstructor.ReentrantLockHandle => DocAst.Type.AsIs("ReentrantLockHandle")
     case TypeConstructor.Arrow(arity) => DocAst.Type.AsIs(s"Arrow($arity)")
     case TypeConstructor.ArrowWithoutEffect(arity) => DocAst.Type.AsIs(s"ArrowWithoutEffect($arity)")
     case TypeConstructor.RecordRowEmpty => DocAst.Type.RecordRowEmpty

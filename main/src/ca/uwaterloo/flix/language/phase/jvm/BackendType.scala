@@ -149,7 +149,8 @@ object BackendType {
       case SimpleType.Regex => JvmName.Regex.toTpe
       case SimpleType.StringBuilderHandle => JvmName.StringBuilder.toTpe
       case SimpleType.RegexMatcher => JvmName.RegexMatcher.toTpe
-      case SimpleType.ChannelHandle => JvmName.BlockingQueue.toTpe
+      case SimpleType.ChannelHandle => BackendType.Object
+      case SimpleType.ReentrantLockHandle => BackendType.Object
       case SimpleType.Region => BackendObjType.Region.toTpe
       case SimpleType.Null => BackendType.Object
       case SimpleType.Array(tpe) => Array(toBackendType(tpe))
@@ -196,7 +197,7 @@ object BackendType {
     case SimpleType.Float32 => BackendType.Float32
     case SimpleType.Float64 => BackendType.Float64
     case SimpleType.Void | SimpleType.AnyType | SimpleType.Unit | SimpleType.BigDecimal | SimpleType.BigInt |
-         SimpleType.String | SimpleType.Regex | SimpleType.StringBuilderHandle | SimpleType.RegexMatcher | SimpleType.ChannelHandle | SimpleType.Array(_) | SimpleType.Lazy(_) |
+         SimpleType.String | SimpleType.Regex | SimpleType.StringBuilderHandle | SimpleType.RegexMatcher | SimpleType.ChannelHandle | SimpleType.ReentrantLockHandle | SimpleType.Array(_) | SimpleType.Lazy(_) |
          SimpleType.Tuple(_) | SimpleType.Enum(_, _) | SimpleType.Struct(_, _) | SimpleType.Arrow(_, _) |
          SimpleType.RecordEmpty | SimpleType.RecordExtend(_, _, _) |
          SimpleType.ExtensibleExtend(_, _, _) | SimpleType.ExtensibleEmpty | SimpleType.Native(_) |

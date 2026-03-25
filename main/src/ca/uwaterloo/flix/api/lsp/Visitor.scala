@@ -556,6 +556,18 @@ object Visitor {
         visitExpr(exp1)
         visitExpr(exp2)
 
+      case Expr.NewReentrantLock(_, _, _) =>
+        ()
+
+      case Expr.LockReentrantLock(exp, _, _, _) =>
+        visitExpr(exp)
+
+      case Expr.TryLockReentrantLock(exp, _, _, _) =>
+        visitExpr(exp)
+
+      case Expr.UnlockReentrantLock(exp, _, _, _) =>
+        visitExpr(exp)
+
       case Expr.SelectChannel(rules, default, _, _, _) =>
         rules.foreach(visitSelectChannelRule)
         default.foreach(visitExpr)

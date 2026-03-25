@@ -178,6 +178,7 @@ object FormatType {
       case DisplayType.StringBuilderHandle => true
       case DisplayType.RegexMatcher => true
       case DisplayType.ChannelHandle => true
+      case DisplayType.ReentrantLockHandle => true
       case DisplayType.Array => true
       case DisplayType.ArrayWithoutRegion => true
       case DisplayType.Vector => true
@@ -261,6 +262,7 @@ object FormatType {
       case DisplayType.StringBuilderHandle => "StringBuilderHandle"
       case DisplayType.RegexMatcher => "RegexMatcher"
       case DisplayType.ChannelHandle => "ChannelHandle"
+      case DisplayType.ReentrantLockHandle => "ReentrantLockHandle"
       case DisplayType.Array => "Array"
       case DisplayType.ArrayWithoutRegion => "ArrayWithoutRegion"
       case DisplayType.Vector => "Vector"

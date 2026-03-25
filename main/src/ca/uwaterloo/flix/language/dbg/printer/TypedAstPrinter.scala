@@ -98,6 +98,10 @@ object TypedAstPrinter {
     case Expr.NewChannel(_, _, _, _) => DocAst.Expr.Unknown
     case Expr.GetChannel(_, _, _, _) => DocAst.Expr.Unknown
     case Expr.PutChannel(_, _, _, _, _) => DocAst.Expr.Unknown
+    case Expr.NewReentrantLock(_, _, _) => DocAst.Expr.Unknown
+    case Expr.LockReentrantLock(_, _, _, _) => DocAst.Expr.Unknown
+    case Expr.TryLockReentrantLock(_, _, _, _) => DocAst.Expr.Unknown
+    case Expr.UnlockReentrantLock(_, _, _, _) => DocAst.Expr.Unknown
     case Expr.SelectChannel(_, _, _, _, _) => DocAst.Expr.Unknown
     case Expr.Spawn(exp1, exp2, _, _, _) => DocAst.Expr.Spawn(print(exp1), print(exp2))
     case Expr.ParYield(_, _, _, _, _) => DocAst.Expr.Unknown

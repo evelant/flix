@@ -775,6 +775,24 @@ object Kinder {
         val evar = Type.freshVar(Kind.Eff, loc.asSynthetic)
         KindedAst.Expr.PutChannel(exp1, exp2, evar, loc)
 
+      case ResolvedAst.Expr.NewReentrantLock(loc) =>
+        KindedAst.Expr.NewReentrantLock(loc)
+
+      case ResolvedAst.Expr.LockReentrantLock(exp0, loc) =>
+        val exp = visitExp(exp0, kenv0, root)
+        val evar = Type.freshVar(Kind.Eff, loc.asSynthetic)
+        KindedAst.Expr.LockReentrantLock(exp, evar, loc)
+
+      case ResolvedAst.Expr.TryLockReentrantLock(exp0, loc) =>
+        val exp = visitExp(exp0, kenv0, root)
+        val evar = Type.freshVar(Kind.Eff, loc.asSynthetic)
+        KindedAst.Expr.TryLockReentrantLock(exp, evar, loc)
+
+      case ResolvedAst.Expr.UnlockReentrantLock(exp0, loc) =>
+        val exp = visitExp(exp0, kenv0, root)
+        val evar = Type.freshVar(Kind.Eff, loc.asSynthetic)
+        KindedAst.Expr.UnlockReentrantLock(exp, evar, loc)
+
       case ResolvedAst.Expr.SelectChannel(rules0, exp0, loc) =>
         val rules = rules0.map(visitSelectChannelRule(_, kenv0, root))
         val exp = exp0.map(visitExp(_, kenv0, root))

@@ -126,8 +126,8 @@ instance Writable[Process.StdIn] {
     pub def write(b: Array[Int8, r], r: Process.StdIn): Result[IoError, Int32] \ r + IO = {
         let StdIn(ph) = r;
         let ProcessHandle(id) = ph;
-        let (ok, n, msg) = %%PROCESS_STDIN_WRITE%%((id, b));
-        if (ok) Ok(n) else Err(IoError(ErrorKind.Other, msg))
+        let (ok, n, kind, msg) = %%PROCESS_STDIN_WRITE%%((id, b));
+        if (ok) Ok(n) else Err(IoError(IoError.errorKindFromCode(kind), msg))
     }
 }
 
@@ -138,8 +138,8 @@ instance Readable[Process.StdOut] {
     pub def read(b: Array[Int8, r], r: Process.StdOut): Result[IoError, Int32] \ r + IO = {
         let StdOut(ph) = r;
         let ProcessHandle(id) = ph;
-        let (ok, n, msg) = %%PROCESS_STDOUT_READ%%((id, b));
-        if (ok) Ok(n) else Err(IoError(ErrorKind.Other, msg))
+        let (ok, n, kind, msg) = %%PROCESS_STDOUT_READ%%((id, b));
+        if (ok) Ok(n) else Err(IoError(IoError.errorKindFromCode(kind), msg))
     }
 }
 
@@ -150,8 +150,8 @@ instance Readable[Process.StdErr] {
     pub def read(b: Array[Int8, r], r: Process.StdErr): Result[IoError, Int32] \ r + IO = {
         let StdErr(ph) = r;
         let ProcessHandle(id) = ph;
-        let (ok, n, msg) = %%PROCESS_STDERR_READ%%((id, b));
-        if (ok) Ok(n) else Err(IoError(ErrorKind.Other, msg))
+        let (ok, n, kind, msg) = %%PROCESS_STDERR_READ%%((id, b));
+        if (ok) Ok(n) else Err(IoError(IoError.errorKindFromCode(kind), msg))
     }
 }
 

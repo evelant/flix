@@ -436,6 +436,17 @@ object Safety {
       visitExp(exp1)
       visitExp(exp2)
 
+    case Expr.NewReentrantLock(_, _, _) =>
+
+    case Expr.LockReentrantLock(exp, _, _, _) =>
+      visitExp(exp)
+
+    case Expr.TryLockReentrantLock(exp, _, _, _) =>
+      visitExp(exp)
+
+    case Expr.UnlockReentrantLock(exp, _, _, _) =>
+      visitExp(exp)
+
     case Expr.SelectChannel(rules, default, _, _, _) =>
       rules.foreach {
         case SelectChannelRule(_, chan, body, _) =>

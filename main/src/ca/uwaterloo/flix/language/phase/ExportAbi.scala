@@ -203,6 +203,14 @@ object ExportAbi {
       r <- portableFromSimpleType(result)
     } yield Signature(ps, r)
 
+  /**
+    * Exported Flix defs with no user-visible parameters are represented internally as a
+    * single `Unit` parameter. Collapse that here so public embedding surfaces use a genuine
+    * zero-argument ABI instead of `tuple<>` / `Unit` placeholder parameters.
+    */
+  def portableExportSignature(params: List[SimpleType], result: SimpleType): Option[Signature] =
+    portableSignature(normalizeExportParams(params), result)
+
   def aggregateTypes(sig: Signature): List[AbiType] =
     (sig.params :+ sig.result).flatMap(flattenAbiType).filter(isAggregate).distinct
 
@@ -220,6 +228,11 @@ object ExportAbi {
   def isAggregate(tpe: AbiType): Boolean = tpe match {
     case AbiType.List(_) | AbiType.Array(_) | AbiType.Tuple(_) | AbiType.Option(_) | AbiType.Result(_, _) | AbiType.Record(_) => true
     case _ => false
+  }
+
+  private def normalizeExportParams(params: List[SimpleType]): List[SimpleType] = params match {
+    case SimpleType.Unit :: Nil => Nil
+    case _ => params
   }
 
   private def portableFromType0(tpe: Type): Result[Option[AbiType], Unit] = tpe match {

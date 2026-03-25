@@ -166,6 +166,15 @@ object Simplifier {
           val t = visitType(tpe)
           SimplifiedAst.Expr.ApplyAtomic(AtomicOp.Lazy, List(lambdaExp), t, Purity.Pure, loc)
 
+        case AtomicOp.Unary(SemanticOp.ExnOp.KindId) =>
+          // Exception kind ids depend only on the simplified portable payload type.
+          // Fold them here so catch dispatch and Exn.mk are keyed by the exact same type view.
+          val List(e) = es
+          val t = visitType(tpe)
+          val kindId = ExnKindId.of(e.tpe)
+          val cst = SimplifiedAst.Expr.Cst(Constant.Int32(kindId), t, loc)
+          SimplifiedAst.Expr.Stm(e, cst, t, purity, loc)
+
         case AtomicOp.HoleError(_) | AtomicOp.Throw =>
           // Simplify purity to impure, must be done after Monomorph
           val t = visitType(tpe)
@@ -331,6 +340,8 @@ object Simplifier {
           case TypeConstructor.RegexMatcher => SimpleType.RegexMatcher
 
           case TypeConstructor.ChannelHandle => SimpleType.ChannelHandle
+
+          case TypeConstructor.ReentrantLockHandle => SimpleType.ReentrantLockHandle
 
           case TypeConstructor.RecordRowEmpty => SimpleType.RecordEmpty
 
@@ -510,6 +521,8 @@ object Simplifier {
           case TypeConstructor.RegexMatcher => cst
 
           case TypeConstructor.ChannelHandle => cst
+
+          case TypeConstructor.ReentrantLockHandle => cst
 
           case TypeConstructor.RecordRowEmpty => cst
 

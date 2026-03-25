@@ -234,6 +234,153 @@ class PortableStdlibLlvmNativeRuntimeSuite extends AnyFunSuite {
     }
   }
 
+  for (tc <- PortableExceptionParityCases.All) {
+    test(s"portable-exception-parity-llvm-native-${tc.id}") {
+      assume(hasZig, s"zig not found on PATH (skipping LLVM-native exception parity test: ${tc.id})")
+
+      val driverFile = Files.createTempFile(s"flix-portable-llvm-native-${tc.id}-", ".flix")
+      val outDir = Files.createTempDirectory(s"flix-llvm-native-${tc.id}-")
+      try {
+        Files.writeString(driverFile, tc.source, StandardCharsets.UTF_8)
+
+        val flix = new Flix()
+        flix.setOptions(TestOptions.copy(outputPath = outDir))
+        implicit val sctx: SecurityContext = SecurityContext.Unrestricted
+
+        flix.addFile(driverFile)
+
+        val (optRoot, errors) = flix.check()
+        if (errors.nonEmpty) {
+          fail(CompilationMessage.formatAll(errors)(flix.getFormatter, optRoot))
+        }
+
+        flix.codeGen(optRoot.get)
+
+        val (exit, output) = runExecutable(executablePath(outDir))
+        if (exit != 0) {
+          fail(s"LLVM-native exception parity driver '${tc.id}' failed with exit $exit:\n$output")
+        }
+        if (output.trim != tc.expectedOutput) {
+          fail(s"Expected exception parity result ${tc.expectedOutput} for '${tc.id}', but got:\n$output")
+        }
+      } finally {
+        Files.deleteIfExists(driverFile)
+        deleteRecursive(outDir)
+      }
+    }
+  }
+
+  for (tc <- PortableControlParityCases.All) {
+    test(s"portable-control-parity-llvm-native-${tc.id}") {
+      assume(hasZig, s"zig not found on PATH (skipping LLVM-native control parity test: ${tc.id})")
+
+      val driverFile = Files.createTempFile(s"flix-portable-llvm-native-${tc.id}-", ".flix")
+      val outDir = Files.createTempDirectory(s"flix-llvm-native-${tc.id}-")
+      try {
+        Files.writeString(driverFile, tc.source, StandardCharsets.UTF_8)
+
+        val flix = new Flix()
+        flix.setOptions(TestOptions.copy(outputPath = outDir))
+        implicit val sctx: SecurityContext = SecurityContext.Unrestricted
+
+        flix.addFile(driverFile)
+
+        val (optRoot, errors) = flix.check()
+        if (errors.nonEmpty) {
+          fail(CompilationMessage.formatAll(errors)(flix.getFormatter, optRoot))
+        }
+
+        flix.codeGen(optRoot.get)
+
+        val (exit, output) = runExecutable(executablePath(outDir))
+        if (exit != 0) {
+          fail(s"LLVM-native control parity driver '${tc.id}' failed with exit $exit:\n$output")
+        }
+        if (output.trim != tc.expectedOutput) {
+          fail(s"Expected control parity result ${tc.expectedOutput} for '${tc.id}', but got:\n$output")
+        }
+      } finally {
+        Files.deleteIfExists(driverFile)
+        deleteRecursive(outDir)
+      }
+    }
+  }
+
+  for (tc <- PortableCancellationParityCases.All) {
+    test(s"portable-cancellation-parity-llvm-native-${tc.id}") {
+      assume(hasZig, s"zig not found on PATH (skipping LLVM-native cancellation parity test: ${tc.id})")
+
+      val driverFile = Files.createTempFile(s"flix-portable-llvm-native-${tc.id}-", ".flix")
+      val outDir = Files.createTempDirectory(s"flix-llvm-native-${tc.id}-")
+      try {
+        Files.writeString(driverFile, tc.source, StandardCharsets.UTF_8)
+
+        val flix = new Flix()
+        flix.setOptions(TestOptions.copy(outputPath = outDir))
+        implicit val sctx: SecurityContext = SecurityContext.Unrestricted
+
+        flix.addFile(driverFile)
+
+        val (optRoot, errors) = flix.check()
+        if (errors.nonEmpty) {
+          fail(CompilationMessage.formatAll(errors)(flix.getFormatter, optRoot))
+        }
+
+        flix.codeGen(optRoot.get)
+
+        val (exit, output) = runExecutable(executablePath(outDir))
+        if (exit != 0) {
+          fail(s"LLVM-native cancellation parity driver '${tc.id}' failed with exit $exit:\n$output")
+        }
+        if (output.trim != tc.expectedOutput) {
+          fail(s"Expected cancellation parity result ${tc.expectedOutput} for '${tc.id}', but got:\n$output")
+        }
+      } finally {
+        Files.deleteIfExists(driverFile)
+        deleteRecursive(outDir)
+      }
+    }
+  }
+
+  test("llvm-native-cancel-sleeping-child") {
+    assume(hasZig, "zig not found on PATH (skipping LLVM-native cancellation timer test)")
+
+    val driverFile = Files.createTempFile("flix-llvm-native-cancel-sleep-", ".flix")
+    val outDir = Files.createTempDirectory("flix-llvm-native-cancel-sleep-")
+    try {
+      Files.writeString(driverFile, cancelSleepingChildDriverSource, StandardCharsets.UTF_8)
+
+      val flix = new Flix()
+      flix.setOptions(TestOptions.copy(outputPath = outDir))
+      implicit val sctx: SecurityContext = SecurityContext.Unrestricted
+
+      flix.addFile(driverFile)
+
+      val (optRoot, errors) = flix.check()
+      if (errors.nonEmpty) {
+        fail(CompilationMessage.formatAll(errors)(flix.getFormatter, optRoot))
+      }
+
+      flix.codeGen(optRoot.get)
+
+      val (exit, output) = runExecutable(
+        executablePath(outDir),
+        env = Map.empty,
+        timeoutMs = 2000L,
+      )
+
+      if (exit != 1) {
+        fail(s"Expected child exception to terminate the driver with exit 1, but got $exit:\n$output")
+      }
+      if (!output.contains("Uncaught Flix exception")) {
+        fail(s"Expected uncaught child exception report, but output was:\n$output")
+      }
+    } finally {
+      Files.deleteIfExists(driverFile)
+      deleteRecursive(outDir)
+    }
+  }
+
   private def mkPortableDriverSource(): String = {
     val flix = new Flix()
     flix.setOptions(TestOptions)
@@ -303,7 +450,7 @@ class PortableStdlibLlvmNativeRuntimeSuite extends AnyFunSuite {
       |    let (tx, rx) = Channel.unbuffered();
       |
       |    spawn {
-      |        %%SLEEP_MILLIS%%(100i64);
+      |        Timer.runWithIO(() -> Timer.sleepMillis(100i64));
       |        Channel.send(42, tx);
       |        ()
       |    } @ rc;
@@ -327,17 +474,46 @@ class PortableStdlibLlvmNativeRuntimeSuite extends AnyFunSuite {
       |    println("Weather: 12.5°C")
       |""".stripMargin
 
+  private val cancelSleepingChildDriverSource: String =
+    """
+      |mod Test {}
+      |
+      |def main(): Unit \ IO =
+      |    region rc {
+      |        spawn {
+      |            Timer.runWithIO(() -> Timer.sleepMillis(5000i64));
+      |            ()
+      |        } @ rc;
+      |
+      |        spawn {
+      |            throw Exn.mk(123)
+      |        } @ rc;
+      |
+      |        ()
+      |    }
+      |""".stripMargin
+
   private def runExecutable(executable: Path): (Int, String) =
     runExecutable(executable, Map.empty)
 
   private def runExecutable(executable: Path, env: Map[String, String]): (Int, String) = {
+    runExecutable(executable, env, timeoutMs = 30000L)
+  }
+
+  private def runExecutable(executable: Path, env: Map[String, String], timeoutMs: Long): (Int, String) = {
     val pb = new ProcessBuilder(List(executable.toString).asJava)
     val pbEnv = pb.environment()
     env.foreach { case (k, v) => pbEnv.put(k, v) }
     pb.redirectErrorStream(true)
     val p = pb.start()
+    val finished = p.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
+    if (!finished) {
+      p.destroyForcibly()
+      val output = new String(p.getInputStream.readAllBytes(), StandardCharsets.UTF_8)
+      fail(s"Process timed out after ${timeoutMs}ms:\n$output")
+    }
     val output = new String(p.getInputStream.readAllBytes(), StandardCharsets.UTF_8)
-    val exit = p.waitFor()
+    val exit = p.exitValue()
     (exit, output)
   }
 

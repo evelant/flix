@@ -118,6 +118,19 @@ object ClassConstants {
 
   }
 
+  object AtomicReference {
+
+    val Constructor: ConstructorMethod =
+      ConstructorMethod(JvmName.AtomicReference, List(BackendType.Object))
+
+    val CompareAndSetMethod: InstanceMethod =
+      InstanceMethod(JvmName.AtomicReference, "compareAndSet", mkDescriptor(BackendType.Object, BackendType.Object)(BackendType.Bool))
+
+    val GetMethod: InstanceMethod =
+      InstanceMethod(JvmName.AtomicReference, "get", mkDescriptor()(BackendType.Object))
+
+  }
+
   object BigDecimal {
     val Constructor: ConstructorMethod = ClassMaker.ConstructorMethod(JvmName.BigDecimal, List(BackendType.String))
   }
@@ -130,6 +143,9 @@ object ClassConstants {
 
     val AddMethod: InstanceMethod =
       InstanceMethod(JvmName.ConcurrentLinkedQueue, "add", mkDescriptor(BackendType.Object)(BackendType.Bool))
+
+    val IteratorMethod: InstanceMethod =
+      InstanceMethod(JvmName.ConcurrentLinkedQueue, "iterator", mkDescriptor()(JvmName.Iterator.toTpe))
 
     val PollMethod: InstanceMethod =
       InstanceMethod(JvmName.ConcurrentLinkedQueue, "poll", mkDescriptor()(BackendType.Object))
@@ -181,6 +197,16 @@ object ClassConstants {
 
     val LockInterruptiblyMethod: InstanceMethod =
       InstanceMethod(JvmName.ReentrantLock, "lockInterruptibly", MethodDescriptor.NothingToVoid)
+
+  }
+
+  object RegionSupport {
+
+    val CancelChildrenMethod: StaticMethod =
+      StaticMethod(JvmName.RegionSupport, "cancelChildren", mkDescriptor(JvmName.ConcurrentLinkedQueue.toTpe, JvmName.Thread.toTpe)(VoidableType.Void))
+
+    val ReportChildExceptionMethod: StaticMethod =
+      StaticMethod(JvmName.RegionSupport, "reportChildException", mkDescriptor(JvmName.AtomicReference.toTpe, JvmName.Throwable.toTpe, JvmName.ConcurrentLinkedQueue.toTpe, JvmName.Thread.toTpe)(VoidableType.Void))
 
   }
 

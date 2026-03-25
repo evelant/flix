@@ -89,6 +89,7 @@ object Serialize {
     case TypeConstructor.StringBuilderHandle => StringBuilderHandle
     case TypeConstructor.RegexMatcher => RegexMatcher
     case TypeConstructor.ChannelHandle => ChannelHandle
+    case TypeConstructor.ReentrantLockHandle => ReentrantLockHandle
     case TypeConstructor.Arrow(arity) => Arrow(arity)
     case TypeConstructor.ArrowWithoutEffect(arity) => ArrowWithoutEffect(arity)
     case TypeConstructor.RecordRowEmpty => RecordRowEmpty

@@ -203,6 +203,14 @@ object NamedAst {
 
     case class PutChannel(exp1: Expr, exp2: Expr, loc: SourceLocation) extends Expr
 
+    case class NewReentrantLock(loc: SourceLocation) extends Expr
+
+    case class LockReentrantLock(exp: Expr, loc: SourceLocation) extends Expr
+
+    case class TryLockReentrantLock(exp: Expr, loc: SourceLocation) extends Expr
+
+    case class UnlockReentrantLock(exp: Expr, loc: SourceLocation) extends Expr
+
     case class SelectChannel(rules: List[SelectChannelRule], default: Option[Expr], loc: SourceLocation) extends Expr
 
     case class Spawn(exp1: Expr, exp2: Expr, loc: SourceLocation) extends Expr

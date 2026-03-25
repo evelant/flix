@@ -223,6 +223,28 @@ class PortableHttpLlvmNativeSuite extends AnyFunSuite with BeforeAndAfterAll {
       }
     })
 
+    server.createContext("/slow", new HttpHandler {
+      override def handle(exchange: HttpExchange): Unit = {
+        try {
+          Thread.sleep(5000)
+          val bytes = "slow".getBytes(StandardCharsets.UTF_8)
+          exchange.sendResponseHeaders(200, bytes.length)
+          val os = exchange.getResponseBody
+          try {
+            os.write(bytes)
+          } finally {
+            os.close()
+          }
+        } catch {
+          case _: InterruptedException =>
+            Thread.currentThread().interrupt()
+            exchange.close()
+          case _: IOException =>
+            exchange.close()
+        }
+      }
+    })
+
     server.start()
     baseUrl = s"http://127.0.0.1:${server.getAddress.getPort}"
 
@@ -393,6 +415,72 @@ class PortableHttpLlvmNativeSuite extends AnyFunSuite with BeforeAndAfterAll {
          |        case Ok(_) => expect(false, "expected Unsupported, got Ok(_)")
          |    }
          |
+         |def cancelSlow01(): Unit \\ IO = {
+         |    let start = Clock.runWithIO(() -> Clock.now());
+         |    let payload = try {
+         |        region rc {
+         |            spawn {
+         |                let _ = Http.runWithIO(() -> Http.get("${baseUrl}/slow", Map.empty()));
+         |                ()
+         |            } @ rc;
+         |            spawn {
+         |                throw Exn.mk(1);
+         |                ()
+         |            } @ rc;
+         |            ()
+         |        };
+         |        -1
+         |    } catch {
+         |        case exn: Int32 => Exn.payloadAs(exn)
+         |        case _: Exn => -2
+         |    };
+         |    let elapsed = Clock.runWithIO(() -> Clock.now()) - start;
+         |    let _ = expect(payload == 1, "expected child exception to win during HTTP cancellation test");
+         |    let _ = expect(elapsed < 2000i64, "expected region cancellation to interrupt slow HTTP child promptly");
+         |    ()
+         |}
+         |
+         |def cancelSlowInFlight01(tag: Int32): Unit \\ IO = {
+         |    let start = Clock.runWithIO(() -> Clock.now());
+         |    let payload = try {
+         |        region rc {
+         |            spawn {
+         |                let _ = Http.runWithIO(() -> Http.get("${baseUrl}/slow", Map.empty()));
+         |                ()
+         |            } @ rc;
+         |            spawn {
+         |                Timer.runWithIO(() -> Timer.sleepMillis(50i64));
+         |                throw Exn.mk(tag);
+         |                ()
+         |            } @ rc;
+         |            ()
+         |        };
+         |        -1
+         |    } catch {
+         |        case exn: Int32 => Exn.payloadAs(exn)
+         |        case _: Exn => -2
+         |    };
+         |    let elapsed = Clock.runWithIO(() -> Clock.now()) - start;
+         |    let _ = expect(payload == tag, "expected child exception to win during in-flight HTTP cancellation test");
+         |    let _ = expect(elapsed < 2000i64, "expected in-flight HTTP cancellation to interrupt the slow child promptly");
+         |    ()
+         |}
+         |
+         |def cancelSlowInFlightStressLoop(n: Int32): Unit \\ IO =
+         |    if (n <= 0i32) ()
+         |    else {
+         |        cancelSlowInFlight01(n);
+         |        cancelSlowInFlightStressLoop(n - 1i32)
+         |    }
+         |
+         |def cancelSlowInFlightStress01(): Unit \\ IO = {
+         |    let start = Clock.runWithIO(() -> Clock.now());
+         |    cancelSlowInFlightStressLoop(8i32);
+         |    let elapsed = Clock.runWithIO(() -> Clock.now()) - start;
+         |    let _ = expect(elapsed < 5000i64, "expected repeated in-flight HTTP cancellation to stay prompt");
+         |    ()
+         |}
+         |
          |def main(): Unit \\ IO = {
          |    hello01();
          |    multiHeader01();
@@ -410,6 +498,8 @@ class PortableHttpLlvmNativeSuite extends AnyFunSuite with BeforeAndAfterAll {
          |    reqHeader01();
          |    invalidUrl01();
          |    unsupportedScheme01();
+         |    cancelSlow01();
+         |    cancelSlowInFlightStress01();
          |    ()
          |}
          |""".stripMargin

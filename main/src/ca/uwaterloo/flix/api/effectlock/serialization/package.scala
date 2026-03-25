@@ -87,6 +87,8 @@ package object serialization {
 
   case object ChannelHandle extends STC
 
+  case object ReentrantLockHandle extends STC
+
   case class Arrow(arity: Int) extends STC
 
   case class ArrowWithoutEffect(arity: Int) extends STC

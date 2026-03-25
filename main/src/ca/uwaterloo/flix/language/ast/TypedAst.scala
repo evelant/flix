@@ -252,6 +252,14 @@ object TypedAst {
 
     case class PutChannel(exp1: Expr, exp2: Expr, tpe: Type, eff: Type, loc: SourceLocation) extends Expr
 
+    case class NewReentrantLock(tpe: Type, eff: Type, loc: SourceLocation) extends Expr
+
+    case class LockReentrantLock(exp: Expr, tpe: Type, eff: Type, loc: SourceLocation) extends Expr
+
+    case class TryLockReentrantLock(exp: Expr, tpe: Type, eff: Type, loc: SourceLocation) extends Expr
+
+    case class UnlockReentrantLock(exp: Expr, tpe: Type, eff: Type, loc: SourceLocation) extends Expr
+
     case class SelectChannel(rules: List[SelectChannelRule], default: Option[Expr], tpe: Type, eff: Type, loc: SourceLocation) extends Expr
 
     case class Spawn(exp1: Expr, exp2: Expr, tpe: Type, eff: Type, loc: SourceLocation) extends Expr

@@ -149,6 +149,135 @@ class PortableStdlibLlvmWasmRuntimeSuite extends AnyFunSuite {
     }
   }
 
+  for (tc <- PortableExceptionParityCases.All) {
+    test(s"portable-exception-parity-llvm-wasm-${tc.id}") {
+      assume(hasZig, s"zig not found on PATH (skipping LLVM-wasm exception parity test: ${tc.id})")
+      assume(hasWasmTools, s"wasm-tools not found on PATH (skipping LLVM-wasm exception parity test: ${tc.id})")
+      assume(hasJco, s"jco not found on PATH (skipping LLVM-wasm exception parity test: ${tc.id})")
+      assume(hasNode, s"node not found on PATH (skipping LLVM-wasm exception parity test: ${tc.id})")
+
+      val driverFile = Files.createTempFile(s"flix-portable-llvm-wasm-${tc.id}-", ".flix")
+      val outDir = Files.createTempDirectory(s"flix-llvm-wasm-${tc.id}-")
+      val sandboxDir = Files.createTempDirectory(s"flix-llvm-wasm-${tc.id}-sandbox-")
+      try {
+        Files.writeString(driverFile, tc.source, StandardCharsets.UTF_8)
+
+        val flix = new Flix()
+        flix.setOptions(TestOptions.copy(outputPath = outDir))
+        implicit val sctx: SecurityContext = SecurityContext.Unrestricted
+
+        flix.addFile(driverFile)
+
+        val (optRoot, errors) = flix.check()
+        if (errors.nonEmpty) {
+          fail(CompilationMessage.formatAll(errors)(flix.getFormatter, optRoot))
+        }
+
+        flix.codeGen(optRoot.get)
+
+        val componentJs = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmDriver.componentJsPath(outDir)
+        val exportsManifest = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmExportWriter.manifestPath(outDir)
+        val (exit, output) = runNode(componentJs, exportsManifest, sandboxDir)
+        if (exit != 0) {
+          fail(s"LLVM-wasm exception parity driver '${tc.id}' failed with exit $exit:\n$output")
+        }
+        if (output.trim != tc.expectedOutput) {
+          fail(s"Expected exception parity result ${tc.expectedOutput} for '${tc.id}', but got:\n$output")
+        }
+      } finally {
+        Files.deleteIfExists(driverFile)
+        deleteRecursive(outDir)
+        deleteRecursive(sandboxDir)
+      }
+    }
+  }
+
+  for (tc <- PortableControlParityCases.All) {
+    test(s"portable-control-parity-llvm-wasm-${tc.id}") {
+      assume(hasZig, s"zig not found on PATH (skipping LLVM-wasm control parity test: ${tc.id})")
+      assume(hasWasmTools, s"wasm-tools not found on PATH (skipping LLVM-wasm control parity test: ${tc.id})")
+      assume(hasJco, s"jco not found on PATH (skipping LLVM-wasm control parity test: ${tc.id})")
+      assume(hasNode, s"node not found on PATH (skipping LLVM-wasm control parity test: ${tc.id})")
+
+      val driverFile = Files.createTempFile(s"flix-portable-llvm-wasm-${tc.id}-", ".flix")
+      val outDir = Files.createTempDirectory(s"flix-llvm-wasm-${tc.id}-")
+      val sandboxDir = Files.createTempDirectory(s"flix-llvm-wasm-${tc.id}-sandbox-")
+      try {
+        Files.writeString(driverFile, tc.source, StandardCharsets.UTF_8)
+
+        val flix = new Flix()
+        flix.setOptions(TestOptions.copy(outputPath = outDir))
+        implicit val sctx: SecurityContext = SecurityContext.Unrestricted
+
+        flix.addFile(driverFile)
+
+        val (optRoot, errors) = flix.check()
+        if (errors.nonEmpty) {
+          fail(CompilationMessage.formatAll(errors)(flix.getFormatter, optRoot))
+        }
+
+        flix.codeGen(optRoot.get)
+
+        val componentJs = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmDriver.componentJsPath(outDir)
+        val exportsManifest = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmExportWriter.manifestPath(outDir)
+        val (exit, output) = runNode(componentJs, exportsManifest, sandboxDir)
+        if (exit != 0) {
+          fail(s"LLVM-wasm control parity driver '${tc.id}' failed with exit $exit:\n$output")
+        }
+        if (output.trim != tc.expectedOutput) {
+          fail(s"Expected control parity result ${tc.expectedOutput} for '${tc.id}', but got:\n$output")
+        }
+      } finally {
+        Files.deleteIfExists(driverFile)
+        deleteRecursive(outDir)
+        deleteRecursive(sandboxDir)
+      }
+    }
+  }
+
+  for (tc <- PortableCancellationParityCases.All) {
+    test(s"portable-cancellation-parity-llvm-wasm-${tc.id}") {
+      assume(hasZig, s"zig not found on PATH (skipping LLVM-wasm cancellation parity test: ${tc.id})")
+      assume(hasWasmTools, s"wasm-tools not found on PATH (skipping LLVM-wasm cancellation parity test: ${tc.id})")
+      assume(hasJco, s"jco not found on PATH (skipping LLVM-wasm cancellation parity test: ${tc.id})")
+      assume(hasNode, s"node not found on PATH (skipping LLVM-wasm cancellation parity test: ${tc.id})")
+
+      val driverFile = Files.createTempFile(s"flix-portable-llvm-wasm-${tc.id}-", ".flix")
+      val outDir = Files.createTempDirectory(s"flix-llvm-wasm-${tc.id}-")
+      val sandboxDir = Files.createTempDirectory(s"flix-llvm-wasm-${tc.id}-sandbox-")
+      try {
+        Files.writeString(driverFile, tc.source, StandardCharsets.UTF_8)
+
+        val flix = new Flix()
+        flix.setOptions(TestOptions.copy(outputPath = outDir))
+        implicit val sctx: SecurityContext = SecurityContext.Unrestricted
+
+        flix.addFile(driverFile)
+
+        val (optRoot, errors) = flix.check()
+        if (errors.nonEmpty) {
+          fail(CompilationMessage.formatAll(errors)(flix.getFormatter, optRoot))
+        }
+
+        flix.codeGen(optRoot.get)
+
+        val componentJs = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmDriver.componentJsPath(outDir)
+        val exportsManifest = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmExportWriter.manifestPath(outDir)
+        val (exit, output) = runNode(componentJs, exportsManifest, sandboxDir)
+        if (exit != 0) {
+          fail(s"LLVM-wasm cancellation parity driver '${tc.id}' failed with exit $exit:\n$output")
+        }
+        if (output.trim != tc.expectedOutput) {
+          fail(s"Expected cancellation parity result ${tc.expectedOutput} for '${tc.id}', but got:\n$output")
+        }
+      } finally {
+        Files.deleteIfExists(driverFile)
+        deleteRecursive(outDir)
+        deleteRecursive(sandboxDir)
+      }
+    }
+  }
+
   private def mkPortableDriverSource(): String = {
     val flix = new Flix()
     flix.setOptions(TestOptions)
@@ -232,4 +361,5 @@ class PortableStdlibLlvmWasmRuntimeSuite extends AnyFunSuite {
       |def main(): Unit \ IO =
       |    println("Weather: 12.5°C")
       |""".stripMargin
+
 }

@@ -159,6 +159,15 @@ object TypeConstructor {
   }
 
   /**
+    * A type constructor that represents the type of portable reentrant lock handles.
+    *
+    * This type exists to allow a portable stdlib synchronization implementation without JVM interop.
+    */
+  case object ReentrantLockHandle extends TypeConstructor {
+    def kind: Kind = Kind.Star
+  }
+
+  /**
     * A type constructor that represents the type of functions.
     */
   @IntroducedBy(Kinder.getClass)

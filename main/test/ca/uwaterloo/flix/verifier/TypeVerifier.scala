@@ -271,7 +271,7 @@ object TypeVerifier {
             case SemanticOp.IoOp.TcpServerLocalPort => (SimpleType.Int64, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int32, SimpleType.String)))
             case SemanticOp.IoOp.TcpServerAccept => (SimpleType.Int64, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int64, SimpleType.Int32, SimpleType.String)))
             case SemanticOp.IoOp.TcpServerClose => (SimpleType.Int64, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.String)))
-            case SemanticOp.IoOp.ProcessStdinWrite => (SimpleType.mkTuple(List(SimpleType.Int64, SimpleType.Array(SimpleType.Int8))), SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.ProcessStdinWrite => (SimpleType.mkTuple(List(SimpleType.Int64, SimpleType.Array(SimpleType.Int8))), SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int32, SimpleType.Int32, SimpleType.String)))
             case SemanticOp.IoOp.ProcessExec => (SimpleType.mkTuple(List(SimpleType.Array(SimpleType.String), SimpleType.Bool, SimpleType.String, SimpleType.Array(SimpleType.String))), SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int64, SimpleType.Int32, SimpleType.String)))
             case SemanticOp.IoOp.ProcessExitValue => (SimpleType.Int64, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int32, SimpleType.Int32, SimpleType.String)))
             case SemanticOp.IoOp.ProcessIsAlive => (SimpleType.Int64, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Bool, SimpleType.Int32, SimpleType.String)))
@@ -279,8 +279,8 @@ object TypeVerifier {
             case SemanticOp.IoOp.ProcessStop => (SimpleType.Int64, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Unit, SimpleType.Int32, SimpleType.String)))
             case SemanticOp.IoOp.ProcessWaitFor => (SimpleType.Int64, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int32, SimpleType.Int32, SimpleType.String)))
             case SemanticOp.IoOp.ProcessWaitForTimeout => (SimpleType.mkTuple(List(SimpleType.Int64, SimpleType.Int64)), SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Bool, SimpleType.Int32, SimpleType.String)))
-            case SemanticOp.IoOp.ProcessStdoutRead => (SimpleType.mkTuple(List(SimpleType.Int64, SimpleType.Array(SimpleType.Int8))), SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int32, SimpleType.String)))
-            case SemanticOp.IoOp.ProcessStderrRead => (SimpleType.mkTuple(List(SimpleType.Int64, SimpleType.Array(SimpleType.Int8))), SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.ProcessStdoutRead => (SimpleType.mkTuple(List(SimpleType.Int64, SimpleType.Array(SimpleType.Int8))), SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int32, SimpleType.Int32, SimpleType.String)))
+            case SemanticOp.IoOp.ProcessStderrRead => (SimpleType.mkTuple(List(SimpleType.Int64, SimpleType.Array(SimpleType.Int8))), SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int32, SimpleType.Int32, SimpleType.String)))
             case SemanticOp.IoOp.ProcessRelease => (SimpleType.Int64, SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.String)))
             case SemanticOp.IoOp.HttpRequest => (SimpleType.mkTuple(List(SimpleType.String, SimpleType.String, SimpleType.Array(SimpleType.String), SimpleType.Bool, SimpleType.String)), SimpleType.mkTuple(List(SimpleType.Bool, SimpleType.Int32, SimpleType.Array(SimpleType.String), SimpleType.String, SimpleType.Int32, SimpleType.String)))
             case SemanticOp.IoOp.EnvGetArgs => (SimpleType.Region, SimpleType.Array(SimpleType.String))
@@ -672,6 +672,48 @@ object TypeVerifier {
           val List(t1, _) = ts
           check(expected = SimpleType.ChannelHandle)(actual = t1, loc)
           check(expected = SimpleType.Unit)(actual = tpe, loc)
+
+        case AtomicOp.ChannelSelect =>
+          if (ts.isEmpty) {
+            throw InternalCompilerException("Unexpected arity for ChannelSelect", loc)
+          }
+          val (channels, rest) = ts.splitAt(ts.length - 1)
+          channels.foreach(t => check(expected = SimpleType.ChannelHandle)(actual = t, loc))
+          rest match {
+            case List(blocking) =>
+              check(expected = SimpleType.Bool)(actual = blocking, loc)
+            case _ =>
+              throw InternalCompilerException(s"Unexpected arity for ChannelSelect: ${ts.length}", loc)
+          }
+          check(expected = SimpleType.Int64)(actual = tpe, loc)
+
+        case AtomicOp.ChannelSelectIndex =>
+          val List(tokenTpe) = ts
+          check(expected = SimpleType.Int64)(actual = tokenTpe, loc)
+          check(expected = SimpleType.Int32)(actual = tpe, loc)
+
+        case AtomicOp.ChannelSelectGet =>
+          val List(tokenTpe) = ts
+          check(expected = SimpleType.Int64)(actual = tokenTpe, loc)
+          tpe
+
+        case AtomicOp.ReentrantLockNew =>
+          check(expected = SimpleType.ReentrantLockHandle)(actual = tpe, loc)
+
+        case AtomicOp.ReentrantLockLock =>
+          val List(lockTpe) = ts
+          check(expected = SimpleType.ReentrantLockHandle)(actual = lockTpe, loc)
+          check(expected = SimpleType.Unit)(actual = tpe, loc)
+
+        case AtomicOp.ReentrantLockTryLock =>
+          val List(lockTpe) = ts
+          check(expected = SimpleType.ReentrantLockHandle)(actual = lockTpe, loc)
+          check(expected = SimpleType.Bool)(actual = tpe, loc)
+
+        case AtomicOp.ReentrantLockUnlock =>
+          val List(lockTpe) = ts
+          check(expected = SimpleType.ReentrantLockHandle)(actual = lockTpe, loc)
+          check(expected = SimpleType.Bool)(actual = tpe, loc)
 
         case AtomicOp.GetField(field) =>
           val List(t) = ts

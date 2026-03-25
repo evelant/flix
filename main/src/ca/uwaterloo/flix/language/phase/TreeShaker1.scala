@@ -270,6 +270,18 @@ object TreeShaker1 {
     case Expr.PutChannel(exp1, exp2, _, _, _) =>
       visitExp(exp1) ++ visitExp(exp2)
 
+    case Expr.NewReentrantLock(_, _, _) =>
+      Set.empty
+
+    case Expr.LockReentrantLock(exp, _, _, _) =>
+      visitExp(exp)
+
+    case Expr.TryLockReentrantLock(exp, _, _, _) =>
+      visitExp(exp)
+
+    case Expr.UnlockReentrantLock(exp, _, _, _) =>
+      visitExp(exp)
+
     case Expr.Spawn(exp1, exp2, _, _, _) =>
       visitExp(exp1) ++ visitExp(exp2)
 

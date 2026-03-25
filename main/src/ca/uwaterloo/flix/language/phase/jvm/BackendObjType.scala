@@ -1455,12 +1455,13 @@ object BackendObjType {
 
       cm.mkField(ThreadsField, IsPrivate, IsFinal, NotVolatile)
       cm.mkField(RegionThreadField, IsPrivate, IsFinal, NotVolatile)
-      cm.mkField(ChildExceptionField, IsPrivate, NotFinal, IsVolatile)
+      cm.mkField(ChildExceptionField, IsPrivate, IsFinal, NotVolatile)
       cm.mkField(OnExitField, IsPrivate, IsFinal, NotVolatile)
 
       cm.mkConstructor(Constructor, IsPublic, constructorIns(_))
 
       cm.mkMethod(SpawnMethod, IsPublic, IsFinal, spawnIns(_))
+      cm.mkMethod(CancelChildrenMethod, IsPublic, IsFinal, cancelChildrenIns(_))
       cm.mkMethod(ExitMethod, IsPublic, IsFinal, exitIns(_))
       cm.mkMethod(ReportChildExceptionMethod, IsPublic, IsFinal, reportChildExceptionIns(_))
       cm.mkMethod(ReThrowChildExceptionMethod, IsPublic, IsFinal, reThrowChildExceptionIns(_))
@@ -1478,8 +1479,8 @@ object BackendObjType {
     // private final Thread regionThread = Thread.currentThread();
     private def RegionThreadField: InstanceField = InstanceField(this.jvmName, "regionThread", JvmName.Thread.toTpe)
 
-    // private volatile Throwable childException = null;
-    private def ChildExceptionField: InstanceField = InstanceField(this.jvmName, "childException", JvmName.Throwable.toTpe)
+    // private final AtomicReference<Throwable> childException = new AtomicReference<>(null);
+    private def ChildExceptionField: InstanceField = InstanceField(this.jvmName, "childException", JvmName.AtomicReference.toTpe)
 
     def Constructor: ConstructorMethod = ConstructorMethod(this.jvmName, Nil)
 
@@ -1495,7 +1496,10 @@ object BackendObjType {
       INVOKESTATIC(ClassConstants.Thread.CurrentThreadMethod)
       PUTFIELD(RegionThreadField)
       thisLoad()
+      NEW(JvmName.AtomicReference)
+      DUP()
       ACONST_NULL()
+      INVOKESPECIAL(ClassConstants.AtomicReference.Constructor)
       PUTFIELD(ChildExceptionField)
       thisLoad()
       NEW(JvmName.LinkedList)
@@ -1533,6 +1537,21 @@ object BackendObjType {
         POP()
         RETURN()
       }
+    }
+
+    // final public void cancelChildren() {
+    //   RegionSupport.cancelChildren(threads, regionThread);
+    // }
+    def CancelChildrenMethod: InstanceMethod = InstanceMethod(this.jvmName, "cancelChildren", MethodDescriptor.NothingToVoid)
+
+    private def cancelChildrenIns(implicit mv: MethodVisitor): Unit = {
+      import BytecodeInstructions.*
+      thisLoad()
+      GETFIELD(ThreadsField)
+      thisLoad()
+      GETFIELD(RegionThreadField)
+      INVOKESTATIC(ClassConstants.RegionSupport.CancelChildrenMethod)
+      RETURN()
     }
 
     // final public void exit() throws InterruptedException {
@@ -1594,33 +1613,44 @@ object BackendObjType {
     }
 
     // final public void reportChildException(Throwable e) {
-    //   childException = e;
-    //   // Note: do not interrupt the region thread; child exceptions take effect at region exit.
+    //   RegionSupport.reportChildException(childException, e, threads, regionThread);
     // }
     def ReportChildExceptionMethod: InstanceMethod = InstanceMethod(this.jvmName, "reportChildException", mkDescriptor(JvmName.Throwable.toTpe)(VoidableType.Void))
 
     private def reportChildExceptionIns(implicit mv: MethodVisitor): Unit = {
+      import BytecodeInstructions.*
       thisLoad()
+      GETFIELD(ChildExceptionField)
       ALOAD(1)
-      PUTFIELD(ChildExceptionField)
+      thisLoad()
+      GETFIELD(ThreadsField)
+      thisLoad()
+      GETFIELD(RegionThreadField)
+      INVOKESTATIC(ClassConstants.RegionSupport.ReportChildExceptionMethod)
       RETURN()
     }
 
     // final public void reThrowChildException() throws Throwable {
-    //   if (childException != null)
-    //     throw childException;
+    //   Throwable ex = (Throwable) childException.get();
+    //   if (ex != null) throw ex;
     // }
     def ReThrowChildExceptionMethod: InstanceMethod = InstanceMethod(this.jvmName, "reThrowChildException", MethodDescriptor.NothingToVoid)
 
     private def reThrowChildExceptionIns(implicit mv: MethodVisitor): Unit = {
-      thisLoad()
-      GETFIELD(ChildExceptionField)
-      ifCondition(Condition.NONNULL) {
+      import BytecodeInstructions.*
+      withName(1, JvmName.Throwable.toTpe) { ex =>
         thisLoad()
         GETFIELD(ChildExceptionField)
-        ATHROW()
+        INVOKEVIRTUAL(ClassConstants.AtomicReference.GetMethod)
+        CHECKCAST(JvmName.Throwable)
+        DUP()
+        ex.store()
+        ifCondition(Condition.NONNULL) {
+          ex.load()
+          ATHROW()
+        }
+        RETURN()
       }
-      RETURN()
     }
 
     // final public void runOnExit(Runnable r) {

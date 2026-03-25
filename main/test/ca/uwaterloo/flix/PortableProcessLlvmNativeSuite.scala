@@ -101,6 +101,208 @@ class PortableProcessLlvmNativeSuite extends AnyFunSuite {
     }
   }
 
+  test("portable-process-wait-timeout-llvm-native") {
+    assume(hasZig, "zig not found on PATH (skipping LLVM-native portable process runtime test)")
+    assume(!isWindows, "POSIX shell required for LLVM-native portable process timeout test")
+
+    val program =
+      s"""
+         |def expect(cond: Bool, msg: String): Unit =
+         |    if (cond) () else bug!(msg)
+         |
+         |def expectOk(res: Result[IoError, a]): a = match res {
+         |    case Ok(v) => v
+         |    case Err(e) => bug!("expected Ok but got Err: " + ToString.toString(e))
+         |}
+         |
+         |def expectOkUnit(res: Result[IoError, Unit]): Unit = match res {
+         |    case Ok(_) => ()
+         |    case Err(e) => bug!("expected Ok but got Err: " + ToString.toString(e))
+         |}
+         |
+         |def main(): Unit \\ IO = {
+         |    let ph = ProcessWithResult.runWithIO(() -> ProcessWithResult.exec("/bin/sh", "-c" :: "sleep 5" :: Nil)) |> expectOk;
+         |    let start = Clock.runWithIO(() -> Clock.now());
+         |    let done0 = ProcessWithResult.runWithIO(() -> ProcessWithResult.waitForTimeout(ph, 50i64, TimeUnit.Milliseconds)) |> expectOk;
+         |    let elapsed = Clock.runWithIO(() -> Clock.now()) - start;
+         |    let _ = expect(not done0, "expected waitForTimeout to report false while child is still running");
+         |    let _ = expect(elapsed < 2000i64, "expected waitForTimeout to return promptly on a running child");
+         |    let alive0 = ProcessWithResult.runWithIO(() -> ProcessWithResult.isAlive(ph)) |> expectOk;
+         |    let _ = expect(alive0, "expected child process to remain alive after timed wait");
+         |
+         |    ProcessWithResult.runWithIO(() -> ProcessWithResult.stop(ph)) |> expectOkUnit;
+         |    let done1 = ProcessWithResult.runWithIO(() -> ProcessWithResult.waitForTimeout(ph, 2000i64, TimeUnit.Milliseconds)) |> expectOk;
+         |    let _ = expect(done1, "expected waitForTimeout to observe completion after stop");
+         |    ProcessHandle.release(ph) |> expectOkUnit;
+         |    ()
+         |}
+         |""".stripMargin
+
+    val testFile = Files.createTempFile("flix-portable-process-timeout-llvm-native-", ".flix")
+    val outDir = Files.createTempDirectory("flix-llvm-native-process-timeout-")
+    try {
+      Files.writeString(testFile, program, StandardCharsets.UTF_8)
+      val exe = compileLlvmNative(testFile, outDir)
+      val (exit, output) = runExecutable(exe)
+      if (exit != 0) {
+        fail(s"LLVM-native portable process timeout test program failed with exit $exit:\n$output")
+      }
+    } finally {
+      Files.deleteIfExists(testFile)
+      deleteRecursive(outDir)
+    }
+  }
+
+  test("portable-process-wait-cancellation-llvm-native") {
+    assume(hasZig, "zig not found on PATH (skipping LLVM-native portable process runtime test)")
+    assume(!isWindows, "POSIX shell required for LLVM-native portable process cancellation test")
+
+    val program =
+      s"""
+         |def expect(cond: Bool, msg: String): Unit =
+         |    if (cond) () else bug!(msg)
+         |
+         |def expectOk(res: Result[IoError, a]): a = match res {
+         |    case Ok(v) => v
+         |    case Err(e) => bug!("expected Ok but got Err: " + ToString.toString(e))
+         |}
+         |
+         |def expectOkUnit(res: Result[IoError, Unit]): Unit = match res {
+         |    case Ok(_) => ()
+         |    case Err(e) => bug!("expected Ok but got Err: " + ToString.toString(e))
+         |}
+         |
+         |def main(): Unit \\ IO = {
+         |    let ph = ProcessWithResult.runWithIO(() -> ProcessWithResult.exec("/bin/sh", "-c" :: "sleep 5" :: Nil)) |> expectOk;
+         |
+         |    let start = Clock.runWithIO(() -> Clock.now());
+         |    let payload = try {
+         |        region rc {
+         |            spawn {
+         |                let _ = ProcessWithResult.runWithIO(() -> ProcessWithResult.waitFor(ph));
+         |                ()
+         |            } @ rc;
+         |
+         |            spawn {
+         |                Timer.runWithIO(() -> Timer.sleepMillis(50i64));
+         |                throw Exn.mk(13);
+         |                ()
+         |            } @ rc;
+         |
+         |            ()
+         |        };
+         |        -1
+         |    } catch {
+         |        case exn: Int32 => Exn.payloadAs(exn)
+         |        case _: Exn => -2
+         |    };
+         |
+         |    let elapsed = Clock.runWithIO(() -> Clock.now()) - start;
+         |    let _ = expect(payload == 13, "expected sibling throw to cancel blocked process wait");
+         |    let _ = expect(elapsed < 2000i64, "expected region cancellation to interrupt in-flight process wait promptly");
+         |
+         |    let alive0 = ProcessWithResult.runWithIO(() -> ProcessWithResult.isAlive(ph)) |> expectOk;
+         |    let _ = expect(alive0, "expected blocked wait cancellation not to stop the child process");
+         |
+         |    ProcessWithResult.runWithIO(() -> ProcessWithResult.stop(ph)) |> expectOkUnit;
+         |    let done0 = ProcessWithResult.runWithIO(() -> ProcessWithResult.waitForTimeout(ph, 2000i64, TimeUnit.Milliseconds)) |> expectOk;
+         |    let _ = expect(done0, "expected waitForTimeout to observe completion after explicit stop");
+         |    ProcessHandle.release(ph) |> expectOkUnit;
+         |    ()
+         |}
+         |""".stripMargin
+
+    val testFile = Files.createTempFile("flix-portable-process-cancel-llvm-native-", ".flix")
+    val outDir = Files.createTempDirectory("flix-llvm-native-process-cancel-")
+    try {
+      Files.writeString(testFile, program, StandardCharsets.UTF_8)
+      val exe = compileLlvmNative(testFile, outDir)
+      val (exit, output) = runExecutable(exe)
+      if (exit != 0) {
+        fail(s"LLVM-native portable process cancellation test program failed with exit $exit:\n$output")
+      }
+    } finally {
+      Files.deleteIfExists(testFile)
+      deleteRecursive(outDir)
+    }
+  }
+
+  test("portable-process-stdout-read-cancellation-llvm-native") {
+    assume(hasZig, "zig not found on PATH (skipping LLVM-native portable process runtime test)")
+    assume(!isWindows, "POSIX shell required for LLVM-native portable process stdout cancellation test")
+
+    val program =
+      s"""
+         |def expect(cond: Bool, msg: String): Unit =
+         |    if (cond) () else bug!(msg)
+         |
+         |def expectOk(res: Result[IoError, a]): a = match res {
+         |    case Ok(v) => v
+         |    case Err(e) => bug!("expected Ok but got Err: " + ToString.toString(e))
+         |}
+         |
+         |def expectOkUnit(res: Result[IoError, Unit]): Unit = match res {
+         |    case Ok(_) => ()
+         |    case Err(e) => bug!("expected Ok but got Err: " + ToString.toString(e))
+         |}
+         |
+         |def main(): Unit \\ IO = {
+         |    let ph = ProcessWithResult.runWithIO(() -> ProcessWithResult.exec("/bin/sh", "-c" :: "sleep 5" :: Nil)) |> expectOk;
+         |
+         |    let start = Clock.runWithIO(() -> Clock.now());
+         |    let payload = try {
+         |        region rc {
+         |            spawn {
+         |                let out = Process.StdOut.StdOut(ph);
+         |                let buf: Array[Int8, Static] = Array.empty(Static, 64);
+         |                let _ = Readable.read(buf, out);
+         |                ()
+         |            } @ rc;
+         |
+         |            spawn {
+         |                Timer.runWithIO(() -> Timer.sleepMillis(50i64));
+         |                throw Exn.mk(17);
+         |                ()
+         |            } @ rc;
+         |
+         |            ()
+         |        };
+         |        -1
+         |    } catch {
+         |        case exn: Int32 => Exn.payloadAs(exn)
+         |        case _: Exn => -2
+         |    };
+         |
+         |    let elapsed = Clock.runWithIO(() -> Clock.now()) - start;
+         |    let _ = expect(payload == 17, "expected sibling throw to cancel blocked stdout read");
+         |    let _ = expect(elapsed < 2000i64, "expected region cancellation to interrupt blocked stdout read promptly");
+         |
+         |    let alive0 = ProcessWithResult.runWithIO(() -> ProcessWithResult.isAlive(ph)) |> expectOk;
+         |    let _ = expect(alive0, "expected blocked stdout cancellation not to stop the child process");
+         |
+         |    ProcessWithResult.runWithIO(() -> ProcessWithResult.stop(ph)) |> expectOkUnit;
+         |    let done0 = ProcessWithResult.runWithIO(() -> ProcessWithResult.waitForTimeout(ph, 2000i64, TimeUnit.Milliseconds)) |> expectOk;
+         |    let _ = expect(done0, "expected waitForTimeout to observe completion after explicit stop");
+         |    ProcessHandle.release(ph) |> expectOkUnit;
+         |    ()
+         |}
+         |""".stripMargin
+
+    val testFile = Files.createTempFile("flix-portable-process-stdout-cancel-llvm-native-", ".flix")
+    val outDir = Files.createTempDirectory("flix-llvm-native-process-stdout-cancel-")
+    try {
+      Files.writeString(testFile, program, StandardCharsets.UTF_8)
+      val exe = compileLlvmNative(testFile, outDir)
+      val (exit, output) = runExecutable(exe)
+      if (exit != 0) {
+        fail(s"LLVM-native portable process stdout cancellation test program failed with exit $exit:\n$output")
+      }
+    } finally {
+      Files.deleteIfExists(testFile)
+      deleteRecursive(outDir)
+    }
+  }
+
   private def escapeFlixString(s: String): String =
     "\"" + s.flatMap {
       case '\\' => "\\\\"

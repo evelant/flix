@@ -482,13 +482,13 @@ JVM semantics to preserve (high-level):
 - `wait-for` / `wait-for-timeout` interruption ⇒ `Interrupted` (`kindCode=2`).
 - `pid` unsupported ⇒ `Unsupported` (`kindCode=12`).
 
-### 6.3 `%%PROCESS_{STDIN_WRITE,STDOUT_READ,STDERR_READ}%%` (Legacy 3-tuple I/O)
+### 6.3 `%%PROCESS_{STDIN_WRITE,STDOUT_READ,STDERR_READ}%%`
 
 Flix surface:
 
-- `%%PROCESS_STDIN_WRITE%%((processId, buf))` → `(ok, n: Int32, msg)`
-- `%%PROCESS_STDOUT_READ%%((processId, buf))` → `(ok, n: Int32, msg)`
-- `%%PROCESS_STDERR_READ%%((processId, buf))` → `(ok, n: Int32, msg)`
+- `%%PROCESS_STDIN_WRITE%%((processId, buf))` → `(ok, n: Int32, kindCode: Int32, msg)`
+- `%%PROCESS_STDOUT_READ%%((processId, buf))` → `(ok, n: Int32, kindCode: Int32, msg)`
+- `%%PROCESS_STDERR_READ%%((processId, buf))` → `(ok, n: Int32, kindCode: Int32, msg)`
 
 WIT:
 
@@ -502,6 +502,10 @@ WIT:
   - `resume-process-stderr-read-ok(ctx, s, bytes)` / `resume-process-stderr-read-err(...)`
 
 Semantics to preserve:
+
+- Invalid/unknown handle ⇒ `ok=false`, `n=0`, `kindCode=14`, message `"invalid process handle."`.
+- Cancellation / interruption ⇒ `ok=false`, `n=0`, `kindCode=2`.
+- Other I/O failures continue to map through `io-error.kind-code`.
 
 - “Write all or error”: on `stdin-write` success, `n = bytes.len`.
 - EOF is represented as `bytes = []` and yields `n = 0` (JVM maps `-1` → `0`).

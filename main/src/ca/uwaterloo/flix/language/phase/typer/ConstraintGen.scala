@@ -1081,15 +1081,24 @@ object ConstraintGen {
           (resTpe, resEff)
 
         case SemanticOp.IoOp.TcpSocketRead |
-             SemanticOp.IoOp.TcpSocketWrite |
-             SemanticOp.IoOp.ProcessStdinWrite |
+             SemanticOp.IoOp.TcpSocketWrite =>
+          val regionVar = freshVar(Kind.Eff, exp.loc)
+          val argTpe = Type.mkTuple(List(Type.Int64, Type.mkArray(Type.Int8, regionVar, exp.loc)), exp.loc)
+          val (tpe, eff) = visitExp(exp)
+          c.expectType(expected = argTpe, actual = tpe, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
+          val resTpe = tvar
+          val resEff = Type.mkUnion(eff, regionVar, Type.IO, exp.loc)
+          (resTpe, resEff)
+
+        case SemanticOp.IoOp.ProcessStdinWrite |
              SemanticOp.IoOp.ProcessStdoutRead |
              SemanticOp.IoOp.ProcessStderrRead =>
           val regionVar = freshVar(Kind.Eff, exp.loc)
           val argTpe = Type.mkTuple(List(Type.Int64, Type.mkArray(Type.Int8, regionVar, exp.loc)), exp.loc)
           val (tpe, eff) = visitExp(exp)
           c.expectType(expected = argTpe, actual = tpe, exp.loc)
-          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
+          c.unifyType(Type.mkTuple(List(Type.Bool, Type.Int32, Type.Int32, Type.Str), exp.loc), tvar, exp.loc)
           val resTpe = tvar
           val resEff = Type.mkUnion(eff, regionVar, Type.IO, exp.loc)
           (resTpe, resEff)
@@ -2100,6 +2109,35 @@ object ConstraintGen {
         c.expectType(expected = elmTpe, actual = tpe2, exp2.loc)
         c.unifyType(evar, Type.mkUnion(eff1, eff2, Type.Chan, loc), loc)
         val resTpe = Type.mkUnit(loc)
+        val resEff = evar
+        (resTpe, resEff)
+
+      case Expr.NewReentrantLock(loc) =>
+        val resTpe = Type.Cst(TypeConstructor.ReentrantLockHandle, loc)
+        val resEff = Type.IO
+        (resTpe, resEff)
+
+      case Expr.LockReentrantLock(exp, evar, loc) =>
+        val (tpe, eff) = visitExp(exp)
+        c.expectType(expected = Type.Cst(TypeConstructor.ReentrantLockHandle, loc), actual = tpe, exp.loc)
+        c.unifyType(evar, Type.mkUnion(eff, Type.IO, loc), loc)
+        val resTpe = Type.mkUnit(loc)
+        val resEff = evar
+        (resTpe, resEff)
+
+      case Expr.TryLockReentrantLock(exp, evar, loc) =>
+        val (tpe, eff) = visitExp(exp)
+        c.expectType(expected = Type.Cst(TypeConstructor.ReentrantLockHandle, loc), actual = tpe, exp.loc)
+        c.unifyType(evar, Type.mkUnion(eff, Type.IO, loc), loc)
+        val resTpe = Type.Bool
+        val resEff = evar
+        (resTpe, resEff)
+
+      case Expr.UnlockReentrantLock(exp, evar, loc) =>
+        val (tpe, eff) = visitExp(exp)
+        c.expectType(expected = Type.Cst(TypeConstructor.ReentrantLockHandle, loc), actual = tpe, exp.loc)
+        c.unifyType(evar, Type.mkUnion(eff, Type.IO, loc), loc)
+        val resTpe = Type.Bool
         val resEff = evar
         (resTpe, resEff)
 

@@ -21,8 +21,7 @@ import ca.uwaterloo.flix.language.ast.SourceLocation
 import ca.uwaterloo.flix.util.{ArtifactNames, Build, InternalCompilerException}
 
 import java.nio.charset.StandardCharsets
-import java.nio.file.{Files, Path, StandardCopyOption}
-import java.nio.file.Paths
+import java.nio.file.{FileSystem, FileSystemNotFoundException, FileSystems, Files, Path, Paths, StandardCopyOption}
 import scala.jdk.CollectionConverters.*
 
 /**
@@ -38,9 +37,8 @@ object LlvmNativeDriver {
 
   case class SharedLibraryArtifacts(sharedLibrary: Path)
 
-  private val BundledRuntimeZigResource: String = "/runtime/src/flix_rt_llvm.zig"
-  private val BundledUnicodeCaseTablesZigResource: String = "/runtime/src/unicode_case_tables.zig"
-  private val BundledRegexRuntimeZigResource: String = "/runtime/src/rt_regex.zig"
+  private val BundledRuntimeSourceDir: String = "/runtime/src"
+  private val BundledLibxevSourceDir: String = "/vendor/libxev/src"
 
   /**
     * Compiles `modulePath` (a `.ll` file) into a native executable in `outputPath/llvm/`.
@@ -58,7 +56,7 @@ object LlvmNativeDriver {
 
     val runtimeZig = resolveRuntimeZig(outDir)
 
-    val runtimeObj = compileRuntime(runtimeZig, outDir, optFlag)
+    val runtimeObjs = compileRuntime(runtimeZig, outDir, optFlag)
 
     val cmd = List(
       "zig",
@@ -66,7 +64,7 @@ object LlvmNativeDriver {
       "-Wno-override-module",
       optFlag,
       modulePath.toString,
-      runtimeObj.toString,
+    ) ::: runtimeObjs.map(_.toString) ::: List(
       "-o",
       exePath.toString
     )
@@ -97,7 +95,7 @@ object LlvmNativeDriver {
     }
 
     val runtimeZig = resolveRuntimeZig(outDir)
-    val runtimeObj = compileRuntime(runtimeZig, outDir, optFlag)
+    val runtimeObjs = compileRuntime(runtimeZig, outDir, optFlag)
     val moduleObj = compileModule(modulePath, outDir, optFlag)
 
     val libPath = staticLibraryPath(flix.options.outputPath, flix.options.artifactName)
@@ -107,8 +105,7 @@ object LlvmNativeDriver {
       "rcs",
       libPath.toString,
       moduleObj.toString,
-      runtimeObj.toString
-    )
+    ) ::: runtimeObjs.map(_.toString)
     val (arExit, arOutput) = exec(arCmd, outDir)
     if (arExit != 0) {
       throw InternalCompilerException(
@@ -135,7 +132,7 @@ object LlvmNativeDriver {
     }
 
     val runtimeZig = resolveRuntimeZig(outDir)
-    val runtimeObj = compileRuntime(runtimeZig, outDir, optFlag)
+    val runtimeObjs = compileRuntime(runtimeZig, outDir, optFlag)
     val moduleObj = compileModule(modulePath, outDir, optFlag)
 
     val libPath = sharedLibraryPath(flix.options.outputPath, flix.options.artifactName)
@@ -151,7 +148,7 @@ object LlvmNativeDriver {
       optFlag
     ) ::: windowsExportFlags ::: List(
       moduleObj.toString,
-      runtimeObj.toString,
+    ) ::: runtimeObjs.map(_.toString) ::: List(
       "-o",
       libPath.toString
     )
@@ -172,61 +169,96 @@ object LlvmNativeDriver {
     *
     * Bring-up behavior:
     *   1. Prefer `runtime/src/flix_rt_llvm.zig` relative to the current working directory.
-    *   2. Otherwise, extract the bundled resource from `flix.jar` into `outDir`.
+    *   2. Otherwise, extract the bundled runtime source tree and vendored `libxev` source into `outDir`.
     */
   private def resolveRuntimeZig(outDir: Path): Path = {
-    val cwdRuntime = Paths.get("runtime/src/flix_rt_llvm.zig").toAbsolutePath.normalize()
-    if (Files.exists(cwdRuntime)) return cwdRuntime
+    val runtimeDir = outDir.resolve("runtime/src").toAbsolutePath.normalize()
+    val libxevDir = runtimeDir.resolve("vendor/libxev/src").toAbsolutePath.normalize()
 
-    val dest = outDir.resolve("flix_rt_llvm.zig").toAbsolutePath.normalize()
-    val unicodeDest = outDir.resolve("unicode_case_tables.zig").toAbsolutePath.normalize()
-    val regexDest = outDir.resolve("rt_regex.zig").toAbsolutePath.normalize()
-    val is = Option(getClass.getResourceAsStream(BundledRuntimeZigResource)).getOrElse {
-      throw InternalCompilerException(
-        s"Missing LLVM runtime support file: '$cwdRuntime' and no bundled resource '$BundledRuntimeZigResource' found.",
-        SourceLocation.Unknown
-      )
-    }
-    val unicodeIs = Option(getClass.getResourceAsStream(BundledUnicodeCaseTablesZigResource)).getOrElse {
-      throw InternalCompilerException(
-        s"Missing LLVM runtime support file: '$cwdRuntime' and no bundled resource '$BundledUnicodeCaseTablesZigResource' found.",
-        SourceLocation.Unknown
-      )
-    }
-    val regexIs = Option(getClass.getResourceAsStream(BundledRegexRuntimeZigResource)).getOrElse {
-      throw InternalCompilerException(
-        s"Missing LLVM runtime support file: '$cwdRuntime' and no bundled resource '$BundledRegexRuntimeZigResource' found.",
-        SourceLocation.Unknown
-      )
+    val cwdRuntimeDir = Paths.get("runtime/src").toAbsolutePath.normalize()
+    val cwdLibxevDir = Paths.get("vendor/libxev/src").toAbsolutePath.normalize()
+
+    if (Files.exists(cwdRuntimeDir.resolve("flix_rt_llvm.zig")) && Files.exists(cwdLibxevDir.resolve("main.zig"))) {
+      copyTree(cwdRuntimeDir, runtimeDir)
+      copyTree(cwdLibxevDir, libxevDir)
+    } else {
+      copyBundledTree(BundledRuntimeSourceDir, runtimeDir)
+      copyBundledTree(BundledLibxevSourceDir, libxevDir)
     }
 
-    try {
-      Files.copy(is, dest, StandardCopyOption.REPLACE_EXISTING)
-      Files.copy(unicodeIs, unicodeDest, StandardCopyOption.REPLACE_EXISTING)
-      Files.copy(regexIs, regexDest, StandardCopyOption.REPLACE_EXISTING)
-    } finally {
-      is.close()
-      unicodeIs.close()
-      regexIs.close()
-    }
-
-    dest
+    runtimeDir.resolve("flix_rt_llvm.zig")
   }
 
-  private def compileRuntime(runtimeZig: Path, outDir: Path, optFlag: String): Path = {
-    val runtimeObj = outDir.resolve("flix_rt_llvm.o")
-    val compileRuntimeCmd =
-      List("zig", "cc", "-c", "-Wno-override-module") :::
-        picFlags :::
-        List(optFlag, runtimeZig.toString, "-o", runtimeObj.toString)
-    val (rtExit, rtOutput) = exec(compileRuntimeCmd, outDir)
-    if (rtExit != 0) {
+  private def copyTree(sourceDir: Path, destDir: Path): Unit = {
+    Files.walk(sourceDir).forEach { src =>
+      if (Files.isRegularFile(src)) {
+        val rel = sourceDir.relativize(src)
+        val dest = destDir.resolve(rel.toString).toAbsolutePath.normalize()
+        Option(dest.getParent).foreach(parent => Files.createDirectories(parent))
+        Files.copy(src, dest, StandardCopyOption.REPLACE_EXISTING)
+      }
+    }
+  }
+
+  private def copyBundledTree(resourceDir: String, destDir: Path): Unit = {
+    val resourceUrl = Option(getClass.getResource(resourceDir)).getOrElse {
       throw InternalCompilerException(
-        s"LLVM-native toolchain failed while compiling runtime (exit $rtExit):\n${compileRuntimeCmd.mkString(" ")}\n\n$rtOutput",
+        s"Missing bundled LLVM runtime resource tree '$resourceDir'.",
         SourceLocation.Unknown
       )
     }
-    runtimeObj
+
+    val resourceUri = resourceUrl.toURI
+
+    def copyFrom(root: Path, closeFs: Option[FileSystem]): Unit = {
+      try {
+        Files.walk(root).forEach { src =>
+          if (Files.isRegularFile(src)) {
+            val rel = root.relativize(src)
+            val dest = destDir.resolve(rel.toString).toAbsolutePath.normalize()
+            Option(dest.getParent).foreach(parent => Files.createDirectories(parent))
+            Files.copy(src, dest, StandardCopyOption.REPLACE_EXISTING)
+          }
+        }
+      } finally {
+        closeFs.foreach(_.close())
+      }
+    }
+
+    if (resourceUri.getScheme == "jar") {
+      val (fs, closeFs) =
+        try (FileSystems.getFileSystem(resourceUri), None)
+        catch {
+          case _: FileSystemNotFoundException =>
+            val created = FileSystems.newFileSystem(resourceUri, Map.empty[String, AnyRef].asJava)
+            (created, Some(created))
+        }
+      copyFrom(fs.getPath(resourceDir), closeFs)
+    } else {
+      copyFrom(Paths.get(resourceUri), None)
+    }
+  }
+
+  private def compileRuntime(runtimeZig: Path, outDir: Path, optFlag: String): List[Path] = {
+    def compileOne(source: Path, objectName: String): Path = {
+      val runtimeObj = outDir.resolve(objectName)
+      val compileRuntimeCmd =
+        List("zig", "cc", "-c", "-Wno-override-module") :::
+          picFlags :::
+          List(optFlag, source.toString, "-o", runtimeObj.toString)
+      val (rtExit, rtOutput) = exec(compileRuntimeCmd, outDir)
+      if (rtExit != 0) {
+        throw InternalCompilerException(
+          s"LLVM-native toolchain failed while compiling runtime (exit $rtExit):\n${compileRuntimeCmd.mkString(" ")}\n\n$rtOutput",
+          SourceLocation.Unknown
+        )
+      }
+      runtimeObj
+    }
+
+    val rtCore = compileOne(runtimeZig, "flix_rt_llvm.o")
+    val rtXev = compileOne(runtimeZig.getParent.resolve("rt_xev.zig"), "rt_xev.o")
+    List(rtCore, rtXev)
   }
 
   private def compileModule(modulePath: Path, outDir: Path, optFlag: String): Path = {

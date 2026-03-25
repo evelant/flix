@@ -1,8 +1,41 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const async_wait = @import("async_wait_v0.zig");
+const fs_async = @import("fs_async_v0.zig");
+const http_wire = @import("http_wire_v0.zig");
+const http_std_wire = @import("http_request_std_wire_v0.zig");
 
 const is_wasm: bool = builtin.target.cpu.arch.isWasm();
 
+extern fn flix_native_timer_sleep(ms: u64) void;
+extern fn flix_native_timer_wait_new(ms: u64) *anyopaque;
+extern fn flix_native_timer_wait_cancel(wait: *anyopaque) void;
+extern fn flix_native_timer_wait_await(wait: *anyopaque) i32;
+extern fn flix_native_timer_wait_release(wait: *anyopaque) void;
+extern fn flix_native_tcp_connect_wait_new(ip_bytes_ptr: [*]const u8, ip_bytes_len: usize, port: u16) ?*anyopaque;
+extern fn flix_native_tcp_connect_wait_cancel(wait: *anyopaque) void;
+extern fn flix_native_tcp_connect_wait_await(wait: *anyopaque) i32;
+extern fn flix_native_tcp_connect_wait_payload_kind(wait: *anyopaque) i32;
+extern fn flix_native_tcp_connect_wait_take_socket_handle(wait: *anyopaque) usize;
+extern fn flix_native_tcp_connect_wait_error_ptr(wait: *anyopaque) ?*anyopaque;
+extern fn flix_native_tcp_connect_wait_error_len(wait: *anyopaque) usize;
+extern fn flix_native_tcp_connect_wait_release(wait: *anyopaque) void;
+extern fn flix_native_http_wait_new(req_blob_ptr: [*]const u8, req_blob_len: usize) *anyopaque;
+extern fn flix_native_http_wait_cancel(wait: *anyopaque) void;
+extern fn flix_native_http_wait_await(wait: *anyopaque) i32;
+extern fn flix_native_http_wait_response_ptr(wait: *anyopaque) ?*anyopaque;
+extern fn flix_native_http_wait_response_len(wait: *anyopaque) usize;
+extern fn flix_native_http_wait_release(wait: *anyopaque) void;
+
+const NativeTimerWaitExpired: i32 = 0;
+const NativeTimerWaitCanceled: i32 = 1;
+const NativeTcpConnectWaitCompleted: i32 = 0;
+const NativeTcpConnectWaitCanceled: i32 = 1;
+const NativeTcpConnectWaitPayloadNone: i32 = 0;
+const NativeTcpConnectWaitPayloadSocket: i32 = 1;
+const NativeTcpConnectWaitPayloadError: i32 = 2;
+const NativeHttpWaitCompleted: i32 = 0;
+const NativeHttpWaitCanceled: i32 = 1;
 // Allocator for runtime metadata and temporary buffers.
 // - On wasm32-freestanding we must not depend on libc.
 // - On native we prefer the C allocator for now.
@@ -814,6 +847,23 @@ const GcMarker = struct {
     worklist: std.ArrayListUnmanaged(*anyopaque),
 };
 
+const BlockedNativeWaitKind = enum(u32) {
+    none = 0,
+    timer = 1,
+    http = 2,
+    tcp_socket_connect = 3,
+    tcp_socket_read = 4,
+    tcp_server_accept = 5,
+    tcp_socket_write = 6,
+    file_op = 7,
+    process_wait = 8,
+    process_stdio = 9,
+    channel_put = 10,
+    channel_get = 11,
+    channel_select = 12,
+    reentrant_lock = 13,
+};
+
 const FlixCtx = struct {
     // Pollcheck bookkeeping (per `docs/planning/native-backend/pollcheck-handshake-spec.md`).
     //
@@ -826,6 +876,9 @@ const FlixCtx = struct {
     handles_mutex: RtMutex,
     handles: std.AutoHashMap(i64, FlixHandleEntry),
     cancel_exn: ?*anyopaque,
+    current_region_ptr: RtAtomic(usize),
+    blocked_wait_kind: RtAtomic(u32),
+    blocked_wait_ptr: RtAtomic(usize),
     // Explicit roots (shadow stack): stack of registered root slots owned by this context.
     roots: std.ArrayListUnmanaged(FlixRootEntry),
 };
@@ -835,6 +888,39 @@ fn requireCtx(ctx_ptr: *anyopaque) *FlixCtx {
 }
 
 threadlocal var current_ctx: ?*FlixCtx = null;
+
+fn currentCtxPtr() *anyopaque {
+    const ctx = current_ctx orelse @panic("missing current FlixCtx");
+    return @ptrCast(ctx);
+}
+
+fn ctxCurrentRegion(ctx: *FlixCtx) ?*FlixRegion {
+    const bits = ctx.current_region_ptr.load(.acquire);
+    return if (bits == 0) null else @ptrFromInt(bits);
+}
+
+fn setCurrentRegion(region: ?*FlixRegion) void {
+    current_region = region;
+    if (current_ctx) |ctx| {
+        const bits: usize = if (region) |r| @intFromPtr(r) else 0;
+        ctx.current_region_ptr.store(bits, .release);
+    }
+}
+
+fn ctxBlockedWait(ctx: *FlixCtx) struct { kind: BlockedNativeWaitKind, ptr: ?*anyopaque } {
+    const kind_raw = ctx.blocked_wait_kind.load(.acquire);
+    const bits = ctx.blocked_wait_ptr.load(.acquire);
+    return .{
+        .kind = std.meta.intToEnum(BlockedNativeWaitKind, kind_raw) catch .none,
+        .ptr = if (bits == 0) null else @ptrFromInt(bits),
+    };
+}
+
+fn ctxSetBlockedWait(ctx: *FlixCtx, kind: BlockedNativeWaitKind, wait: ?*anyopaque) void {
+    const bits: usize = if (wait) |p| @intFromPtr(p) else 0;
+    ctx.blocked_wait_ptr.store(bits, .release);
+    ctx.blocked_wait_kind.store(@intFromEnum(if (wait == null) BlockedNativeWaitKind.none else kind), .release);
+}
 
 // ============================================================================
 // Pollcheck + Handshake (v0, FUGC foundation)
@@ -1044,6 +1130,16 @@ fn gcMarkAllRoots(marker: *GcMarker) void {
         }
         g_channel_registry_mutex.unlock();
     }
+
+    // Channel select tokens (reserved payloads not yet consumed by ChannelSelectGet).
+    if (g_channel_select_tokens_initialized) {
+        g_channel_select_tokens_mutex.lock();
+        var it = g_channel_select_tokens.iterator();
+        while (it.next()) |e| {
+            gcMarkerMarkPayload(marker, e.value_ptr.payload);
+        }
+        g_channel_select_tokens_mutex.unlock();
+    }
 }
 
 fn gcMarkSweep(ctx: *FlixCtx) void {
@@ -1238,6 +1334,9 @@ export fn flix_ctx_new() *anyopaque {
         .handles_mutex = .{},
         .handles = std.AutoHashMap(i64, FlixHandleEntry).init(rt_alloc),
         .cancel_exn = null,
+        .current_region_ptr = .init(0),
+        .blocked_wait_kind = .init(@intFromEnum(BlockedNativeWaitKind.none)),
+        .blocked_wait_ptr = .init(0),
         .roots = .{},
     };
     // Avoid allocations in the hot path of root push/pop.
@@ -1332,8 +1431,8 @@ export fn flix_trace_suspension(ctx_ptr: *anyopaque, obj_ptr: *anyopaque) void {
 }
 
 export fn flix_cancel_requested(ctx_ptr: *anyopaque) bool {
-    _ = ctx_ptr;
-    var r = current_region;
+    const ctx: *FlixCtx = requireCtx(ctx_ptr);
+    var r = ctxCurrentRegion(ctx);
     while (r) |region| {
         if (region.cancel_requested.load(.acquire)) return true;
         r = region.parent;
@@ -1346,7 +1445,7 @@ export fn flix_cancel_exn(ctx_ptr: *anyopaque, cancelled_kind_id: i64, exn_ti0: 
     if (ctx.cancel_exn) |p| return p;
     const exn_ti = exn_ti0 orelse @panic("flix_cancel_exn: null exn typeinfo");
 
-    var r = current_region;
+    var r = ctxCurrentRegion(ctx);
     while (r) |region| {
         if (!region.cancel_requested.load(.acquire)) {
             r = region.parent;
@@ -3912,11 +4011,27 @@ const ChannelWaiter = struct {
     susp_handle: i64,
 };
 
+const LockWaiter = ChannelWaiter;
+
+const NativeChannelSelectWaiter = struct {
+    mutex: RtMutex = .{},
+    cond: RtCondition = .{},
+    signaled: bool = false,
+};
+
+const ChannelSelectToken = struct {
+    index: i32,
+    payload: i64,
+};
+
 const ChannelObj = struct {
     capacity: usize,
     mutex: RtMutex = .{},
     not_empty: RtCondition = .{},
     not_full: RtCondition = .{},
+
+    // Native blocking select waiters.
+    select_waiters_native: std.ArrayListUnmanaged(*NativeChannelSelectWaiter) = .{},
 
     // Cooperative (wasm) wait queues.
     //
@@ -3926,6 +4041,8 @@ const ChannelObj = struct {
     wait_getters_head: usize = 0,
     wait_putters: std.ArrayListUnmanaged(ChannelWaiter) = .{},
     wait_putters_head: usize = 0,
+    wait_selectors: std.ArrayListUnmanaged(ChannelWaiter) = .{},
+    wait_selectors_head: usize = 0,
 
     // Buffered channel state (capacity > 0).
     buf: ?[]i64 = null,
@@ -3936,17 +4053,34 @@ const ChannelObj = struct {
     // Unbuffered (rendezvous) channel state (capacity == 0).
     rv_has_msg: bool = false,
     rv_payload: i64 = 0,
+    rv_owner_token: usize = 0,
+};
+
+const ReentrantLockObj = struct {
+    mutex: RtMutex = .{},
+    available: RtCondition = .{},
+    owner_token: u64 = 0,
+    recursion: usize = 0,
+    waiters: std.ArrayListUnmanaged(LockWaiter) = .{},
+    waiters_head: usize = 0,
 };
 
 // Internal (wasm-only) suspension tags for cooperative channel ops.
 const WasmChanEffSymId: i64 = -2;
 const WasmChanOpGet: i64 = 1;
 const WasmChanOpPut: i64 = 2;
+const WasmChanOpSelect: i64 = 3;
+const WasmLockEffSymId: i64 = -4;
+const WasmLockOpAcquire: i64 = 1;
 
 // Registered live channels (GC root source for queued payloads).
 var g_channel_registry_initialized: bool = false;
 var g_channel_registry_mutex: RtMutex = .{};
 var g_channel_registry: std.AutoHashMap(usize, u8) = undefined;
+var g_channel_select_tokens_initialized: bool = false;
+var g_channel_select_tokens_mutex: RtMutex = .{};
+var g_channel_select_tokens: std.AutoHashMap(u64, ChannelSelectToken) = undefined;
+var g_next_channel_select_token: RtAtomic(u64) = .init(1);
 
 fn ensureChannelRegistryInitialized() void {
     if (g_channel_registry_initialized) return;
@@ -3957,11 +4091,119 @@ fn ensureChannelRegistryInitialized() void {
     g_channel_registry_initialized = true;
 }
 
+fn ensureChannelSelectTokensInitialized() void {
+    if (g_channel_select_tokens_initialized) return;
+    g_channel_select_tokens_mutex.lock();
+    defer g_channel_select_tokens_mutex.unlock();
+    if (g_channel_select_tokens_initialized) return;
+    g_channel_select_tokens = std.AutoHashMap(u64, ChannelSelectToken).init(rt_alloc);
+    g_channel_select_tokens_initialized = true;
+}
+
 fn registerChannel(chan: *ChannelObj) void {
     ensureChannelRegistryInitialized();
     g_channel_registry_mutex.lock();
     defer g_channel_registry_mutex.unlock();
     g_channel_registry.put(@intFromPtr(chan), 0) catch @panic("oom");
+}
+
+fn channelSelectStore(index: i32, payload: i64) i64 {
+    ensureChannelSelectTokensInitialized();
+    const token: u64 = g_next_channel_select_token.fetchAdd(1, .monotonic);
+    g_channel_select_tokens_mutex.lock();
+    defer g_channel_select_tokens_mutex.unlock();
+    g_channel_select_tokens.put(token, .{ .index = index, .payload = payload }) catch @panic("oom");
+    return @intCast(token);
+}
+
+fn channelSelectIndex(token: i64) i32 {
+    if (token == 0) return -1;
+    ensureChannelSelectTokensInitialized();
+    g_channel_select_tokens_mutex.lock();
+    defer g_channel_select_tokens_mutex.unlock();
+    const entry = g_channel_select_tokens.get(@intCast(token)) orelse @panic("invalid channel select token");
+    return entry.index;
+}
+
+fn channelSelectTakePayload(token: i64) i64 {
+    if (token == 0) @panic("invalid channel select token");
+    ensureChannelSelectTokensInitialized();
+    g_channel_select_tokens_mutex.lock();
+    defer g_channel_select_tokens_mutex.unlock();
+    const key: u64 = @intCast(token);
+    const entry = g_channel_select_tokens.fetchRemove(key) orelse @panic("invalid channel select token");
+    return entry.value.payload;
+}
+
+fn nativeChannelSelectWaiterSignal(waiter: *NativeChannelSelectWaiter) void {
+    waiter.mutex.lock();
+    waiter.signaled = true;
+    waiter.cond.signal();
+    waiter.mutex.unlock();
+}
+
+fn nativeChannelSignalNotEmpty(chan_ptr: *anyopaque) void {
+    const chan: *ChannelObj = @ptrCast(@alignCast(chan_ptr));
+    chan.mutex.lock();
+    chan.not_empty.signal();
+    chan.mutex.unlock();
+}
+
+fn nativeChannelSignalNotFull(chan_ptr: *anyopaque) void {
+    const chan: *ChannelObj = @ptrCast(@alignCast(chan_ptr));
+    chan.mutex.lock();
+    chan.not_full.signal();
+    chan.mutex.unlock();
+}
+
+fn nativeChannelSelectWaiterAwait(waiter: *NativeChannelSelectWaiter, ctx_opt: ?*FlixCtx) bool {
+    waiter.mutex.lock();
+    while (!waiter.signaled) {
+        if (ctx_opt) |ctx| {
+            if (flix_cancel_requested(@ptrCast(ctx))) {
+                waiter.mutex.unlock();
+                return true;
+            }
+            ctxSetBlockedWait(ctx, .channel_select, waiter);
+            ctx.blocked.store(true, .release);
+        }
+        waiter.cond.wait(&waiter.mutex);
+        waiter.mutex.unlock();
+        if (ctx_opt) |ctx| {
+            ctxSetBlockedWait(ctx, .none, null);
+            pollcheckCooperate(ctx);
+            ctx.blocked.store(false, .release);
+            if (flix_cancel_requested(@ptrCast(ctx))) {
+                return true;
+            }
+        }
+        waiter.mutex.lock();
+    }
+    waiter.mutex.unlock();
+    return false;
+}
+
+fn channelSignalNativeSelectWaitersLocked(chan: *ChannelObj) void {
+    if (chan.select_waiters_native.items.len == 0) return;
+    const waiters = chan.select_waiters_native.items;
+    chan.select_waiters_native.clearRetainingCapacity();
+    for (waiters) |waiter| {
+        nativeChannelSelectWaiterSignal(waiter);
+    }
+}
+
+fn channelRemoveNativeSelectWaiterLocked(chan: *ChannelObj, waiter: *NativeChannelSelectWaiter) void {
+    var i: usize = 0;
+    while (i < chan.select_waiters_native.items.len) : (i += 1) {
+        if (chan.select_waiters_native.items[i] == waiter) {
+            _ = chan.select_waiters_native.swapRemove(i);
+            return;
+        }
+    }
+}
+
+fn channelQueueRequeue(list: *std.ArrayListUnmanaged(ChannelWaiter), waiter: ChannelWaiter) void {
+    list.append(rt_alloc, waiter) catch @panic("oom");
 }
 
 fn deregisterChannel(chan: *ChannelObj) void {
@@ -3993,6 +4235,65 @@ fn channelQueuePop(list: *std.ArrayListUnmanaged(ChannelWaiter), head: *usize) ?
     return w;
 }
 
+fn collectUniqueChannels(ptrs: [*]const *anyopaque, count: usize) [](*ChannelObj) {
+    var list: std.ArrayList(*ChannelObj) = .empty;
+    errdefer list.deinit(rt_alloc);
+
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const chan: *ChannelObj = @ptrCast(@alignCast(ptrs[i]));
+        var seen = false;
+        for (list.items) |existing| {
+            if (existing == chan) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) {
+            list.append(rt_alloc, chan) catch @panic("oom");
+        }
+    }
+
+    std.sort.heap(*ChannelObj, list.items, {}, struct {
+        fn lessThan(_: void, lhs: *ChannelObj, rhs: *ChannelObj) bool {
+            return @intFromPtr(lhs) < @intFromPtr(rhs);
+        }
+    }.lessThan);
+
+    return list.toOwnedSlice(rt_alloc) catch @panic("oom");
+}
+
+fn lockUniqueChannels(chans: []const *ChannelObj) void {
+    for (chans) |chan| chan.mutex.lock();
+}
+
+fn unlockUniqueChannels(chans: []const *ChannelObj) void {
+    var i: usize = chans.len;
+    while (i > 0) : (i -= 1) {
+        chans[i - 1].mutex.unlock();
+    }
+}
+
+fn channelTryTakeLockedNative(chan: *ChannelObj) ?i64 {
+    if (chan.capacity == 0) {
+        if (!chan.rv_has_msg) return null;
+        const payload = chan.rv_payload;
+        chan.rv_has_msg = false;
+        chan.rv_owner_token = 0;
+        chan.not_full.signal();
+        return payload;
+    }
+
+    const buf = chan.buf orelse @panic("missing buffer");
+    if (chan.count == 0) return null;
+
+    const payload = buf[chan.head];
+    chan.head = (chan.head + 1) % chan.capacity;
+    chan.count -= 1;
+    chan.not_full.signal();
+    return payload;
+}
+
 fn channelInit(capacity: usize) *ChannelObj {
     const obj = rt_alloc.create(ChannelObj) catch @panic("oom");
     obj.* = .{ .capacity = capacity };
@@ -4011,6 +4312,8 @@ export fn flix_channel_new(capacity: i32) *anyopaque {
 export fn flix_channel_put(chan_ptr: *anyopaque, payload: i64) i64 {
     const chan: *ChannelObj = @ptrCast(@alignCast(chan_ptr));
     const ctx_opt = current_ctx;
+    var rendezvous_token: u8 = 0;
+    const rendezvous_token_bits = @intFromPtr(&rendezvous_token);
 
     // If we block (buffer full / unbuffered rendezvous), the payload may be the only reference
     // to a GC object. Since the collector does not scan the Zig stack, root the payload explicitly.
@@ -4025,42 +4328,86 @@ export fn flix_channel_put(chan_ptr: *anyopaque, payload: i64) i64 {
 
     if (chan.capacity == 0) {
         while (chan.rv_has_msg) {
-            if (ctx_opt) |ctx| ctx.blocked.store(true, .release);
+            if (ctx_opt) |ctx| {
+                if (flix_cancel_requested(@ptrCast(ctx))) return 0;
+                ctxSetBlockedWait(ctx, .channel_put, chan_ptr);
+                ctx.blocked.store(true, .release);
+            }
             chan.not_full.wait(&chan.mutex);
             chan.mutex.unlock();
-            if (ctx_opt) |ctx| pollcheckCooperate(ctx);
+            if (ctx_opt) |ctx| {
+                ctxSetBlockedWait(ctx, .none, null);
+                pollcheckCooperate(ctx);
+                ctx.blocked.store(false, .release);
+            }
             chan.mutex.lock();
-            if (ctx_opt) |ctx| ctx.blocked.store(false, .release);
+            if (ctx_opt) |ctx| {
+                if (flix_cancel_requested(@ptrCast(ctx))) return 0;
+            }
         }
         chan.rv_payload = payload_root;
         chan.rv_has_msg = true;
+        chan.rv_owner_token = rendezvous_token_bits;
         chan.not_empty.signal();
+        channelSignalNativeSelectWaitersLocked(chan);
 
         while (chan.rv_has_msg) {
-            if (ctx_opt) |ctx| ctx.blocked.store(true, .release);
+            if (ctx_opt) |ctx| {
+                if (flix_cancel_requested(@ptrCast(ctx))) {
+                    chan.rv_has_msg = false;
+                    chan.not_full.signal();
+                    return 0;
+                }
+                ctxSetBlockedWait(ctx, .channel_put, chan_ptr);
+                ctx.blocked.store(true, .release);
+            }
             chan.not_full.wait(&chan.mutex);
             chan.mutex.unlock();
-            if (ctx_opt) |ctx| pollcheckCooperate(ctx);
+            if (ctx_opt) |ctx| {
+                ctxSetBlockedWait(ctx, .none, null);
+                pollcheckCooperate(ctx);
+                ctx.blocked.store(false, .release);
+            }
             chan.mutex.lock();
-            if (ctx_opt) |ctx| ctx.blocked.store(false, .release);
+            if (ctx_opt) |ctx| {
+                if (flix_cancel_requested(@ptrCast(ctx))) {
+                    if (chan.rv_has_msg and chan.rv_owner_token == rendezvous_token_bits) {
+                        chan.rv_has_msg = false;
+                        chan.rv_owner_token = 0;
+                        chan.not_full.signal();
+                    }
+                    return 0;
+                }
+            }
         }
         return 0;
     }
 
     const buf = chan.buf orelse @panic("missing buffer");
     while (chan.count == chan.capacity) {
-        if (ctx_opt) |ctx| ctx.blocked.store(true, .release);
+        if (ctx_opt) |ctx| {
+            if (flix_cancel_requested(@ptrCast(ctx))) return 0;
+            ctxSetBlockedWait(ctx, .channel_put, chan_ptr);
+            ctx.blocked.store(true, .release);
+        }
         chan.not_full.wait(&chan.mutex);
         chan.mutex.unlock();
-        if (ctx_opt) |ctx| pollcheckCooperate(ctx);
+        if (ctx_opt) |ctx| {
+            ctxSetBlockedWait(ctx, .none, null);
+            pollcheckCooperate(ctx);
+            ctx.blocked.store(false, .release);
+        }
         chan.mutex.lock();
-        if (ctx_opt) |ctx| ctx.blocked.store(false, .release);
+        if (ctx_opt) |ctx| {
+            if (flix_cancel_requested(@ptrCast(ctx))) return 0;
+        }
     }
 
     buf[chan.tail] = payload_root;
     chan.tail = (chan.tail + 1) % chan.capacity;
     chan.count += 1;
     chan.not_empty.signal();
+    channelSignalNativeSelectWaitersLocked(chan);
     return 0;
 }
 
@@ -4072,27 +4419,48 @@ export fn flix_channel_get(chan_ptr: *anyopaque) i64 {
 
     if (chan.capacity == 0) {
         while (!chan.rv_has_msg) {
-            if (ctx_opt) |ctx| ctx.blocked.store(true, .release);
+            if (ctx_opt) |ctx| {
+                if (flix_cancel_requested(@ptrCast(ctx))) return 0;
+                ctxSetBlockedWait(ctx, .channel_get, chan_ptr);
+                ctx.blocked.store(true, .release);
+            }
             chan.not_empty.wait(&chan.mutex);
             chan.mutex.unlock();
-            if (ctx_opt) |ctx| pollcheckCooperate(ctx);
+            if (ctx_opt) |ctx| {
+                ctxSetBlockedWait(ctx, .none, null);
+                pollcheckCooperate(ctx);
+                ctx.blocked.store(false, .release);
+            }
             chan.mutex.lock();
-            if (ctx_opt) |ctx| ctx.blocked.store(false, .release);
+            if (ctx_opt) |ctx| {
+                if (flix_cancel_requested(@ptrCast(ctx))) return 0;
+            }
         }
         const payload = chan.rv_payload;
         chan.rv_has_msg = false;
+        chan.rv_owner_token = 0;
         chan.not_full.signal();
         return payload;
     }
 
     const buf = chan.buf orelse @panic("missing buffer");
     while (chan.count == 0) {
-        if (ctx_opt) |ctx| ctx.blocked.store(true, .release);
+        if (ctx_opt) |ctx| {
+            if (flix_cancel_requested(@ptrCast(ctx))) return 0;
+            ctxSetBlockedWait(ctx, .channel_get, chan_ptr);
+            ctx.blocked.store(true, .release);
+        }
         chan.not_empty.wait(&chan.mutex);
         chan.mutex.unlock();
-        if (ctx_opt) |ctx| pollcheckCooperate(ctx);
+        if (ctx_opt) |ctx| {
+            ctxSetBlockedWait(ctx, .none, null);
+            pollcheckCooperate(ctx);
+            ctx.blocked.store(false, .release);
+        }
         chan.mutex.lock();
-        if (ctx_opt) |ctx| ctx.blocked.store(false, .release);
+        if (ctx_opt) |ctx| {
+            if (flix_cancel_requested(@ptrCast(ctx))) return 0;
+        }
     }
 
     const payload = buf[chan.head];
@@ -4100,6 +4468,62 @@ export fn flix_channel_get(chan_ptr: *anyopaque) i64 {
     chan.count -= 1;
     chan.not_full.signal();
     return payload;
+}
+
+export fn flix_channel_select(chans_ptr0: *anyopaque, count0: i32, blocking: bool) i64 {
+    const count: usize = if (count0 <= 0) 0 else @intCast(count0);
+    if (count == 0) return if (blocking) @panic("blocking select requires at least one channel") else 0;
+
+    const chans_ptr: [*]const *anyopaque = @ptrCast(@alignCast(chans_ptr0));
+    const unique = collectUniqueChannels(chans_ptr, count);
+    defer rt_alloc.free(unique);
+
+    const ctx_opt = current_ctx;
+    var waiter: NativeChannelSelectWaiter = .{};
+
+    while (true) {
+        lockUniqueChannels(unique);
+
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            const chan: *ChannelObj = @ptrCast(@alignCast(chans_ptr[i]));
+            if (channelTryTakeLockedNative(chan)) |payload| {
+                const token = channelSelectStore(@intCast(i), payload);
+                unlockUniqueChannels(unique);
+                return token;
+            }
+        }
+
+        if (!blocking) {
+            unlockUniqueChannels(unique);
+            return 0;
+        }
+
+        for (unique) |chan| {
+            chan.select_waiters_native.append(rt_alloc, &waiter) catch @panic("oom");
+        }
+        unlockUniqueChannels(unique);
+
+        const canceled = nativeChannelSelectWaiterAwait(&waiter, ctx_opt);
+        waiter.mutex.lock();
+        waiter.signaled = false;
+        waiter.mutex.unlock();
+
+        lockUniqueChannels(unique);
+        for (unique) |chan| {
+            channelRemoveNativeSelectWaiterLocked(chan, &waiter);
+        }
+        unlockUniqueChannels(unique);
+        if (canceled) return 0;
+    }
+}
+
+export fn flix_channel_select_index(token: i64) i32 {
+    return channelSelectIndex(token);
+}
+
+export fn flix_channel_select_get(token: i64) i64 {
+    return channelSelectTakePayload(token);
 }
 
 fn allocWasmChannelSuspension(op_index: i64, args: []const i64) *anyopaque {
@@ -4135,7 +4559,21 @@ fn wasmChannelRegisterWaiter(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_
 
     switch (op_index) {
         WasmChanOpGet => channelQueueAppend(&chan.wait_getters, .{ .task_id = task_id, .susp_handle = susp_handle }),
-        WasmChanOpPut => channelQueueAppend(&chan.wait_putters, .{ .task_id = task_id, .susp_handle = susp_handle }),
+        WasmChanOpPut => {
+            channelQueueAppend(&chan.wait_putters, .{ .task_id = task_id, .susp_handle = susp_handle });
+            if (chan.capacity == 0) {
+                wasmWakeSelectWaiters(ctx_rep, chan);
+            }
+        },
+        WasmChanOpSelect => {
+            var i: i64 = 0;
+            while (i < argc) : (i += 1) {
+                const bits = slots[5 + @as(usize, @intCast(i))];
+                const ptr = ptrFromPayload(bits);
+                const selectChan: *ChannelObj = @ptrCast(@alignCast(ptr));
+                channelQueueAppend(&selectChan.wait_selectors, .{ .task_id = task_id, .susp_handle = susp_handle });
+            }
+        },
         else => {},
     }
 }
@@ -4146,6 +4584,20 @@ fn wasmChannelPopValidWaiter(ctx_rep: *exports_flix_runtime_runtime_ctx_t, chan:
 
     while (true) {
         const w = channelQueuePop(list, head) orelse return null;
+        const task_ptr = ctx_rep.tasks.getPtr(w.task_id) orelse continue;
+        switch (task_ptr.state) {
+            .Blocked => |st| {
+                if (st.susp_handle != w.susp_handle) continue;
+                return w;
+            },
+            else => continue,
+        }
+    }
+}
+
+fn wasmChannelPopValidSelectWaiter(ctx_rep: *exports_flix_runtime_runtime_ctx_t, chan: *ChannelObj) ?ChannelWaiter {
+    while (true) {
+        const w = channelQueuePop(&chan.wait_selectors, &chan.wait_selectors_head) orelse return null;
         const task_ptr = ctx_rep.tasks.getPtr(w.task_id) orelse continue;
         switch (task_ptr.state) {
             .Blocked => |st| {
@@ -4188,6 +4640,7 @@ fn wasmChannelTryPut(ctx_rep: *exports_flix_runtime_runtime_ctx_t, chan: *Channe
             wasmResumeTaskOk(ctx_rep, w, payload);
             return true;
         }
+        wasmWakeSelectWaiters(ctx_rep, chan);
         return false;
     }
 
@@ -4212,6 +4665,8 @@ fn wasmChannelTryPut(ctx_rep: *exports_flix_runtime_runtime_ctx_t, chan: *Channe
             chan.head = (chan.head + 1) % chan.capacity;
             chan.count -= 1;
             wasmResumeTaskOk(ctx_rep, w, p);
+        } else {
+            wasmWakeSelectWaiters(ctx_rep, chan);
         }
 
         return true;
@@ -4246,10 +4701,49 @@ fn wasmChannelTryGet(ctx_rep: *exports_flix_runtime_runtime_ctx_t, chan: *Channe
             chan.tail = (chan.tail + 1) % chan.capacity;
             chan.count += 1;
             wasmResumeTaskOk(ctx_rep, w, 0);
+            wasmWakeSelectWaiters(ctx_rep, chan);
         }
     }
 
     return payload;
+}
+
+fn wasmSelectTokenFromSuspension(ctx_rep: *exports_flix_runtime_runtime_ctx_t, susp_handle: i64) ?i64 {
+    const susp_ptr = flix_handle_get(ctx_rep.flix_ctx, susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    if (slots[0] != WasmChanEffSymId or slots[1] != WasmChanOpSelect) return null;
+    const argc: usize = @intCast(slots[4]);
+
+    var i: usize = 0;
+    while (i < argc) : (i += 1) {
+        const chan_bits = slots[5 + i];
+        const chan_ptr = ptrFromPayload(chan_bits);
+        const chan: *ChannelObj = @ptrCast(@alignCast(chan_ptr));
+        if (wasmChannelTryGet(ctx_rep, chan, chan_bits)) |payload| {
+            return channelSelectStore(@intCast(i), payload);
+        }
+    }
+
+    return null;
+}
+
+fn wasmWakeSelectWaiters(ctx_rep: *exports_flix_runtime_runtime_ctx_t, chan: *ChannelObj) void {
+    var requeue: std.ArrayListUnmanaged(ChannelWaiter) = .{};
+    defer requeue.deinit(rt_alloc);
+
+    while (wasmChannelPopValidSelectWaiter(ctx_rep, chan)) |w| {
+        if (wasmSelectTokenFromSuspension(ctx_rep, w.susp_handle)) |token| {
+            wasmResumeTaskOk(ctx_rep, w, token);
+        } else {
+            channelQueueRequeue(&requeue, w);
+        }
+    }
+
+    if (requeue.items.len > 0) {
+        for (requeue.items) |w| {
+            channelQueueRequeue(&chan.wait_selectors, w);
+        }
+    }
 }
 
 export fn flix_channel_put_resumable(ctx: *anyopaque, chan_ptr: *anyopaque, payload: i64) FlixResult {
@@ -4285,6 +4779,240 @@ export fn flix_channel_get_resumable(ctx: *anyopaque, chan_ptr: *anyopaque) Flix
     }
 
     const susp_ptr = allocWasmChannelSuspension(WasmChanOpGet, &.{chan_bits});
+    return FlixResult{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
+}
+
+export fn flix_channel_select_resumable(ctx: *anyopaque, chans_ptr0: *anyopaque, count0: i32, blocking: bool) FlixResult {
+    _ = ctx;
+    if (!is_wasm) {
+        const token = flix_channel_select(chans_ptr0, count0, blocking);
+        return FlixResult{ .tag = RESULT_TAG_VALUE, .payload = token };
+    }
+
+    const count: usize = if (count0 <= 0) 0 else @intCast(count0);
+    if (count == 0) {
+        if (blocking) @panic("blocking select requires at least one channel");
+        return FlixResult{ .tag = RESULT_TAG_VALUE, .payload = 0 };
+    }
+
+    const ctx_rep = current_wit_ctx orelse @panic("flix_channel_select_resumable: missing wasm WIT context");
+    const chans_ptr: [*]const *anyopaque = @ptrCast(@alignCast(chans_ptr0));
+
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const chan_bits = payloadFromPtr(chans_ptr[i]);
+        const chan: *ChannelObj = @ptrCast(@alignCast(chans_ptr[i]));
+        if (wasmChannelTryGet(ctx_rep, chan, chan_bits)) |payload| {
+            const token = channelSelectStore(@intCast(i), payload);
+            return FlixResult{ .tag = RESULT_TAG_VALUE, .payload = token };
+        }
+    }
+
+    if (!blocking) {
+        return FlixResult{ .tag = RESULT_TAG_VALUE, .payload = 0 };
+    }
+
+    const args = rt_alloc.alloc(i64, count) catch @panic("oom");
+    defer rt_alloc.free(args);
+    i = 0;
+    while (i < count) : (i += 1) {
+        args[i] = payloadFromPtr(chans_ptr[i]);
+    }
+
+    const susp_ptr = allocWasmChannelSuspension(WasmChanOpSelect, args);
+    return FlixResult{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
+}
+
+// ============================================================================
+// Portable Reentrant Locks
+// ============================================================================
+
+fn reentrantLockInit() *ReentrantLockObj {
+    const obj = rt_alloc.create(ReentrantLockObj) catch @panic("oom");
+    obj.* = .{};
+    return obj;
+}
+
+fn nativeReentrantLockSignalAvailable(lock_ptr: *anyopaque) void {
+    const lock_obj: *ReentrantLockObj = @ptrCast(@alignCast(lock_ptr));
+    lock_obj.mutex.lock();
+    lock_obj.available.broadcast();
+    lock_obj.mutex.unlock();
+}
+
+fn reentrantLockTryAcquireLocked(lock_obj: *ReentrantLockObj, owner_token: u64) bool {
+    if (lock_obj.owner_token == 0) {
+        lock_obj.owner_token = owner_token;
+        lock_obj.recursion = 1;
+        return true;
+    }
+    if (lock_obj.owner_token == owner_token) {
+        lock_obj.recursion += 1;
+        return true;
+    }
+    return false;
+}
+
+fn wasmLockPopValidWaiter(ctx_rep: *exports_flix_runtime_runtime_ctx_t, lock_obj: *ReentrantLockObj) ?LockWaiter {
+    while (true) {
+        const w = channelQueuePop(&lock_obj.waiters, &lock_obj.waiters_head) orelse return null;
+        const task_ptr = ctx_rep.tasks.getPtr(w.task_id) orelse continue;
+        switch (task_ptr.state) {
+            .Blocked => |st| {
+                if (st.susp_handle != w.susp_handle) continue;
+                return w;
+            },
+            else => continue,
+        }
+    }
+}
+
+fn allocWasmLockSuspension(lock_bits: i64) *anyopaque {
+    const argc: usize = 1;
+    const slots_total: usize = 5 + argc;
+    const size_bytes: usize = @sizeOf(FlixObj) + slots_total * @sizeOf(i64);
+    const mem = gcAllocBytes(size_bytes, &flix_ti_suspension);
+    const slots: [*]i64 = objPayloadSlots(mem);
+
+    slots[0] = WasmLockEffSymId;
+    slots[1] = WasmLockOpAcquire;
+    slots[2] = 0;
+    slots[3] = 0;
+    slots[4] = 1;
+    slots[5] = lock_bits;
+    return mem;
+}
+
+fn wasmLockRegisterWaiter(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, susp_handle: i64) void {
+    const susp_ptr = flix_handle_get(ctx_rep.flix_ctx, susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    if (slots[0] != WasmLockEffSymId or slots[1] != WasmLockOpAcquire or slots[4] != 1) return;
+
+    const lock_ptr = ptrFromPayload(slots[5]);
+    const lock_obj: *ReentrantLockObj = @ptrCast(@alignCast(lock_ptr));
+    channelQueueAppend(&lock_obj.waiters, .{ .task_id = task_id, .susp_handle = susp_handle });
+}
+
+fn isWasmLockSuspensionHandle(ctx_rep: *exports_flix_runtime_runtime_ctx_t, susp_handle: i64) bool {
+    const susp_ptr = flix_handle_get(ctx_rep.flix_ctx, susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    return slots[0] == WasmLockEffSymId and slots[1] == WasmLockOpAcquire;
+}
+
+fn wasmCancelBlockedLockTasksForRegion(ctx_rep: *exports_flix_runtime_runtime_ctx_t, target: *FlixRegion) void {
+    var it = ctx_rep.tasks.iterator();
+    while (it.next()) |entry| {
+        const task_id = entry.key_ptr.*;
+        const task_ptr = entry.value_ptr;
+        if (!regionIsSameOrDescendant(task_ptr.region, target)) continue;
+
+        switch (task_ptr.state) {
+            .Blocked => |st| {
+                if (!isWasmLockSuspensionHandle(ctx_rep, st.susp_handle)) continue;
+                const resume_handle = flix_handle_new_i64(ctx_rep.flix_ctx, 0);
+                task_ptr.state = .{ .ReadyResumeOk = .{ .susp_handle = st.susp_handle, .resume_handle = resume_handle } };
+                taskQueuePush(ctx_rep, task_id);
+            },
+            else => {},
+        }
+    }
+}
+
+export fn flix_reentrant_lock_new() *anyopaque {
+    return reentrantLockInit();
+}
+
+export fn flix_reentrant_lock_try_lock(lock_ptr: *anyopaque) bool {
+    const lock_obj: *ReentrantLockObj = @ptrCast(@alignCast(lock_ptr));
+    const owner_token = currentTaskOwnerToken();
+    lock_obj.mutex.lock();
+    defer lock_obj.mutex.unlock();
+    return reentrantLockTryAcquireLocked(lock_obj, owner_token);
+}
+
+export fn flix_reentrant_lock_unlock(lock_ptr: *anyopaque) bool {
+    const lock_obj: *ReentrantLockObj = @ptrCast(@alignCast(lock_ptr));
+    const owner_token = currentTaskOwnerToken();
+    lock_obj.mutex.lock();
+    defer lock_obj.mutex.unlock();
+
+    if (lock_obj.owner_token != owner_token or lock_obj.recursion == 0) {
+        return false;
+    }
+
+    lock_obj.recursion -= 1;
+    if (lock_obj.recursion > 0) {
+        return true;
+    }
+
+    if (is_wasm) {
+        const ctx_rep = current_wit_ctx orelse @panic("flix_reentrant_lock_unlock: missing wasm WIT context");
+        while (wasmLockPopValidWaiter(ctx_rep, lock_obj)) |w| {
+            lock_obj.owner_token = w.task_id;
+            lock_obj.recursion = 1;
+            wasmResumeTaskOk(ctx_rep, w, 0);
+            return true;
+        }
+    }
+
+    lock_obj.owner_token = 0;
+    lock_obj.available.signal();
+    return true;
+}
+
+export fn flix_reentrant_lock_lock(lock_ptr: *anyopaque) i64 {
+    const lock_obj: *ReentrantLockObj = @ptrCast(@alignCast(lock_ptr));
+    const owner_token = currentTaskOwnerToken();
+    const ctx_opt = current_ctx;
+
+    lock_obj.mutex.lock();
+    defer lock_obj.mutex.unlock();
+
+    if (reentrantLockTryAcquireLocked(lock_obj, owner_token)) {
+        return 0;
+    }
+
+    while (lock_obj.owner_token != 0) {
+        if (ctx_opt) |ctx| {
+            if (flix_cancel_requested(@ptrCast(ctx))) return 0;
+            ctxSetBlockedWait(ctx, .reentrant_lock, lock_ptr);
+            ctx.blocked.store(true, .release);
+        }
+        lock_obj.available.wait(&lock_obj.mutex);
+        lock_obj.mutex.unlock();
+        if (ctx_opt) |ctx| {
+            ctxSetBlockedWait(ctx, .none, null);
+            pollcheckCooperate(ctx);
+            ctx.blocked.store(false, .release);
+        }
+        lock_obj.mutex.lock();
+        if (ctx_opt) |ctx| {
+            if (flix_cancel_requested(@ptrCast(ctx))) return 0;
+        }
+    }
+
+    lock_obj.owner_token = owner_token;
+    lock_obj.recursion = 1;
+    return 0;
+}
+
+export fn flix_reentrant_lock_lock_resumable(ctx: *anyopaque, lock_ptr: *anyopaque) FlixResult {
+    _ = ctx;
+    if (!is_wasm) {
+        _ = flix_reentrant_lock_lock(lock_ptr);
+        return FlixResult{ .tag = RESULT_TAG_VALUE, .payload = 0 };
+    }
+
+    const lock_obj: *ReentrantLockObj = @ptrCast(@alignCast(lock_ptr));
+    const owner_token = currentTaskOwnerToken();
+    lock_obj.mutex.lock();
+    defer lock_obj.mutex.unlock();
+
+    if (reentrantLockTryAcquireLocked(lock_obj, owner_token)) {
+        return FlixResult{ .tag = RESULT_TAG_VALUE, .payload = 0 };
+    }
+
+    const susp_ptr = allocWasmLockSuspension(payloadFromPtr(lock_ptr));
     return FlixResult{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
 }
 
@@ -4408,11 +5136,10 @@ export fn flix_sleep_millis(ms: i64) i64 {
     } else {
         if (ms <= 0) return 0;
         const ms_u64: u64 = @intCast(ms);
-        const ns: u64 = ms_u64 * std.time.ns_per_ms;
         {
             var guard = BlockedGuard.enter(current_ctx);
             defer guard.exitAndCooperate();
-            std.Thread.sleep(ns);
+            flix_native_timer_sleep(ms_u64);
         }
         return 0;
     }
@@ -4633,6 +5360,7 @@ const NativeFsTcp = if (is_wasm) struct {} else struct {
 // ============================================================================
 
 const IOERR_ALREADY_EXISTS: i64 = 0;
+const IOERR_INTERRUPTED: i64 = fs_async.IOERR_INTERRUPTED;
 const IOERR_INVALID_PATH: i64 = 3;
 const IOERR_NOT_DIRECTORY: i64 = 8;
 const IOERR_UNSUPPORTED: i64 = 12;
@@ -4702,6 +5430,51 @@ fn fileKindForErr(err: anyerror) i64 {
     if (isInvalidPathError(err)) return IOERR_INVALID_PATH;
     if (isUnsupportedError(err)) return IOERR_UNSUPPORTED;
     return IOERR_OTHER;
+}
+
+fn fileLinesArrayFromBytes(ctx: *anyopaque, region_ptr0: ?*anyopaque, bytes: []const u8) *anyopaque {
+    var lines: std.ArrayList(*anyopaque) = .empty;
+    defer lines.deinit(std.heap.c_allocator);
+
+    var i: usize = 0;
+    var start: usize = 0;
+    while (i < bytes.len) {
+        const ch = bytes[i];
+        if (ch == '\n' or ch == '\r') {
+            const seg = bytes[start..i];
+            const line_ptr = allocFlixStringFromUtf8Lossy(seg);
+            lines.append(std.heap.c_allocator, line_ptr) catch @panic("oom");
+
+            if (ch == '\r' and (i + 1) < bytes.len and bytes[i + 1] == '\n') {
+                i += 1;
+            }
+
+            i += 1;
+            start = i;
+            continue;
+        }
+        i += 1;
+    }
+
+    if (start < bytes.len) {
+        const seg = bytes[start..bytes.len];
+        const line_ptr = allocFlixStringFromUtf8Lossy(seg);
+        lines.append(std.heap.c_allocator, line_ptr) catch @panic("oom");
+    }
+
+    return allocFlixArrayFromPtrPayloadsInRegion(ctx, region_ptr0, lines.items);
+}
+
+fn fileStringArrayFromOwnedNames(ctx: *anyopaque, region_ptr0: ?*anyopaque, names: [][]u8) *anyopaque {
+    var ptrs: std.ArrayList(*anyopaque) = .empty;
+    defer ptrs.deinit(std.heap.c_allocator);
+
+    for (names) |name| {
+        const name_ptr = allocFlixStringFromUtf8Lossy(name);
+        ptrs.append(std.heap.c_allocator, name_ptr) catch @panic("oom");
+    }
+
+    return allocFlixArrayFromPtrPayloadsInRegion(ctx, region_ptr0, ptrs.items);
 }
 
 export fn flix_file_exists(path_ptr: *anyopaque) *anyopaque {
@@ -5182,26 +5955,34 @@ export fn flix_file_mk_temp_dir(prefix_ptr: *anyopaque) *anyopaque {
     return fileFailStr(IOERR_OTHER, "could not create temp directory");
 }
 
-const TcpSocketEntry = struct {
+const TcpSocketObj = struct {
+    ref_count: RtAtomic(u32) = .init(1),
+    mutex: RtMutex = .{},
     stream: std.net.Stream,
+    closed: bool = false,
 };
 
-const TcpServerEntry = struct {
+const TcpServerObj = struct {
+    ref_count: RtAtomic(u32) = .init(1),
+    mutex: RtMutex = .{},
     server: std.net.Server,
+    closed: bool = false,
 };
 
 var g_tcp_initialized: bool = false;
 var g_tcp_mutex: RtMutex = .{};
-var g_tcp_sockets: std.AutoHashMap(i64, TcpSocketEntry) = undefined;
-var g_tcp_servers: std.AutoHashMap(i64, TcpServerEntry) = undefined;
+var g_tcp_sockets: std.AutoHashMap(i64, *TcpSocketObj) = undefined;
+var g_tcp_servers: std.AutoHashMap(i64, *TcpServerObj) = undefined;
+
+const StreamHandle = @TypeOf(@as(std.net.Stream, undefined).handle);
 
 fn ensureTcpInitialized() void {
     if (g_tcp_initialized) return;
     g_tcp_mutex.lock();
     defer g_tcp_mutex.unlock();
     if (g_tcp_initialized) return;
-    g_tcp_sockets = std.AutoHashMap(i64, TcpSocketEntry).init(std.heap.c_allocator);
-    g_tcp_servers = std.AutoHashMap(i64, TcpServerEntry).init(std.heap.c_allocator);
+    g_tcp_sockets = std.AutoHashMap(i64, *TcpSocketObj).init(std.heap.c_allocator);
+    g_tcp_servers = std.AutoHashMap(i64, *TcpServerObj).init(std.heap.c_allocator);
     g_tcp_initialized = true;
 }
 
@@ -5215,18 +5996,499 @@ fn tcpFail4(kind: i64, msg: []const u8) *anyopaque {
     return allocFlixTupleFromPayloads(&.{ payloadFromBool(false), 0, kind, payloadFromPtr(msg_ptr) }, 0b1000);
 }
 
-export fn flix_tcp_socket_read(id: i64, buf_ptr: *anyopaque) *anyopaque {
+fn streamHandleFromBits(bits: usize) StreamHandle {
+    return switch (@typeInfo(StreamHandle)) {
+        .int, .comptime_int => @as(StreamHandle, @intCast(bits)),
+        .pointer => @ptrFromInt(bits),
+        else => @compileError("unsupported std.net.Stream handle type"),
+    };
+}
+
+fn tcpOk4(id: i64) *anyopaque {
+    return allocFlixTupleFromPayloads(&.{ payloadFromBool(true), id, 14, payloadFromPtr(allocFlixStringFromAscii("")) }, 0b1000);
+}
+
+fn tcpSocketRetain(sock: *TcpSocketObj) void {
+    _ = sock.ref_count.fetchAdd(1, .acq_rel);
+}
+
+fn tcpSocketRelease(sock: *TcpSocketObj) void {
+    const prev = sock.ref_count.fetchSub(1, .acq_rel);
+    if (prev != 1) return;
+
+    sock.mutex.lock();
+    const already_closed = sock.closed;
+    sock.closed = true;
+    const stream = sock.stream;
+    sock.mutex.unlock();
+
+    if (!already_closed) {
+        stream.close();
+    }
+    std.heap.c_allocator.destroy(sock);
+}
+
+fn tcpSocketForceClose(sock: *TcpSocketObj) void {
+    sock.mutex.lock();
+    if (sock.closed) {
+        sock.mutex.unlock();
+        return;
+    }
+    sock.closed = true;
+    const stream = sock.stream;
+    sock.mutex.unlock();
+    stream.close();
+}
+
+fn tcpSocketLookup(id: i64) ?*TcpSocketObj {
+    ensureTcpInitialized();
+    g_tcp_mutex.lock();
+    defer g_tcp_mutex.unlock();
+    const sock = g_tcp_sockets.get(id) orelse return null;
+    tcpSocketRetain(sock);
+    return sock;
+}
+
+fn tcpSocketDropById(id: i64) void {
     ensureTcpInitialized();
 
-    var stream: std.net.Stream = undefined;
+    var removed: ?std.AutoHashMap(i64, *TcpSocketObj).KV = null;
     {
         g_tcp_mutex.lock();
         defer g_tcp_mutex.unlock();
-        const entry = g_tcp_sockets.get(id) orelse {
-            return tcpFail3("invalid TCP socket handle.");
-        };
-        stream = entry.stream;
+        removed = g_tcp_sockets.fetchRemove(id);
     }
+
+    if (removed) |kv| {
+        tcpSocketForceClose(kv.value);
+        tcpSocketRelease(kv.value);
+    }
+}
+
+fn tcpSocketStreamSnapshot(sock: *TcpSocketObj) ?std.net.Stream {
+    sock.mutex.lock();
+    defer sock.mutex.unlock();
+    return if (sock.closed) null else sock.stream;
+}
+
+fn tcpSocketRegisterConnectedHandle(handle_bits: usize) *anyopaque {
+    ensureTcpInitialized();
+
+    const sock = std.heap.c_allocator.create(TcpSocketObj) catch {
+        var stream = std.net.Stream{ .handle = streamHandleFromBits(handle_bits) };
+        stream.close();
+        return tcpFail4(14, "out of memory");
+    };
+    sock.* = .{
+        .stream = .{ .handle = streamHandleFromBits(handle_bits) },
+    };
+
+    const id: i64 = g_next_id.fetchAdd(1, .monotonic);
+    {
+        g_tcp_mutex.lock();
+        defer g_tcp_mutex.unlock();
+        g_tcp_sockets.put(id, sock) catch {
+            tcpSocketRelease(sock);
+            return tcpFail4(14, "out of memory");
+        };
+    }
+
+    return tcpOk4(id);
+}
+
+fn tcpServerRetain(server: *TcpServerObj) void {
+    _ = server.ref_count.fetchAdd(1, .acq_rel);
+}
+
+fn tcpServerRelease(server: *TcpServerObj) void {
+    const prev = server.ref_count.fetchSub(1, .acq_rel);
+    if (prev != 1) return;
+
+    server.mutex.lock();
+    const already_closed = server.closed;
+    server.closed = true;
+    const listener = server.server;
+    server.mutex.unlock();
+
+    if (!already_closed) {
+        var s = listener;
+        s.deinit();
+    }
+    std.heap.c_allocator.destroy(server);
+}
+
+fn tcpServerForceClose(server: *TcpServerObj) void {
+    server.mutex.lock();
+    if (server.closed) {
+        server.mutex.unlock();
+        return;
+    }
+    server.closed = true;
+    const listener = server.server;
+    server.mutex.unlock();
+    var s = listener;
+    s.deinit();
+}
+
+fn tcpServerLookup(id: i64) ?*TcpServerObj {
+    ensureTcpInitialized();
+    g_tcp_mutex.lock();
+    defer g_tcp_mutex.unlock();
+    const server = g_tcp_servers.get(id) orelse return null;
+    tcpServerRetain(server);
+    return server;
+}
+
+fn tcpServerDropById(id: i64) void {
+    ensureTcpInitialized();
+
+    var removed: ?std.AutoHashMap(i64, *TcpServerObj).KV = null;
+    {
+        g_tcp_mutex.lock();
+        defer g_tcp_mutex.unlock();
+        removed = g_tcp_servers.fetchRemove(id);
+    }
+
+    if (removed) |kv| {
+        tcpServerForceClose(kv.value);
+        tcpServerRelease(kv.value);
+    }
+}
+
+fn tcpServerSnapshot(server: *TcpServerObj) ?std.net.Server {
+    server.mutex.lock();
+    defer server.mutex.unlock();
+    return if (server.closed) null else server.server;
+}
+
+const TcpReadWaitPayload = struct {
+    kind: u8, // 0 = bytes, 1 = error message
+    data: []u8,
+};
+
+fn freeTcpReadWaitPayload(payload: TcpReadWaitPayload) void {
+    std.heap.c_allocator.free(payload.data);
+}
+
+const TcpReadWaitState = async_wait.StickyCancelWait(TcpReadWaitPayload, freeTcpReadWaitPayload);
+
+const TcpReadWait = struct {
+    wait: TcpReadWaitState = .{},
+    socket: *TcpSocketObj,
+    cap: usize,
+};
+
+fn freeTcpReadWait(req: *TcpReadWait) void {
+    req.wait.deinit();
+    tcpSocketRelease(req.socket);
+    std.heap.c_allocator.destroy(req);
+}
+
+fn tcpReadWaitWorkerRelease(req: *TcpReadWait) void {
+    if (req.wait.releaseRef()) {
+        freeTcpReadWait(req);
+    }
+}
+
+fn tcpReadWaitWorkerMain(req: *TcpReadWait) void {
+    defer tcpReadWaitWorkerRelease(req);
+
+    const stream = tcpSocketStreamSnapshot(req.socket) orelse {
+        const msg = std.heap.c_allocator.dupe(u8, "socket closed") catch @panic("oom");
+        req.wait.workerComplete(.{ .kind = 1, .data = msg });
+        return;
+    };
+
+    const tmp = std.heap.c_allocator.alloc(u8, req.cap) catch @panic("oom");
+    defer std.heap.c_allocator.free(tmp);
+
+    const n = stream.read(tmp) catch |err| {
+        if (req.wait.isCancelVisible()) {
+            req.wait.workerCancel();
+            return;
+        }
+        const msg = std.heap.c_allocator.dupe(u8, @errorName(err)) catch @panic("oom");
+        req.wait.workerComplete(.{ .kind = 1, .data = msg });
+        return;
+    };
+
+    const bytes = std.heap.c_allocator.alloc(u8, n) catch @panic("oom");
+    std.mem.copyForwards(u8, bytes, tmp[0..n]);
+    req.wait.workerComplete(.{ .kind = 0, .data = bytes });
+}
+
+fn tcpReadWaitNew(id: i64, cap: usize) ?*TcpReadWait {
+    const sock = tcpSocketLookup(id) orelse return null;
+    const req = std.heap.c_allocator.create(TcpReadWait) catch @panic("oom");
+    req.* = .{
+        .socket = sock,
+        .cap = cap,
+    };
+    const thread = std.Thread.spawn(.{}, tcpReadWaitWorkerMain, .{req}) catch @panic("failed to spawn async TCP read thread");
+    thread.detach();
+    return req;
+}
+
+fn tcpReadWaitCancel(wait_ptr: *anyopaque) void {
+    const req: *TcpReadWait = @ptrCast(@alignCast(wait_ptr));
+    if (req.wait.requestCancel()) {
+        tcpSocketForceClose(req.socket);
+    }
+}
+
+const NativeTcpReadWaitOutcome = enum(i32) {
+    completed = 0,
+    canceled = 1,
+};
+
+fn tcpReadWaitAwait(wait_ptr: *anyopaque) NativeTcpReadWaitOutcome {
+    const req: *TcpReadWait = @ptrCast(@alignCast(wait_ptr));
+    return switch (req.wait.await()) {
+        .completed => .completed,
+        .canceled => .canceled,
+    };
+}
+
+fn tcpReadWaitPayload(wait_ptr: *anyopaque) ?TcpReadWaitPayload {
+    const req: *TcpReadWait = @ptrCast(@alignCast(wait_ptr));
+    return req.wait.peekCompletedPayload();
+}
+
+fn tcpReadWaitRelease(wait_ptr: *anyopaque) void {
+    const req: *TcpReadWait = @ptrCast(@alignCast(wait_ptr));
+    if (req.wait.releaseRef()) {
+        freeTcpReadWait(req);
+    }
+}
+
+const TcpWriteWaitPayload = union(enum(u8)) {
+    count: usize,
+    error_msg: []u8,
+};
+
+fn freeTcpWriteWaitPayload(payload: TcpWriteWaitPayload) void {
+    switch (payload) {
+        .count => {},
+        .error_msg => |msg| std.heap.c_allocator.free(msg),
+    }
+}
+
+const TcpWriteWaitState = async_wait.StickyCancelWait(TcpWriteWaitPayload, freeTcpWriteWaitPayload);
+
+const TcpWriteWait = struct {
+    wait: TcpWriteWaitState = .{},
+    socket: *TcpSocketObj,
+    bytes: []u8,
+};
+
+fn freeTcpWriteWait(req: *TcpWriteWait) void {
+    req.wait.deinit();
+    std.heap.c_allocator.free(req.bytes);
+    tcpSocketRelease(req.socket);
+    std.heap.c_allocator.destroy(req);
+}
+
+fn tcpWriteWaitWorkerRelease(req: *TcpWriteWait) void {
+    if (req.wait.releaseRef()) {
+        freeTcpWriteWait(req);
+    }
+}
+
+fn tcpWriteWaitWorkerMain(req: *TcpWriteWait) void {
+    defer tcpWriteWaitWorkerRelease(req);
+
+    const stream = tcpSocketStreamSnapshot(req.socket) orelse {
+        const msg = std.heap.c_allocator.dupe(u8, "socket closed") catch @panic("oom");
+        req.wait.workerComplete(.{ .error_msg = msg });
+        return;
+    };
+
+    stream.writeAll(req.bytes) catch |err| {
+        if (req.wait.isCancelVisible()) {
+            req.wait.workerCancel();
+            return;
+        }
+        const msg = std.heap.c_allocator.dupe(u8, @errorName(err)) catch @panic("oom");
+        req.wait.workerComplete(.{ .error_msg = msg });
+        return;
+    };
+
+    req.wait.workerComplete(.{ .count = req.bytes.len });
+}
+
+fn tcpWriteWaitNew(id: i64, buf_ptr: *anyopaque) ?*TcpWriteWait {
+    const sock = tcpSocketLookup(id) orelse return null;
+    const req = std.heap.c_allocator.create(TcpWriteWait) catch @panic("oom");
+    req.* = .{
+        .socket = sock,
+        .bytes = flixInt8ArrayToBytes(std.heap.c_allocator, buf_ptr),
+    };
+    const thread = std.Thread.spawn(.{}, tcpWriteWaitWorkerMain, .{req}) catch @panic("failed to spawn async TCP write thread");
+    thread.detach();
+    return req;
+}
+
+fn tcpWriteWaitCancel(wait_ptr: *anyopaque) void {
+    const req: *TcpWriteWait = @ptrCast(@alignCast(wait_ptr));
+    if (req.wait.requestCancel()) {
+        tcpSocketForceClose(req.socket);
+    }
+}
+
+const NativeTcpWriteWaitOutcome = enum(i32) {
+    completed = 0,
+    canceled = 1,
+};
+
+fn tcpWriteWaitAwait(wait_ptr: *anyopaque) NativeTcpWriteWaitOutcome {
+    const req: *TcpWriteWait = @ptrCast(@alignCast(wait_ptr));
+    return switch (req.wait.await()) {
+        .completed => .completed,
+        .canceled => .canceled,
+    };
+}
+
+fn tcpWriteWaitPayload(wait_ptr: *anyopaque) ?TcpWriteWaitPayload {
+    const req: *TcpWriteWait = @ptrCast(@alignCast(wait_ptr));
+    return req.wait.takeCompletedPayload();
+}
+
+fn tcpWriteWaitRelease(wait_ptr: *anyopaque) void {
+    const req: *TcpWriteWait = @ptrCast(@alignCast(wait_ptr));
+    if (req.wait.releaseRef()) {
+        freeTcpWriteWait(req);
+    }
+}
+
+const TcpAcceptWaitPayload = union(enum(u8)) {
+    socket_id: i64,
+    error_msg: []u8,
+};
+
+fn freeTcpAcceptWaitPayload(payload: TcpAcceptWaitPayload) void {
+    switch (payload) {
+        .socket_id => |socket_id| tcpSocketDropById(socket_id),
+        .error_msg => |msg| std.heap.c_allocator.free(msg),
+    }
+}
+
+const TcpAcceptWaitState = async_wait.StickyCancelWait(TcpAcceptWaitPayload, freeTcpAcceptWaitPayload);
+
+const TcpAcceptWait = struct {
+    wait: TcpAcceptWaitState = .{},
+    server: *TcpServerObj,
+};
+
+fn freeTcpAcceptWait(req: *TcpAcceptWait) void {
+    req.wait.deinit();
+    tcpServerRelease(req.server);
+    std.heap.c_allocator.destroy(req);
+}
+
+fn tcpAcceptWaitWorkerRelease(req: *TcpAcceptWait) void {
+    if (req.wait.releaseRef()) {
+        freeTcpAcceptWait(req);
+    }
+}
+
+fn tcpAcceptWaitWorkerMain(req: *TcpAcceptWait) void {
+    defer tcpAcceptWaitWorkerRelease(req);
+
+    var listener = tcpServerSnapshot(req.server) orelse {
+        const msg = std.heap.c_allocator.dupe(u8, "server closed") catch @panic("oom");
+        req.wait.workerComplete(.{ .error_msg = msg });
+        return;
+    };
+
+    const conn = listener.accept() catch |err| {
+        if (req.wait.isCancelVisible()) {
+            req.wait.workerCancel();
+            return;
+        }
+        const msg = std.heap.c_allocator.dupe(u8, @errorName(err)) catch @panic("oom");
+        req.wait.workerComplete(.{ .error_msg = msg });
+        return;
+    };
+
+    if (req.wait.isCancelVisible()) {
+        conn.stream.close();
+        req.wait.workerCancel();
+        return;
+    }
+
+    const sock = std.heap.c_allocator.create(TcpSocketObj) catch {
+        conn.stream.close();
+        const msg = std.heap.c_allocator.dupe(u8, "out of memory") catch @panic("oom");
+        req.wait.workerComplete(.{ .error_msg = msg });
+        return;
+    };
+    sock.* = .{
+        .stream = conn.stream,
+    };
+
+    const sock_id: i64 = g_next_id.fetchAdd(1, .monotonic);
+    {
+        g_tcp_mutex.lock();
+        defer g_tcp_mutex.unlock();
+        g_tcp_sockets.put(sock_id, sock) catch {
+            tcpSocketRelease(sock);
+            const msg = std.heap.c_allocator.dupe(u8, "out of memory") catch @panic("oom");
+            req.wait.workerComplete(.{ .error_msg = msg });
+            return;
+        };
+    }
+
+    req.wait.workerComplete(.{ .socket_id = sock_id });
+}
+
+fn tcpAcceptWaitNew(id: i64) ?*TcpAcceptWait {
+    const server = tcpServerLookup(id) orelse return null;
+    const req = std.heap.c_allocator.create(TcpAcceptWait) catch @panic("oom");
+    req.* = .{
+        .server = server,
+    };
+    const thread = std.Thread.spawn(.{}, tcpAcceptWaitWorkerMain, .{req}) catch @panic("failed to spawn async TCP accept thread");
+    thread.detach();
+    return req;
+}
+
+fn tcpAcceptWaitCancel(wait_ptr: *anyopaque) void {
+    const req: *TcpAcceptWait = @ptrCast(@alignCast(wait_ptr));
+    if (req.wait.requestCancel()) {
+        tcpServerForceClose(req.server);
+    }
+}
+
+const NativeTcpAcceptWaitOutcome = enum(i32) {
+    completed = 0,
+    canceled = 1,
+};
+
+fn tcpAcceptWaitAwait(wait_ptr: *anyopaque) NativeTcpAcceptWaitOutcome {
+    const req: *TcpAcceptWait = @ptrCast(@alignCast(wait_ptr));
+    return switch (req.wait.await()) {
+        .completed => .completed,
+        .canceled => .canceled,
+    };
+}
+
+fn tcpAcceptWaitPayload(wait_ptr: *anyopaque) ?TcpAcceptWaitPayload {
+    const req: *TcpAcceptWait = @ptrCast(@alignCast(wait_ptr));
+    return req.wait.takeCompletedPayload();
+}
+
+fn tcpAcceptWaitRelease(wait_ptr: *anyopaque) void {
+    const req: *TcpAcceptWait = @ptrCast(@alignCast(wait_ptr));
+    if (req.wait.releaseRef()) {
+        freeTcpAcceptWait(req);
+    }
+}
+
+export fn flix_tcp_socket_read(id: i64, buf_ptr: *anyopaque) *anyopaque {
+    const sock = tcpSocketLookup(id) orelse return tcpFail3("invalid TCP socket handle.");
+    defer tcpSocketRelease(sock);
+
+    const stream = tcpSocketStreamSnapshot(sock) orelse return tcpFail3("socket closed");
 
     const cap: usize = flixArrayLen(buf_ptr);
     const tmp = std.heap.c_allocator.alloc(u8, cap) catch return tcpFail3("out of memory");
@@ -5244,17 +6506,10 @@ export fn flix_tcp_socket_read(id: i64, buf_ptr: *anyopaque) *anyopaque {
 }
 
 export fn flix_tcp_socket_write(id: i64, buf_ptr: *anyopaque) *anyopaque {
-    ensureTcpInitialized();
+    const sock = tcpSocketLookup(id) orelse return tcpFail3("invalid TCP socket handle.");
+    defer tcpSocketRelease(sock);
 
-    var stream: std.net.Stream = undefined;
-    {
-        g_tcp_mutex.lock();
-        defer g_tcp_mutex.unlock();
-        const entry = g_tcp_sockets.get(id) orelse {
-            return tcpFail3("invalid TCP socket handle.");
-        };
-        stream = entry.stream;
-    }
+    const stream = tcpSocketStreamSnapshot(sock) orelse return tcpFail3("socket closed");
 
     const bytes = flixInt8ArrayToBytes(std.heap.c_allocator, buf_ptr);
     defer std.heap.c_allocator.free(bytes);
@@ -5300,29 +6555,29 @@ export fn flix_tcp_socket_connect(ip_bytes_ptr: *anyopaque, port: i32) *anyopaqu
         break :blk std.net.tcpConnectToAddress(addr);
     }) catch |err| return tcpFail4(14, @errorName(err));
 
+    const sock = std.heap.c_allocator.create(TcpSocketObj) catch {
+        stream.close();
+        return tcpFail4(14, "out of memory");
+    };
+    sock.* = .{
+        .stream = stream,
+    };
+
     const id: i64 = g_next_id.fetchAdd(1, .monotonic);
     {
         g_tcp_mutex.lock();
         defer g_tcp_mutex.unlock();
-        g_tcp_sockets.put(id, .{ .stream = stream }) catch return tcpFail4(14, "out of memory");
+        g_tcp_sockets.put(id, sock) catch {
+            tcpSocketRelease(sock);
+            return tcpFail4(14, "out of memory");
+        };
     }
 
     return allocFlixTupleFromPayloads(&.{ payloadFromBool(true), id, 14, payloadFromPtr(allocFlixStringFromAscii("")) }, 0b1000);
 }
 
 export fn flix_tcp_socket_close(id: i64) *anyopaque {
-    ensureTcpInitialized();
-
-    var removed: ?std.AutoHashMap(i64, TcpSocketEntry).KV = null;
-    {
-        g_tcp_mutex.lock();
-        defer g_tcp_mutex.unlock();
-        removed = g_tcp_sockets.fetchRemove(id);
-    }
-
-    if (removed) |kv| {
-        kv.value.stream.close();
-    }
+    tcpSocketDropById(id);
 
     return allocFlixTupleFromPayloads(&.{ payloadFromBool(true), payloadFromPtr(allocFlixStringFromAscii("")) }, 0b10);
 }
@@ -5355,50 +6610,56 @@ export fn flix_tcp_server_bind(ip_bytes_ptr: *anyopaque, port: i32) *anyopaque {
         break :blk std.net.Address.listen(addr, .{ .kernel_backlog = 50 });
     }) catch |err| return tcpFail4(14, @errorName(err));
 
+    const server_obj = std.heap.c_allocator.create(TcpServerObj) catch {
+        var s = server;
+        s.deinit();
+        return tcpFail4(14, "out of memory");
+    };
+    server_obj.* = .{
+        .server = server,
+    };
+
     const id: i64 = g_next_id.fetchAdd(1, .monotonic);
     {
         g_tcp_mutex.lock();
         defer g_tcp_mutex.unlock();
-        g_tcp_servers.put(id, .{ .server = server }) catch return tcpFail4(14, "out of memory");
+        g_tcp_servers.put(id, server_obj) catch {
+            tcpServerRelease(server_obj);
+            return tcpFail4(14, "out of memory");
+        };
     }
 
     return allocFlixTupleFromPayloads(&.{ payloadFromBool(true), id, 14, payloadFromPtr(allocFlixStringFromAscii("")) }, 0b1000);
 }
 
 export fn flix_tcp_server_local_port(id: i64) *anyopaque {
-    ensureTcpInitialized();
+    const server = tcpServerLookup(id) orelse {
+        return tcpFail3("invalid TCP server handle.");
+    };
+    defer tcpServerRelease(server);
 
-    var server: std.net.Server = undefined;
-    {
-        g_tcp_mutex.lock();
-        defer g_tcp_mutex.unlock();
-        const entry = g_tcp_servers.get(id) orelse {
-            return tcpFail3("invalid TCP server handle.");
-        };
-        server = entry.server;
-    }
+    const listener = tcpServerSnapshot(server) orelse {
+        return tcpFail3("server closed");
+    };
 
-    const port_u16: u16 = server.listen_address.getPort();
+    const port_u16: u16 = listener.listen_address.getPort();
     return allocFlixTupleFromPayloads(&.{ payloadFromBool(true), @as(i64, @intCast(port_u16)), payloadFromPtr(allocFlixStringFromAscii("")) }, 0b100);
 }
 
 export fn flix_tcp_server_accept(id: i64) *anyopaque {
-    ensureTcpInitialized();
+    const server = tcpServerLookup(id) orelse {
+        return tcpFail4(14, "invalid TCP server handle.");
+    };
+    defer tcpServerRelease(server);
 
-    var server: std.net.Server = undefined;
-    {
-        g_tcp_mutex.lock();
-        defer g_tcp_mutex.unlock();
-        const entry = g_tcp_servers.get(id) orelse {
-            return tcpFail4(14, "invalid TCP server handle.");
-        };
-        server = entry.server;
-    }
+    var listener = tcpServerSnapshot(server) orelse {
+        return tcpFail4(14, "server closed");
+    };
 
     const conn = (blk: {
         var guard = BlockedGuard.enter(current_ctx);
         defer guard.exitAndCooperate();
-        break :blk server.accept();
+        break :blk listener.accept();
     }) catch |err| {
         const kind: i64 = switch (err) {
             error.WouldBlock => 10,
@@ -5411,26 +6672,24 @@ export fn flix_tcp_server_accept(id: i64) *anyopaque {
     {
         g_tcp_mutex.lock();
         defer g_tcp_mutex.unlock();
-        g_tcp_sockets.put(sock_id, .{ .stream = conn.stream }) catch return tcpFail4(14, "out of memory");
+        const sock = std.heap.c_allocator.create(TcpSocketObj) catch {
+            conn.stream.close();
+            return tcpFail4(14, "out of memory");
+        };
+        sock.* = .{
+            .stream = conn.stream,
+        };
+        g_tcp_sockets.put(sock_id, sock) catch {
+            tcpSocketRelease(sock);
+            return tcpFail4(14, "out of memory");
+        };
     }
 
     return allocFlixTupleFromPayloads(&.{ payloadFromBool(true), sock_id, 14, payloadFromPtr(allocFlixStringFromAscii("")) }, 0b1000);
 }
 
 export fn flix_tcp_server_close(id: i64) *anyopaque {
-    ensureTcpInitialized();
-
-    var removed: ?std.AutoHashMap(i64, TcpServerEntry).KV = null;
-    {
-        g_tcp_mutex.lock();
-        defer g_tcp_mutex.unlock();
-        removed = g_tcp_servers.fetchRemove(id);
-    }
-
-    if (removed) |kv| {
-        var s = kv.value.server;
-        s.deinit();
-    }
+    tcpServerDropById(id);
 
     return allocFlixTupleFromPayloads(&.{ payloadFromBool(true), payloadFromPtr(allocFlixStringFromAscii("")) }, 0b10);
 }
@@ -5572,6 +6831,15 @@ fn procFail4(kind: i64, msg: []const u8) *anyopaque {
     return allocFlixTupleFromPayloads(&.{ payloadFromBool(false), 0, kind, payloadFromPtr(msg_ptr) }, 0b1000);
 }
 
+fn procOk4Count(n: i64) *anyopaque {
+    return allocFlixTupleFromPayloads(&.{ payloadFromBool(true), n, 14, payloadFromPtr(allocFlixStringFromAscii("")) }, 0b1000);
+}
+
+fn procFail4Count(kind: i64, msg: []const u8) *anyopaque {
+    const msg_ptr = allocFlixStringFromAscii(msg);
+    return allocFlixTupleFromPayloads(&.{ payloadFromBool(false), 0, kind, payloadFromPtr(msg_ptr) }, 0b1000);
+}
+
 fn procFail4Bool(kind: i64, msg: []const u8) *anyopaque {
     const msg_ptr = allocFlixStringFromAscii(msg);
     return allocFlixTupleFromPayloads(&.{ payloadFromBool(false), payloadFromBool(false), kind, payloadFromPtr(msg_ptr) }, 0b1000);
@@ -5636,6 +6904,341 @@ fn processWaitThread(proc: *ProcessObj) void {
 
     proc.cv.broadcast();
     procRelease(proc);
+}
+
+const ProcessWaitOutcome = enum(i32) {
+    completed = 0,
+    canceled = 1,
+    timed_out = 2,
+};
+
+const ProcessWait = struct {
+    proc: *ProcessObj,
+    canceled: RtAtomic(bool) = .init(false),
+};
+
+fn freeProcessWait(req: *ProcessWait) void {
+    procRelease(req.proc);
+    std.heap.c_allocator.destroy(req);
+}
+
+pub fn processWaitNew(id: i64) ?*ProcessWait {
+    const proc = procLookup(id) orelse return null;
+    const req = std.heap.c_allocator.create(ProcessWait) catch @panic("oom");
+    req.* = .{
+        .proc = proc,
+    };
+    return req;
+}
+
+pub fn processWaitCancel(wait_ptr: *anyopaque) void {
+    const req: *ProcessWait = @ptrCast(@alignCast(wait_ptr));
+    const already = req.canceled.swap(true, .acq_rel);
+    if (!already) {
+        req.proc.cv.broadcast();
+    }
+}
+
+fn processWaitAwaitInternal(req: *ProcessWait, timeout_ms_opt: ?i64) ProcessWaitOutcome {
+    req.proc.mutex.lock();
+    defer req.proc.mutex.unlock();
+
+    const deadline_ns_opt: ?u64 = if (timeout_ms_opt) |timeout_ms|
+        @as(u64, @intCast(std.time.nanoTimestamp())) + @as(u64, @intCast(timeout_ms)) * std.time.ns_per_ms
+    else
+        null;
+
+    while (true) {
+        if (req.canceled.load(.acquire)) return .canceled;
+        if (req.proc.done) return .completed;
+
+        if (deadline_ns_opt) |deadline_ns| {
+            const now_ns: u64 = @as(u64, @intCast(std.time.nanoTimestamp()));
+            if (now_ns >= deadline_ns) return .timed_out;
+            const remaining_ns = deadline_ns - now_ns;
+            req.proc.cv.timedWait(&req.proc.mutex, remaining_ns) catch |err| switch (err) {
+                error.Timeout => continue,
+            };
+        } else {
+            req.proc.cv.wait(&req.proc.mutex);
+        }
+    }
+}
+
+pub fn processWaitAwait(wait_ptr: *anyopaque) ProcessWaitOutcome {
+    const req: *ProcessWait = @ptrCast(@alignCast(wait_ptr));
+    return processWaitAwaitInternal(req, null);
+}
+
+pub fn processWaitAwaitTimeout(wait_ptr: *anyopaque, timeout_ms: i64) ProcessWaitOutcome {
+    const req: *ProcessWait = @ptrCast(@alignCast(wait_ptr));
+    return processWaitAwaitInternal(req, timeout_ms);
+}
+
+pub fn processWaitRelease(wait_ptr: *anyopaque) void {
+    const req: *ProcessWait = @ptrCast(@alignCast(wait_ptr));
+    freeProcessWait(req);
+}
+
+fn processWaitForResult(wait_ptr: *anyopaque) *anyopaque {
+    const req: *ProcessWait = @ptrCast(@alignCast(wait_ptr));
+
+    req.proc.mutex.lock();
+    defer req.proc.mutex.unlock();
+
+    if (req.proc.wait_err) |msg| {
+        return procFail4(14, msg);
+    }
+
+    const term = req.proc.term orelse return procFail4(14, "process wait failed");
+    return allocFlixTupleFromPayloads(&.{ payloadFromBool(true), @as(i64, exitCodeFromTerm(term)), 14, payloadFromPtr(allocFlixStringFromAscii("")) }, 0b1000);
+}
+
+fn processWaitForTimeoutResult(wait_ptr: *anyopaque, done: bool) *anyopaque {
+    const req: *ProcessWait = @ptrCast(@alignCast(wait_ptr));
+
+    if (!done) {
+        return allocFlixTupleFromPayloads(&.{ payloadFromBool(true), payloadFromBool(false), 14, payloadFromPtr(allocFlixStringFromAscii("")) }, 0b1000);
+    }
+
+    req.proc.mutex.lock();
+    defer req.proc.mutex.unlock();
+
+    if (req.proc.wait_err) |msg| {
+        return procFail4Bool(14, msg);
+    }
+
+    _ = req.proc.term orelse return procFail4Bool(14, "process wait failed");
+    return allocFlixTupleFromPayloads(&.{ payloadFromBool(true), payloadFromBool(true), 14, payloadFromPtr(allocFlixStringFromAscii("")) }, 0b1000);
+}
+
+const ProcessStdioKind = enum(u8) {
+    stdin_write,
+    stdout_read,
+    stderr_read,
+};
+
+const ProcessStdioWaitResult = union(enum(u8)) {
+    count: usize,
+    error_msg: []u8,
+    canceled: void,
+};
+
+const ProcessStdioWait = struct {
+    proc: *ProcessObj,
+    kind: ProcessStdioKind,
+    fd: std.posix.fd_t,
+    cancel_pipe: [2]std.posix.fd_t,
+    write_bytes: ?[]u8 = null,
+    read_buf_ptr: ?*anyopaque = null,
+    read_cap: usize = 0,
+    canceled: RtAtomic(bool) = .init(false),
+};
+
+fn setDupFdNonBlocking(fd: std.posix.fd_t) !void {
+    if (builtin.os.tag == .windows) return error.Unsupported;
+
+    const flags = std.c.fcntl(fd, std.c.F.GETFL, @as(c_int, 0));
+    if (flags < 0) return error.Unexpected;
+
+    const nonblock_mask: c_int = @as(c_int, 1) << @bitOffsetOf(std.c.O, "NONBLOCK");
+    const new_flags = flags | nonblock_mask;
+    if (new_flags != flags and std.c.fcntl(fd, std.c.F.SETFL, new_flags) < 0) {
+        return error.Unexpected;
+    }
+}
+
+fn dupProcessPipeFd(proc: *ProcessObj, kind: ProcessStdioKind) !std.posix.fd_t {
+    if (builtin.os.tag == .windows) return error.Unsupported;
+
+    proc.mutex.lock();
+    defer proc.mutex.unlock();
+
+    const file_opt = switch (kind) {
+        .stdin_write => proc.child.stdin,
+        .stdout_read => proc.child.stdout,
+        .stderr_read => proc.child.stderr,
+    };
+    const file = file_opt orelse return error.MissingPipe;
+    const dup_fd = try std.posix.dup(file.handle);
+    errdefer std.posix.close(dup_fd);
+    try setDupFdNonBlocking(dup_fd);
+    return dup_fd;
+}
+
+fn freeProcessStdioWait(req: *ProcessStdioWait) void {
+    std.posix.close(req.fd);
+    std.posix.close(req.cancel_pipe[0]);
+    std.posix.close(req.cancel_pipe[1]);
+    if (req.write_bytes) |bytes| {
+        std.heap.c_allocator.free(bytes);
+    }
+    procRelease(req.proc);
+    std.heap.c_allocator.destroy(req);
+}
+
+pub fn processStdioWriteWaitNew(id: i64, buf_ptr: *anyopaque) !?*ProcessStdioWait {
+    if (builtin.os.tag == .windows) return error.Unsupported;
+
+    const proc = procLookup(id) orelse return null;
+    errdefer procRelease(proc);
+
+    const dup_fd = dupProcessPipeFd(proc, .stdin_write) catch |err| switch (err) {
+        error.MissingPipe => return error.MissingPipe,
+        else => return err,
+    };
+    errdefer std.posix.close(dup_fd);
+
+    const cancel_pipe = try std.posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+    errdefer {
+        std.posix.close(cancel_pipe[0]);
+        std.posix.close(cancel_pipe[1]);
+    }
+
+    const req = std.heap.c_allocator.create(ProcessStdioWait) catch @panic("oom");
+    req.* = .{
+        .proc = proc,
+        .kind = .stdin_write,
+        .fd = dup_fd,
+        .cancel_pipe = cancel_pipe,
+        .write_bytes = flixInt8ArrayToBytes(std.heap.c_allocator, buf_ptr),
+    };
+    return req;
+}
+
+pub fn processStdioReadWaitNew(id: i64, kind: ProcessStdioKind, buf_ptr: *anyopaque) !?*ProcessStdioWait {
+    if (builtin.os.tag == .windows) return error.Unsupported;
+    std.debug.assert(kind != .stdin_write);
+
+    const proc = procLookup(id) orelse return null;
+    errdefer procRelease(proc);
+
+    const dup_fd = dupProcessPipeFd(proc, kind) catch |err| switch (err) {
+        error.MissingPipe => return error.MissingPipe,
+        else => return err,
+    };
+    errdefer std.posix.close(dup_fd);
+
+    const cancel_pipe = try std.posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+    errdefer {
+        std.posix.close(cancel_pipe[0]);
+        std.posix.close(cancel_pipe[1]);
+    }
+
+    const req = std.heap.c_allocator.create(ProcessStdioWait) catch @panic("oom");
+    req.* = .{
+        .proc = proc,
+        .kind = kind,
+        .fd = dup_fd,
+        .cancel_pipe = cancel_pipe,
+        .read_buf_ptr = buf_ptr,
+        .read_cap = flixArrayLen(buf_ptr),
+    };
+    return req;
+}
+
+pub fn processStdioWaitCancel(wait_ptr: *anyopaque) void {
+    const req: *ProcessStdioWait = @ptrCast(@alignCast(wait_ptr));
+    const already = req.canceled.swap(true, .acq_rel);
+    if (!already) {
+        const one = [_]u8{1};
+        _ = std.posix.write(req.cancel_pipe[1], &one) catch {};
+    }
+}
+
+fn processStdioWaitAwaitWrite(req: *ProcessStdioWait) ProcessStdioWaitResult {
+    const bytes = req.write_bytes orelse unreachable;
+    var written: usize = 0;
+
+    while (written < bytes.len) {
+        if (req.canceled.load(.acquire)) return .{ .canceled = {} };
+
+        var poll_fds = [_]std.posix.pollfd{
+            .{ .fd = req.fd, .events = std.posix.POLL.OUT | std.posix.POLL.HUP | std.posix.POLL.ERR, .revents = 0 },
+            .{ .fd = req.cancel_pipe[0], .events = std.posix.POLL.IN, .revents = 0 },
+        };
+
+        _ = std.posix.poll(&poll_fds, -1) catch |err| {
+            const msg = std.heap.c_allocator.dupe(u8, @errorName(err)) catch @panic("oom");
+            return .{ .error_msg = msg };
+        };
+
+        if ((poll_fds[1].revents & std.posix.POLL.IN) != 0) {
+            return .{ .canceled = {} };
+        }
+
+        if ((poll_fds[0].revents & (std.posix.POLL.OUT | std.posix.POLL.HUP | std.posix.POLL.ERR)) == 0) {
+            continue;
+        }
+
+        const n = std.posix.write(req.fd, bytes[written..]) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => {
+                const msg = std.heap.c_allocator.dupe(u8, @errorName(err)) catch @panic("oom");
+                return .{ .error_msg = msg };
+            },
+        };
+
+        if (n == 0) {
+            const msg = std.heap.c_allocator.dupe(u8, "Unexpected") catch @panic("oom");
+            return .{ .error_msg = msg };
+        }
+        written += n;
+    }
+
+    return .{ .count = written };
+}
+
+fn processStdioWaitAwaitRead(req: *ProcessStdioWait) ProcessStdioWaitResult {
+    const cap = req.read_cap;
+    const tmp = std.heap.c_allocator.alloc(u8, cap) catch @panic("oom");
+    defer std.heap.c_allocator.free(tmp);
+
+    while (true) {
+        if (req.canceled.load(.acquire)) return .{ .canceled = {} };
+
+        var poll_fds = [_]std.posix.pollfd{
+            .{ .fd = req.fd, .events = std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR, .revents = 0 },
+            .{ .fd = req.cancel_pipe[0], .events = std.posix.POLL.IN, .revents = 0 },
+        };
+
+        _ = std.posix.poll(&poll_fds, -1) catch |err| {
+            const msg = std.heap.c_allocator.dupe(u8, @errorName(err)) catch @panic("oom");
+            return .{ .error_msg = msg };
+        };
+
+        if ((poll_fds[1].revents & std.posix.POLL.IN) != 0) {
+            return .{ .canceled = {} };
+        }
+
+        if ((poll_fds[0].revents & (std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR)) == 0) {
+            continue;
+        }
+
+        const n = std.posix.read(req.fd, tmp) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => {
+                const msg = std.heap.c_allocator.dupe(u8, @errorName(err)) catch @panic("oom");
+                return .{ .error_msg = msg };
+            },
+        };
+
+        flixWriteBytesToInt8Array(req.read_buf_ptr.?, tmp[0..n]);
+        return .{ .count = n };
+    }
+}
+
+pub fn processStdioWaitAwait(wait_ptr: *anyopaque) ProcessStdioWaitResult {
+    const req: *ProcessStdioWait = @ptrCast(@alignCast(wait_ptr));
+    return switch (req.kind) {
+        .stdin_write => processStdioWaitAwaitWrite(req),
+        .stdout_read, .stderr_read => processStdioWaitAwaitRead(req),
+    };
+}
+
+pub fn processStdioWaitRelease(wait_ptr: *anyopaque) void {
+    const req: *ProcessStdioWait = @ptrCast(@alignCast(wait_ptr));
+    freeProcessStdioWait(req);
 }
 
 export fn flix_process_exec(argv_ptr: *anyopaque, has_cwd: bool, cwd_ptr: *anyopaque, env_pairs_ptr: *anyopaque) *anyopaque {
@@ -5911,8 +7514,18 @@ export fn flix_process_wait_for_timeout(id: i64, timeout_ms: i64) *anyopaque {
     return allocFlixTupleFromPayloads(&.{ payloadFromBool(true), payloadFromBool(true), 14, payloadFromPtr(allocFlixStringFromAscii("")) }, 0b1000);
 }
 
+export fn flix_process_stdin_write_resumable(ctx: *anyopaque, id: i64, buf_ptr: *anyopaque) FlixResult {
+    if (is_wasm) @panic("flix_process_stdin_write_resumable: native-only");
+    _ = ctx;
+    if (builtin.os.tag == .windows) {
+        return .{ .tag = RESULT_TAG_VALUE, .payload = payloadFromPtr(flix_process_stdin_write(id, buf_ptr)) };
+    }
+    const susp_ptr = allocProcessBufferSuspension(33, id, buf_ptr);
+    return .{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
+}
+
 export fn flix_process_stdin_write(id: i64, buf_ptr: *anyopaque) *anyopaque {
-    const proc = procLookup(id) orelse return procFail3("invalid process handle.");
+    const proc = procLookup(id) orelse return procFail4Count(14, "invalid process handle.");
     defer procRelease(proc);
 
     const bytes = flixInt8ArrayToBytes(std.heap.c_allocator, buf_ptr);
@@ -5922,67 +7535,87 @@ export fn flix_process_stdin_write(id: i64, buf_ptr: *anyopaque) *anyopaque {
     const stdin_file = proc.child.stdin;
     proc.mutex.unlock();
 
-    if (stdin_file == null) return procFail3("stdin not available");
+    if (stdin_file == null) return procFail4Count(14, "stdin not available");
 
     const write_res = blk: {
         var guard = BlockedGuard.enter(current_ctx);
         defer guard.exitAndCooperate();
         break :blk stdin_file.?.writeAll(bytes);
     };
-    _ = write_res catch |err| return procFail3(@errorName(err));
+    _ = write_res catch |err| return procFail4Count(14, @errorName(err));
 
     if (bytes.len > std.math.maxInt(i32)) {
-        return procFail3("write too large");
+        return procFail4Count(14, "write too large");
     }
-    return allocFlixTupleFromPayloads(&.{ payloadFromBool(true), @as(i64, @intCast(bytes.len)), payloadFromPtr(allocFlixStringFromAscii("")) }, 0b100);
+    return procOk4Count(@intCast(bytes.len));
+}
+
+export fn flix_process_stdout_read_resumable(ctx: *anyopaque, id: i64, buf_ptr: *anyopaque) FlixResult {
+    if (is_wasm) @panic("flix_process_stdout_read_resumable: native-only");
+    _ = ctx;
+    if (builtin.os.tag == .windows) {
+        return .{ .tag = RESULT_TAG_VALUE, .payload = payloadFromPtr(flix_process_stdout_read(id, buf_ptr)) };
+    }
+    const susp_ptr = allocProcessBufferSuspension(34, id, buf_ptr);
+    return .{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
 }
 
 export fn flix_process_stdout_read(id: i64, buf_ptr: *anyopaque) *anyopaque {
-    const proc = procLookup(id) orelse return procFail3("invalid process handle.");
+    const proc = procLookup(id) orelse return procFail4Count(14, "invalid process handle.");
     defer procRelease(proc);
 
     const cap: usize = flixArrayLen(buf_ptr);
-    const tmp = std.heap.c_allocator.alloc(u8, cap) catch return procFail3("out of memory");
+    const tmp = std.heap.c_allocator.alloc(u8, cap) catch return procFail4Count(14, "out of memory");
     defer std.heap.c_allocator.free(tmp);
 
     proc.mutex.lock();
     const stdout_file = proc.child.stdout;
     proc.mutex.unlock();
 
-    if (stdout_file == null) return procFail3("stdout not available");
+    if (stdout_file == null) return procFail4Count(14, "stdout not available");
 
     const n = (blk: {
         var guard = BlockedGuard.enter(current_ctx);
         defer guard.exitAndCooperate();
         break :blk stdout_file.?.read(tmp);
-    }) catch |err| return procFail3(@errorName(err));
+    }) catch |err| return procFail4Count(14, @errorName(err));
 
     flixWriteBytesToInt8Array(buf_ptr, tmp[0..n]);
-    return allocFlixTupleFromPayloads(&.{ payloadFromBool(true), @as(i64, @intCast(n)), payloadFromPtr(allocFlixStringFromAscii("")) }, 0b100);
+    return procOk4Count(@intCast(n));
+}
+
+export fn flix_process_stderr_read_resumable(ctx: *anyopaque, id: i64, buf_ptr: *anyopaque) FlixResult {
+    if (is_wasm) @panic("flix_process_stderr_read_resumable: native-only");
+    _ = ctx;
+    if (builtin.os.tag == .windows) {
+        return .{ .tag = RESULT_TAG_VALUE, .payload = payloadFromPtr(flix_process_stderr_read(id, buf_ptr)) };
+    }
+    const susp_ptr = allocProcessBufferSuspension(35, id, buf_ptr);
+    return .{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
 }
 
 export fn flix_process_stderr_read(id: i64, buf_ptr: *anyopaque) *anyopaque {
-    const proc = procLookup(id) orelse return procFail3("invalid process handle.");
+    const proc = procLookup(id) orelse return procFail4Count(14, "invalid process handle.");
     defer procRelease(proc);
 
     const cap: usize = flixArrayLen(buf_ptr);
-    const tmp = std.heap.c_allocator.alloc(u8, cap) catch return procFail3("out of memory");
+    const tmp = std.heap.c_allocator.alloc(u8, cap) catch return procFail4Count(14, "out of memory");
     defer std.heap.c_allocator.free(tmp);
 
     proc.mutex.lock();
     const stderr_file = proc.child.stderr;
     proc.mutex.unlock();
 
-    if (stderr_file == null) return procFail3("stderr not available");
+    if (stderr_file == null) return procFail4Count(14, "stderr not available");
 
     const n = (blk: {
         var guard = BlockedGuard.enter(current_ctx);
         defer guard.exitAndCooperate();
         break :blk stderr_file.?.read(tmp);
-    }) catch |err| return procFail3(@errorName(err));
+    }) catch |err| return procFail4Count(14, @errorName(err));
 
     flixWriteBytesToInt8Array(buf_ptr, tmp[0..n]);
-    return allocFlixTupleFromPayloads(&.{ payloadFromBool(true), @as(i64, @intCast(n)), payloadFromPtr(allocFlixStringFromAscii("")) }, 0b100);
+    return procOk4Count(@intCast(n));
 }
 
 export fn flix_process_release(id: i64) *anyopaque {
@@ -6064,42 +7697,31 @@ fn isPortableRedirectStatus(status: std.http.Status) bool {
     };
 }
 
-export fn flix_http_request(ctx: *anyopaque, method_ptr: *anyopaque, url_ptr: *anyopaque, req_headers_ptr: *anyopaque, has_body: bool, body_ptr: *anyopaque) *anyopaque {
-    // Portable contract: if hasBody is false then the body must be empty.
+const HttpRequestBlobError = error{
+    InvalidInput,
+} || std.mem.Allocator.Error;
+
+fn encodeHttpRequestBlob(
+    alloc: std.mem.Allocator,
+    method_ptr: *anyopaque,
+    url_ptr: *anyopaque,
+    req_headers_ptr: *anyopaque,
+    has_body: bool,
+    body_ptr: *anyopaque,
+) HttpRequestBlobError![]u8 {
     if (!has_body and flixStringLen(body_ptr) != 0) {
-        return httpFail(ctx, 4, "invalid input");
+        return error.InvalidInput;
     }
 
-    const fctx: *FlixCtx = requireCtx(ctx);
-    const region_ptr0: ?*anyopaque = if (current_region) |r| @ptrCast(r) else null;
-
-    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    // Decode inputs.
     const method_bytes = flixStringToUtf8Alloc(alloc, method_ptr);
     const url_bytes = flixStringToUtf8Alloc(alloc, url_ptr);
-    const body_bytes_opt: ?[]const u8 = if (has_body) flixStringToUtf8Alloc(alloc, body_ptr) else null;
+    const body_bytes: []const u8 = if (has_body) flixStringToUtf8Alloc(alloc, body_ptr) else "";
 
-    // Parse method (limited to std.http.Method set).
-    const method_up = alloc.alloc(u8, method_bytes.len) catch return httpFail(ctx, 14, "out of memory");
-    for (method_bytes, 0..) |ch, i| method_up[i] = std.ascii.toUpper(ch);
-    const method0 = std.meta.stringToEnum(std.http.Method, method_up) orelse return httpFail(ctx, 4, "invalid method");
-
-    // Parse URL.
-    const uri0 = std.Uri.parse(url_bytes) catch |err| return httpFail(ctx, 4, @errorName(err));
-
-    // Portable contract: only http/https schemes are supported.
-    if (!std.ascii.eqlIgnoreCase(uri0.scheme, "http") and !std.ascii.eqlIgnoreCase(uri0.scheme, "https")) {
-        return httpFail(ctx, 12, "unsupported URL scheme");
-    }
-
-    // Decode request headers (pairs).
     const req_len: usize = flixArrayLen(req_headers_ptr);
-    if ((req_len & 1) != 0) return httpFail(ctx, 4, "invalid headers");
+    if ((req_len & 1) != 0) return error.InvalidInput;
+
     const header_count: usize = req_len / 2;
-    const headers = alloc.alloc(std.http.Header, header_count) catch return httpFail(ctx, 14, "out of memory");
+    const headers = try alloc.alloc(http_wire.Header, header_count);
 
     const req_slots = flixArraySlots(req_headers_ptr);
     var hi: usize = 0;
@@ -6108,161 +7730,83 @@ export fn flix_http_request(ctx: *anyopaque, method_ptr: *anyopaque, url_ptr: *a
         const k_ptr = ptrFromPayload(req_slots[idx]);
         const v_ptr = ptrFromPayload(req_slots[idx + 1]);
         headers[hi] = .{
-            .name = flixStringToUtf8Alloc(alloc, k_ptr),
+            .key = flixStringToUtf8Alloc(alloc, k_ptr),
             .value = flixStringToUtf8Alloc(alloc, v_ptr),
         };
         hi += 1;
     }
 
-    // Send request (and follow redirects like HttpClient.Redirect.NORMAL).
-    var client: std.http.Client = .{ .allocator = std.heap.c_allocator };
-    defer client.deinit();
+    return http_wire.encodeRequest(alloc, method_bytes, url_bytes, headers, has_body, body_bytes);
+}
 
-    const original_is_https = std.ascii.eqlIgnoreCase(uri0.scheme, "https");
+fn decodeHttpResponseBlobToTuple(ctx: *anyopaque, blob: []const u8) *anyopaque {
+    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
 
-    var cur_uri = uri0;
-    var cur_method = method0;
-    var cur_body = body_bytes_opt;
+    const decoded = http_wire.decodeResponse(alloc, blob) catch |err| {
+        return httpFail(ctx, 5, @errorName(err));
+    };
 
-    var redirects_left: usize = 5;
-    while (true) {
-        var req = (blk: {
-            var guard = BlockedGuard.enter(fctx);
-            defer guard.exitAndCooperate();
-            break :blk client.request(cur_method, cur_uri, .{
-                .redirect_behavior = .unhandled,
-                .keep_alive = true,
-                // Match JVM behavior more closely: do not implicitly negotiate compression.
-                .headers = .{ .accept_encoding = .omit },
-                .extra_headers = headers,
-                .privileged_headers = &.{},
-            });
-        }) catch |err| return httpFail(ctx, httpKindFromErr(err), @errorName(err));
-        defer req.deinit();
-
-        if (cur_body) |payload| {
-            req.transfer_encoding = .{ .content_length = payload.len };
-            const send_err: ?anyerror = send_blk: {
-                var guard = BlockedGuard.enter(fctx);
-                defer guard.exitAndCooperate();
-
-                var bw = req.sendBodyUnflushed(&.{}) catch |err| break :send_blk err;
-                bw.writer.writeAll(payload) catch |err| break :send_blk err;
-                bw.end() catch |err| break :send_blk err;
-                req.connection.?.flush() catch |err| break :send_blk err;
-
-                break :send_blk null;
-            };
-            if (send_err) |err| return httpFail(ctx, httpKindFromErr(err), @errorName(err));
-        } else {
-            const send_res = blk: {
-                var guard = BlockedGuard.enter(fctx);
-                defer guard.exitAndCooperate();
-                break :blk req.sendBodiless();
-            };
-            _ = send_res catch |err| return httpFail(ctx, httpKindFromErr(err), @errorName(err));
-        }
-
-        var resp = (blk: {
-            var guard = BlockedGuard.enter(fctx);
-            defer guard.exitAndCooperate();
-            break :blk req.receiveHead(&.{});
-        }) catch |err| return httpFail(ctx, httpKindFromErr(err), @errorName(err));
-
-        const status = resp.head.status;
-        const status_code: i64 = @intCast(@intFromEnum(status));
-
-        // Redirect handling.
-        if (isPortableRedirectStatus(status)) {
-            if (resp.head.location) |location| {
-                // Determine explicit redirect scheme (if any) for policy checks.
-                const loc_uri = std.Uri.parse(location) catch std.Uri.parseAfterScheme("", location) catch |err| {
-                    return httpFail(ctx, 4, @errorName(err));
-                };
-                const loc_scheme = loc_uri.scheme;
-
-                // If original request is https and redirect target is explicitly http, reject.
-                if (original_is_https and loc_scheme.len != 0 and std.ascii.eqlIgnoreCase(loc_scheme, "http")) {
-                    return httpFail(ctx, 9, "redirect disallowed: https -> http");
-                }
-
-                // Unsupported redirect target scheme.
-                if (loc_scheme.len != 0 and !std.ascii.eqlIgnoreCase(loc_scheme, "http") and !std.ascii.eqlIgnoreCase(loc_scheme, "https")) {
-                    return httpFail(ctx, 12, "unsupported redirect scheme");
-                }
-
-                if (redirects_left == 0) {
-                    return httpFail(ctx, 14, "redirect not followed");
-                }
-                redirects_left -= 1;
-
-                // Resolve relative redirects against the current URI.
-                const base_path_len: usize = switch (cur_uri.path) {
-                    .raw => |s| s.len,
-                    .percent_encoded => |s| s.len,
-                };
-                const buf_len: usize = @max(@as(usize, 8192), location.len + base_path_len + 16);
-                const buf = alloc.alloc(u8, buf_len) catch return httpFail(ctx, 14, "out of memory");
-                var aux_buf: []u8 = buf;
-                @memcpy(aux_buf[0..location.len], location);
-                const new_uri = cur_uri.resolveInPlace(location.len, &aux_buf) catch |err| {
-                    return httpFail(ctx, 14, @errorName(err));
-                };
-
-                // Method rewriting rules (match HttpClient.Redirect.NORMAL semantics).
-                if (status == .see_other or ((status == .moved_permanently or status == .found) and cur_method == .POST)) {
-                    cur_method = .GET;
-                    cur_body = null;
-                }
-
-                cur_uri = new_uri;
-                continue;
-            }
-        }
-
-        // Collect response headers as (lowercased name, value) pairs.
-        var resp_ptrs: std.ArrayList(*anyopaque) = .empty;
-        defer resp_ptrs.deinit(alloc);
-
-        var it = resp.head.iterateHeaders();
-        while (it.next()) |h| {
-            const lower = alloc.alloc(u8, h.name.len) catch return httpFail(ctx, 14, "out of memory");
-            for (h.name, 0..) |ch, i| lower[i] = std.ascii.toLower(ch);
-            const key_ptr = allocFlixStringFromAscii(lower);
-            const val_ptr = allocFlixStringFromUtf8Lossy(h.value);
-            resp_ptrs.append(alloc, key_ptr) catch return httpFail(ctx, 14, "out of memory");
-            resp_ptrs.append(alloc, val_ptr) catch return httpFail(ctx, 14, "out of memory");
-        }
-
-        const resp_pairs_ptr = allocFlixArrayFromPtrPayloadsInRegion(ctx, region_ptr0, resp_ptrs.items);
-
-        // Read response body (UTF-8, lossy).
-        const should_read_body =
-            cur_method != .HEAD and
-            status.class() != .informational and
-            status != .no_content and
-            status != .reset_content and
-            status != .not_modified;
-
-        const resp_body_ptr: *anyopaque = if (!should_read_body) blk: {
-            break :blk allocFlixStringFromAscii("");
-        } else blk: {
-            var aw = std.Io.Writer.Allocating.init(alloc);
-            defer aw.deinit();
-
-            var transfer_buf: [64]u8 = undefined;
-            const reader = req.reader.bodyReader(&transfer_buf, resp.head.transfer_encoding, resp.head.content_length);
-            const read_res = io_blk: {
-                var guard = BlockedGuard.enter(fctx);
-                defer guard.exitAndCooperate();
-                break :io_blk reader.streamRemaining(&aw.writer);
-            };
-            _ = read_res catch |err| return httpFail(ctx, httpKindFromErr(err), @errorName(err));
-            break :blk allocFlixStringFromUtf8Lossy(aw.written());
-        };
-
-        return httpOk(status_code, resp_pairs_ptr, resp_body_ptr);
+    if (!decoded.ok) {
+        return httpFail(ctx, decoded.err_kind, decoded.err_msg);
     }
+
+    const region_ptr0: ?*anyopaque = if (current_region) |r| @ptrCast(r) else null;
+
+    var resp_ptrs: std.ArrayList(*anyopaque) = .empty;
+    defer resp_ptrs.deinit(alloc);
+
+    for (decoded.headers) |h| {
+        const key_ptr = allocFlixStringFromAscii(h.key);
+        const val_ptr = allocFlixStringFromUtf8Lossy(h.value);
+        resp_ptrs.append(alloc, key_ptr) catch @panic("oom");
+        resp_ptrs.append(alloc, val_ptr) catch @panic("oom");
+    }
+
+    const resp_pairs_ptr = allocFlixArrayFromPtrPayloadsInRegion(ctx, region_ptr0, resp_ptrs.items);
+    const resp_body_ptr = allocFlixStringFromUtf8Lossy(decoded.body);
+    return httpOk(decoded.status, resp_pairs_ptr, resp_body_ptr);
+}
+
+fn httpRequestBlobFromSuspension(alloc: std.mem.Allocator, susp_ptr: *anyopaque) HttpRequestBlobError![]u8 {
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    const eff_sym: i64 = slots[0];
+    const op_index: i64 = slots[1];
+    const arg_count: i64 = slots[4];
+    if (eff_sym != WasmIoEffSymId or op_index != 2 or arg_count != 5) {
+        @panic("expected http-request suspension");
+    }
+
+    const method_ptr = ptrFromPayload(slots[5]);
+    const url_ptr = ptrFromPayload(slots[6]);
+    const headers_ptr = ptrFromPayload(slots[7]);
+    const has_body = slots[8] != 0;
+    const body_ptr = ptrFromPayload(slots[9]);
+
+    return encodeHttpRequestBlob(alloc, method_ptr, url_ptr, headers_ptr, has_body, body_ptr);
+}
+
+export fn flix_http_request(ctx: *anyopaque, method_ptr: *anyopaque, url_ptr: *anyopaque, req_headers_ptr: *anyopaque, has_body: bool, body_ptr: *anyopaque) *anyopaque {
+    const req_blob = encodeHttpRequestBlob(std.heap.c_allocator, method_ptr, url_ptr, req_headers_ptr, has_body, body_ptr) catch |err| {
+        return switch (err) {
+            error.InvalidInput => httpFail(ctx, 4, "invalid input"),
+            error.OutOfMemory => httpFail(ctx, 14, "out of memory"),
+        };
+    };
+    defer std.heap.c_allocator.free(req_blob);
+
+    const outcome = http_std_wire.httpRequest(std.heap.c_allocator, req_blob, null) catch {
+        return httpFail(ctx, 14, "out of memory");
+    };
+
+    return switch (outcome) {
+        .completed => |blob| blk: {
+            defer std.heap.c_allocator.free(blob);
+            break :blk decodeHttpResponseBlobToTuple(ctx, blob);
+        },
+        .canceled => httpFail(ctx, 2, "canceled"),
+    };
 }
 
 }; // NativeProcHttp
@@ -6506,7 +8050,7 @@ export fn flix_suspension_arg_as_ptr(ctx_ptr: *anyopaque, susp_handle: i64, idx0
     return flix_handle_new(ctx_ptr, ptr);
 }
 
-const InvokeFn = *const fn (ctx: *anyopaque, self: *anyopaque, arg0: i64) callconv(.c) FlixResult;
+const InvokeFn = *const fn (ctx: *anyopaque, self: *anyopaque, arg_tag: i64, arg_payload: i64) callconv(.c) FlixResult;
 
 const FlixTypeInfo = extern struct {
     type_id: u32,
@@ -6564,15 +8108,15 @@ export fn flix_alloc_flex(ctx_ptr: *anyopaque, ti: *const FlixTypeInfo, size_byt
     return gcAllocBytes(size_bytes, ti);
 }
 
-export fn flix_invoke_thunk(ctx: *anyopaque, thunk: *anyopaque, arg0: i64) FlixResult {
-    return invokeThunk(ctx, thunk, arg0);
+export fn flix_invoke_thunk(ctx: *anyopaque, thunk: *anyopaque, arg_tag: i64, arg_payload: i64) FlixResult {
+    return invokeThunk(ctx, thunk, arg_tag, arg_payload);
 }
 
-fn invokeThunk(ctx: *anyopaque, thunk: *anyopaque, arg0: i64) FlixResult {
+fn invokeThunk(ctx: *anyopaque, thunk: *anyopaque, arg_tag: i64, arg_payload: i64) FlixResult {
     const obj: *FlixObj = @ptrCast(@alignCast(thunk));
     const ti = obj.typeinfo;
     const fn_ptr = ti.invoke orelse @panic("object has null invoke hook");
-    return fn_ptr(ctx, thunk, arg0);
+    return fn_ptr(ctx, thunk, arg_tag, arg_payload);
 }
 
 // ----------------------------------------------------------------------------
@@ -6616,6 +8160,9 @@ export fn flix_frames_push(frame: *anyopaque, prefix: ?*anyopaque) *anyopaque {
 export fn flix_frames_reverse_onto(prefix: ?*anyopaque, onto: ?*anyopaque) ?*anyopaque {
     var p = prefix;
     var acc = onto;
+    flix_gc_push_root_ptr(currentCtxPtr(), @ptrCast(&p));
+    flix_gc_push_root_ptr(currentCtxPtr(), @ptrCast(&acc));
+    defer flix_gc_pop_roots(currentCtxPtr(), 2);
     while (p) |node| {
         const slots: [*]i64 = objPayloadSlots(node);
         const head_ptr = ptrFromPayload(slots[0]);
@@ -6627,6 +8174,10 @@ export fn flix_frames_reverse_onto(prefix: ?*anyopaque, onto: ?*anyopaque) ?*any
 }
 
 export fn flix_frame_copy(frame: *anyopaque) *anyopaque {
+    var frame_root: ?*anyopaque = frame;
+    flix_gc_push_root_ptr(currentCtxPtr(), @ptrCast(&frame_root));
+    defer flix_gc_pop_roots(currentCtxPtr(), 1);
+
     const obj: *FlixObj = @ptrCast(@alignCast(frame));
     const ti = obj.typeinfo;
     if (ti.size_bytes == 0) @panic("invalid frame size");
@@ -6639,12 +8190,20 @@ export fn flix_frame_copy(frame: *anyopaque) *anyopaque {
     return mem;
 }
 
-fn applyFrameSnapshot(ctx: *anyopaque, frame_snapshot: *anyopaque, resume_payload: i64) FlixResult {
+fn applyFrameSnapshot(ctx: *anyopaque, frame_snapshot: *anyopaque, resume_result: FlixResult) FlixResult {
     const fresh = flix_frame_copy(frame_snapshot);
-    return invokeThunk(ctx, fresh, resume_payload);
+    return invokeThunk(ctx, fresh, resume_result.tag, resume_result.payload);
 }
 
 fn allocResumptionCons(eff_sym: i64, handler: *anyopaque, frames: ?*anyopaque, tail: ?*anyopaque) *anyopaque {
+    var handler_root: ?*anyopaque = handler;
+    var frames_root = frames;
+    var tail_root = tail;
+    flix_gc_push_root_ptr(currentCtxPtr(), @ptrCast(&handler_root));
+    flix_gc_push_root_ptr(currentCtxPtr(), @ptrCast(&frames_root));
+    flix_gc_push_root_ptr(currentCtxPtr(), @ptrCast(&tail_root));
+    defer flix_gc_pop_roots(currentCtxPtr(), 3);
+
     const payloads = [_]i64{
         eff_sym,
         payloadFromPtr(handler),
@@ -6656,6 +8215,14 @@ fn allocResumptionCons(eff_sym: i64, handler: *anyopaque, frames: ?*anyopaque, t
 }
 
 fn allocSuspensionLike(src_susp: *anyopaque, prefix: ?*anyopaque, resumption: ?*anyopaque) *anyopaque {
+    var susp_root: ?*anyopaque = src_susp;
+    var prefix_root = prefix;
+    var resumption_root = resumption;
+    flix_gc_push_root_ptr(currentCtxPtr(), @ptrCast(&susp_root));
+    flix_gc_push_root_ptr(currentCtxPtr(), @ptrCast(&prefix_root));
+    flix_gc_push_root_ptr(currentCtxPtr(), @ptrCast(&resumption_root));
+    defer flix_gc_pop_roots(currentCtxPtr(), 3);
+
     const src: [*]i64 = objPayloadSlots(src_susp);
     const eff_sym: i64 = src[0];
     const op_index: i64 = src[1];
@@ -6687,8 +8254,15 @@ fn suspensionAttachFramesPrefix(susp: *anyopaque, frames0: ?*anyopaque) void {
     var frames = frames0;
     if (frames == null) return;
 
+    var susp_root: ?*anyopaque = susp;
+    flix_gc_push_root_ptr(currentCtxPtr(), @ptrCast(&susp_root));
+    flix_gc_push_root_ptr(currentCtxPtr(), @ptrCast(&frames));
+    defer flix_gc_pop_roots(currentCtxPtr(), 2);
+
     const susp_slots: [*]i64 = objPayloadSlots(susp);
     var prefix_ptr = nullablePtrFromPayload(susp_slots[2]);
+    flix_gc_push_root_ptr(currentCtxPtr(), @ptrCast(&prefix_ptr));
+    defer flix_gc_pop_roots(currentCtxPtr(), 1);
     while (frames) |node| {
         const slots: [*]i64 = objPayloadSlots(node);
         const head_frame = ptrFromPayload(slots[0]);
@@ -6700,6 +8274,10 @@ fn suspensionAttachFramesPrefix(susp: *anyopaque, frames0: ?*anyopaque) void {
 }
 
 export fn flix_resume_suspension(ctx: *anyopaque, susp: *anyopaque, resume_payload: i64) FlixResult {
+    var susp_root: ?*anyopaque = susp;
+    flix_gc_push_root_ptr(ctx, @ptrCast(&susp_root));
+    defer flix_gc_pop_roots(ctx, 1);
+
     const slots: [*]i64 = objPayloadSlots(susp);
     const arg_count_i64: i64 = slots[4];
     if (arg_count_i64 < 0) @panic("suspension already resumed");
@@ -6713,43 +8291,58 @@ export fn flix_resume_suspension(ctx: *anyopaque, susp: *anyopaque, resume_paylo
     slots[4] = -1;
 
     // Outer continuation frames (innermost-first) to apply after resumption rewinds.
-    const frames = flix_frames_reverse_onto(prefix_ptr, null);
+    var frames = flix_frames_reverse_onto(prefix_ptr, null);
+    flix_gc_push_root_ptr(ctx, @ptrCast(&frames));
+    defer flix_gc_pop_roots(ctx, 1);
 
     var r: FlixResult = if (resumption_ptr) |rp| flix_resumption_rewind(ctx, rp, resume_payload) else FlixResult{ .tag = RESULT_TAG_VALUE, .payload = resume_payload };
 
     // Unwind thunks.
     while (r.tag == RESULT_TAG_THUNK) {
-        const thunk_ptr = ptrFromPayload(r.payload);
-        r = invokeThunk(ctx, thunk_ptr, 0);
+        var thunk_slot: ?*anyopaque = ptrFromPayload(r.payload);
+        flix_gc_push_root_ptr(ctx, @ptrCast(&thunk_slot));
+        const thunk_ptr = thunk_slot.?;
+        r = invokeThunk(ctx, thunk_ptr, RESULT_TAG_VALUE, 0);
+        flix_gc_pop_roots(ctx, 1);
     }
 
     // Apply outer frames.
     var cur_frames = frames;
     while (true) {
         switch (r.tag) {
-            RESULT_TAG_VALUE => {
+            RESULT_TAG_VALUE, RESULT_TAG_EXCEPTION => {
                 if (cur_frames == null) return r;
                 const node = cur_frames.?;
                 const fslots: [*]i64 = objPayloadSlots(node);
-                const head_frame = ptrFromPayload(fslots[0]);
-                cur_frames = nullablePtrFromPayload(fslots[1]);
+                var head_frame_slot: ?*anyopaque = ptrFromPayload(fslots[0]);
+                var tail_frames = nullablePtrFromPayload(fslots[1]);
+                flix_gc_push_root_ptr(ctx, @ptrCast(&head_frame_slot));
+                flix_gc_push_root_ptr(ctx, @ptrCast(&tail_frames));
+                defer {
+                    flix_gc_pop_roots(ctx, 2);
+                }
+                cur_frames = tail_frames;
 
-                r = applyFrameSnapshot(ctx, head_frame, r.payload);
+                r = applyFrameSnapshot(ctx, head_frame_slot.?, r);
                 while (r.tag == RESULT_TAG_THUNK) {
-                    const thunk_ptr = ptrFromPayload(r.payload);
-                    r = invokeThunk(ctx, thunk_ptr, 0);
+                    var thunk_slot: ?*anyopaque = ptrFromPayload(r.payload);
+                    flix_gc_push_root_ptr(ctx, @ptrCast(&thunk_slot));
+                    const thunk_ptr = thunk_slot.?;
+                    r = invokeThunk(ctx, thunk_ptr, RESULT_TAG_VALUE, 0);
+                    flix_gc_pop_roots(ctx, 1);
                 }
                 continue;
             },
 
             RESULT_TAG_SUSPENSION => {
-                const susp_ptr = ptrFromPayload(r.payload);
+                var susp_slot: ?*anyopaque = ptrFromPayload(r.payload);
+                flix_gc_push_root_ptr(ctx, @ptrCast(&susp_slot));
+                flix_gc_push_root_ptr(ctx, @ptrCast(&cur_frames));
+                const susp_ptr = susp_slot.?;
                 suspensionAttachFramesPrefix(susp_ptr, cur_frames);
+                flix_gc_pop_roots(ctx, 2);
                 return r;
             },
-
-            RESULT_TAG_EXCEPTION => return r,
-
             else => @panic("unexpected result tag"),
         }
     }
@@ -6761,39 +8354,57 @@ fn installHandlerResult(ctx: *anyopaque, eff_sym: i64, handler: *anyopaque, fram
 
     // Unwind thunks.
     while (r.tag == RESULT_TAG_THUNK) {
-        const thunk_ptr = ptrFromPayload(r.payload);
-        r = invokeThunk(ctx, thunk_ptr, 0);
+        var thunk_slot: ?*anyopaque = ptrFromPayload(r.payload);
+        flix_gc_push_root_ptr(ctx, @ptrCast(&thunk_slot));
+        const thunk_ptr = thunk_slot.?;
+        r = invokeThunk(ctx, thunk_ptr, RESULT_TAG_VALUE, 0);
+        flix_gc_pop_roots(ctx, 1);
     }
 
     // Handle.
     while (true) {
         switch (r.tag) {
-            RESULT_TAG_VALUE => {
+            RESULT_TAG_VALUE, RESULT_TAG_EXCEPTION => {
                 if (frames == null) return r;
 
                 const node = frames.?;
                 const slots: [*]i64 = objPayloadSlots(node);
-                const head_frame = ptrFromPayload(slots[0]);
-                frames = nullablePtrFromPayload(slots[1]);
+                var head_frame_slot: ?*anyopaque = ptrFromPayload(slots[0]);
+                var tail_frames = nullablePtrFromPayload(slots[1]);
+                flix_gc_push_root_ptr(ctx, @ptrCast(&head_frame_slot));
+                flix_gc_push_root_ptr(ctx, @ptrCast(&tail_frames));
+                frames = tail_frames;
 
-                r = applyFrameSnapshot(ctx, head_frame, r.payload);
+                r = applyFrameSnapshot(ctx, head_frame_slot.?, r);
+                flix_gc_pop_roots(ctx, 2);
                 // Unwind thunks produced by the frame.
                 while (r.tag == RESULT_TAG_THUNK) {
-                    const thunk_ptr = ptrFromPayload(r.payload);
-                    r = invokeThunk(ctx, thunk_ptr, 0);
+                    var thunk_slot: ?*anyopaque = ptrFromPayload(r.payload);
+                    flix_gc_push_root_ptr(ctx, @ptrCast(&thunk_slot));
+                    const thunk_ptr = thunk_slot.?;
+                    r = invokeThunk(ctx, thunk_ptr, RESULT_TAG_VALUE, 0);
+                    flix_gc_pop_roots(ctx, 1);
                 }
                 continue;
             },
 
             RESULT_TAG_SUSPENSION => {
-                const susp_ptr = ptrFromPayload(r.payload);
+                var susp_slot: ?*anyopaque = ptrFromPayload(r.payload);
+                var handler_root: ?*anyopaque = handler;
+                flix_gc_push_root_ptr(ctx, @ptrCast(&susp_slot));
+                flix_gc_push_root_ptr(ctx, @ptrCast(&handler_root));
+                flix_gc_push_root_ptr(ctx, @ptrCast(&frames));
+                const susp_ptr = susp_slot.?;
                 const susp_slots: [*]i64 = objPayloadSlots(susp_ptr);
                 const susp_eff_sym: i64 = susp_slots[0];
                 const prefix_ptr = nullablePtrFromPayload(susp_slots[2]);
                 const susp_resumption = nullablePtrFromPayload(susp_slots[3]);
 
-                const combined_frames = flix_frames_reverse_onto(prefix_ptr, frames);
+                var combined_frames = flix_frames_reverse_onto(prefix_ptr, frames);
+                flix_gc_push_root_ptr(ctx, @ptrCast(&combined_frames));
                 const resumption_cons = allocResumptionCons(eff_sym, handler, combined_frames, susp_resumption);
+                var resumption_root: ?*anyopaque = resumption_cons;
+                flix_gc_push_root_ptr(ctx, @ptrCast(&resumption_root));
 
                 if (susp_eff_sym == eff_sym) {
                     const op_index_i64: i64 = susp_slots[1];
@@ -6808,24 +8419,32 @@ fn installHandlerResult(ctx: *anyopaque, eff_sym: i64, handler: *anyopaque, fram
 
                     const wrapper_bits: u64 = @bitCast(handler_slots[2 + op_index * 2]);
                     const wrapper_ptr: EffectHandlerFn = @ptrFromInt(@as(usize, @intCast(wrapper_bits)));
-                    return wrapper_ptr(ctx, handler, resumption_cons, susp_ptr);
+                    const out = wrapper_ptr(ctx, handler, resumption_cons, susp_ptr);
+                    flix_gc_pop_roots(ctx, 5);
+                    return out;
                 }
 
                 // Propagate suspension outward: reset prefix and update resumption.
                 const new_susp = allocSuspensionLike(susp_ptr, null, resumption_cons);
+                flix_gc_pop_roots(ctx, 5);
                 return FlixResult{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(new_susp) };
             },
-
-            RESULT_TAG_EXCEPTION => return r,
-
             else => @panic("unexpected result tag"),
         }
     }
 }
 
 export fn flix_install_handler(ctx: *anyopaque, eff_sym: i64, handler: *anyopaque, frames: ?*anyopaque, thunk: *anyopaque) FlixResult {
+    var handler_root: ?*anyopaque = handler;
+    var frames_root = frames;
+    var thunk_root: ?*anyopaque = thunk;
+    flix_gc_push_root_ptr(ctx, @ptrCast(&handler_root));
+    flix_gc_push_root_ptr(ctx, @ptrCast(&frames_root));
+    flix_gc_push_root_ptr(ctx, @ptrCast(&thunk_root));
+    defer flix_gc_pop_roots(ctx, 3);
+
     // The body thunk passed from codegen is a v0 object with a `typeinfo.invoke` hook.
-    const r0 = invokeThunk(ctx, thunk, 0);
+    const r0 = invokeThunk(ctx, thunk, RESULT_TAG_VALUE, 0);
     return installHandlerResult(ctx, eff_sym, handler, frames, r0);
 }
 
@@ -6845,6 +8464,880 @@ export fn flix_resumption_rewind(ctx: *anyopaque, resumption0: ?*anyopaque, v: i
     return installHandlerResult(ctx, eff_sym, handler_ptr, frames_ptr, tail_result);
 }
 
+fn timerSleepMillisFromSuspension(susp_ptr: *anyopaque) u64 {
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    const eff_sym: i64 = slots[0];
+    const op_index: i64 = slots[1];
+    const arg_count: i64 = slots[4];
+    if (eff_sym != WasmIoEffSymId or op_index != 1 or arg_count != 1) {
+        @panic("expected timer-sleep suspension");
+    }
+
+    const ms_i64: i64 = slots[5];
+    return if (ms_i64 <= 0) 0 else @intCast(ms_i64);
+}
+
+fn allocHttpRequestSuspension(method_ptr: *anyopaque, url_ptr: *anyopaque, headers_ptr: *anyopaque, has_body: bool, body_ptr: *anyopaque) *anyopaque {
+    const slots_total: usize = 10;
+    const size_bytes: usize = @sizeOf(FlixObj) + slots_total * @sizeOf(i64);
+    const mem = gcAllocBytes(size_bytes, &flix_ti_suspension);
+    const slots: [*]i64 = objPayloadSlots(mem);
+
+    slots[0] = WasmIoEffSymId;
+    slots[1] = 2; // http-request
+    slots[2] = 0; // prefix frames (filled in by codegen when returning the suspension)
+    slots[3] = 0; // resumption chain
+    slots[4] = 5; // arg count
+    slots[5] = payloadFromPtr(method_ptr);
+    slots[6] = payloadFromPtr(url_ptr);
+    slots[7] = payloadFromPtr(headers_ptr);
+    slots[8] = payloadFromBool(has_body);
+    slots[9] = payloadFromPtr(body_ptr);
+    return mem;
+}
+
+fn allocFilePathSuspension(op_index: i64, path_ptr: *anyopaque) *anyopaque {
+    const slots_total: usize = 6;
+    const size_bytes: usize = @sizeOf(FlixObj) + slots_total * @sizeOf(i64);
+    const mem = gcAllocBytes(size_bytes, &flix_ti_suspension);
+    const slots: [*]i64 = objPayloadSlots(mem);
+
+    slots[0] = WasmIoEffSymId;
+    slots[1] = op_index;
+    slots[2] = 0; // prefix frames
+    slots[3] = 0; // resumption chain
+    slots[4] = 1; // arg count
+    slots[5] = payloadFromPtr(path_ptr);
+    return mem;
+}
+
+fn allocFileRegionPathSuspension(op_index: i64, region_ptr: *anyopaque, path_ptr: *anyopaque) *anyopaque {
+    const slots_total: usize = 7;
+    const size_bytes: usize = @sizeOf(FlixObj) + slots_total * @sizeOf(i64);
+    const mem = gcAllocBytes(size_bytes, &flix_ti_suspension);
+    const slots: [*]i64 = objPayloadSlots(mem);
+
+    slots[0] = WasmIoEffSymId;
+    slots[1] = op_index;
+    slots[2] = 0; // prefix frames
+    slots[3] = 0; // resumption chain
+    slots[4] = 2; // arg count
+    slots[5] = payloadFromPtr(region_ptr);
+    slots[6] = payloadFromPtr(path_ptr);
+    return mem;
+}
+
+fn allocFileDataPathSuspension(op_index: i64, data_ptr: *anyopaque, path_ptr: *anyopaque) *anyopaque {
+    const slots_total: usize = 7;
+    const size_bytes: usize = @sizeOf(FlixObj) + slots_total * @sizeOf(i64);
+    const mem = gcAllocBytes(size_bytes, &flix_ti_suspension);
+    const slots: [*]i64 = objPayloadSlots(mem);
+
+    slots[0] = WasmIoEffSymId;
+    slots[1] = op_index;
+    slots[2] = 0; // prefix frames
+    slots[3] = 0; // resumption chain
+    slots[4] = 2; // arg count
+    slots[5] = payloadFromPtr(data_ptr);
+    slots[6] = payloadFromPtr(path_ptr);
+    return mem;
+}
+
+fn allocTcpSocketConnectSuspension(ip_bytes_ptr: *anyopaque, port: u16) *anyopaque {
+    const slots_total: usize = 7;
+    const size_bytes: usize = @sizeOf(FlixObj) + slots_total * @sizeOf(i64);
+    const mem = gcAllocBytes(size_bytes, &flix_ti_suspension);
+    const slots: [*]i64 = objPayloadSlots(mem);
+
+    slots[0] = WasmIoEffSymId;
+    slots[1] = 37; // tcp-socket-connect
+    slots[2] = 0; // prefix frames
+    slots[3] = 0; // resumption chain
+    slots[4] = 2; // arg count
+    slots[5] = payloadFromPtr(ip_bytes_ptr);
+    slots[6] = @as(i64, port);
+    return mem;
+}
+
+fn allocTcpSocketReadSuspension(id: i64, buf_ptr: *anyopaque) *anyopaque {
+    const slots_total: usize = 7;
+    const size_bytes: usize = @sizeOf(FlixObj) + slots_total * @sizeOf(i64);
+    const mem = gcAllocBytes(size_bytes, &flix_ti_suspension);
+    const slots: [*]i64 = objPayloadSlots(mem);
+
+    slots[0] = WasmIoEffSymId;
+    slots[1] = 38; // tcp-socket-read
+    slots[2] = 0; // prefix frames
+    slots[3] = 0; // resumption chain
+    slots[4] = 2; // arg count
+    slots[5] = id;
+    slots[6] = payloadFromPtr(buf_ptr);
+    return mem;
+}
+
+fn allocTcpSocketWriteSuspension(id: i64, buf_ptr: *anyopaque) *anyopaque {
+    const slots_total: usize = 7;
+    const size_bytes: usize = @sizeOf(FlixObj) + slots_total * @sizeOf(i64);
+    const mem = gcAllocBytes(size_bytes, &flix_ti_suspension);
+    const slots: [*]i64 = objPayloadSlots(mem);
+
+    slots[0] = WasmIoEffSymId;
+    slots[1] = 39; // tcp-socket-write
+    slots[2] = 0; // prefix frames
+    slots[3] = 0; // resumption chain
+    slots[4] = 2; // arg count
+    slots[5] = id;
+    slots[6] = payloadFromPtr(buf_ptr);
+    return mem;
+}
+
+fn allocTcpServerAcceptSuspension(id: i64) *anyopaque {
+    const slots_total: usize = 6;
+    const size_bytes: usize = @sizeOf(FlixObj) + slots_total * @sizeOf(i64);
+    const mem = gcAllocBytes(size_bytes, &flix_ti_suspension);
+    const slots: [*]i64 = objPayloadSlots(mem);
+
+    slots[0] = WasmIoEffSymId;
+    slots[1] = 42; // tcp-server-accept
+    slots[2] = 0; // prefix frames
+    slots[3] = 0; // resumption chain
+    slots[4] = 1; // arg count
+    slots[5] = id;
+    return mem;
+}
+
+fn allocProcessWaitForSuspension(id: i64) *anyopaque {
+    const slots_total: usize = 6;
+    const size_bytes: usize = @sizeOf(FlixObj) + slots_total * @sizeOf(i64);
+    const mem = gcAllocBytes(size_bytes, &flix_ti_suspension);
+    const slots: [*]i64 = objPayloadSlots(mem);
+
+    slots[0] = WasmIoEffSymId;
+    slots[1] = 31; // process-wait-for
+    slots[2] = 0; // prefix frames
+    slots[3] = 0; // resumption chain
+    slots[4] = 1; // arg count
+    slots[5] = id;
+    return mem;
+}
+
+fn allocProcessWaitForTimeoutSuspension(id: i64, timeout_ms: i64) *anyopaque {
+    const slots_total: usize = 7;
+    const size_bytes: usize = @sizeOf(FlixObj) + slots_total * @sizeOf(i64);
+    const mem = gcAllocBytes(size_bytes, &flix_ti_suspension);
+    const slots: [*]i64 = objPayloadSlots(mem);
+
+    slots[0] = WasmIoEffSymId;
+    slots[1] = 32; // process-wait-for-timeout
+    slots[2] = 0; // prefix frames
+    slots[3] = 0; // resumption chain
+    slots[4] = 2; // arg count
+    slots[5] = id;
+    slots[6] = timeout_ms;
+    return mem;
+}
+
+fn allocProcessBufferSuspension(op_index: i64, id: i64, buf_ptr: *anyopaque) *anyopaque {
+    const slots_total: usize = 7;
+    const size_bytes: usize = @sizeOf(FlixObj) + slots_total * @sizeOf(i64);
+    const mem = gcAllocBytes(size_bytes, &flix_ti_suspension);
+    const slots: [*]i64 = objPayloadSlots(mem);
+
+    slots[0] = WasmIoEffSymId;
+    slots[1] = op_index;
+    slots[2] = 0; // prefix frames
+    slots[3] = 0; // resumption chain
+    slots[4] = 2; // arg count
+    slots[5] = id;
+    slots[6] = payloadFromPtr(buf_ptr);
+    return mem;
+}
+
+fn nativeDriveResult(ctx: *anyopaque, initial: FlixResult) FlixResult {
+    var r = initial;
+    while (true) {
+        while (r.tag == RESULT_TAG_THUNK) {
+            const thunk_ptr = ptrFromPayload(r.payload);
+            r = invokeThunk(ctx, thunk_ptr, RESULT_TAG_VALUE, 0);
+        }
+
+        switch (r.tag) {
+            RESULT_TAG_VALUE, RESULT_TAG_EXCEPTION => return r,
+            RESULT_TAG_SUSPENSION => {
+                const susp_ptr = ptrFromPayload(r.payload);
+                const slots: [*]i64 = objPayloadSlots(susp_ptr);
+                const eff_sym: i64 = slots[0];
+                const op_index: i64 = slots[1];
+
+                if (eff_sym == WasmIoEffSymId and op_index == 1) {
+                    var susp_slot: ?*anyopaque = susp_ptr;
+                    flix_gc_push_root_ptr(ctx, @ptrCast(&susp_slot));
+
+                    const ms = timerSleepMillisFromSuspension(susp_ptr);
+                    const fctx: *FlixCtx = requireCtx(ctx);
+                    const wait = flix_native_timer_wait_new(ms);
+                    ctxSetBlockedWait(fctx, .timer, wait);
+                    {
+                        var guard = BlockedGuard.enter(current_ctx);
+                        defer guard.exitAndCooperate();
+                        if (flix_cancel_requested(ctx)) {
+                            flix_native_timer_wait_cancel(wait);
+                        }
+                        const outcome = flix_native_timer_wait_await(wait);
+                        ctxSetBlockedWait(fctx, .none, null);
+                        flix_native_timer_wait_release(wait);
+                        if (outcome != NativeTimerWaitExpired and outcome != NativeTimerWaitCanceled) {
+                            @panic("invalid native timer wait outcome");
+                        }
+                    }
+
+                    flix_gc_pop_roots(ctx, 1);
+                    r = flix_resume_suspension(ctx, susp_ptr, 0);
+                } else if (eff_sym == WasmIoEffSymId and op_index == 2) {
+                    var susp_slot: ?*anyopaque = susp_ptr;
+                    flix_gc_push_root_ptr(ctx, @ptrCast(&susp_slot));
+
+                    const tuple_ptr: *anyopaque = blk: {
+                        const req_blob = NativeProcHttp.httpRequestBlobFromSuspension(std.heap.c_allocator, susp_ptr) catch |err| {
+                            break :blk switch (err) {
+                                error.InvalidInput => NativeProcHttp.httpFail(ctx, 4, "invalid input"),
+                                error.OutOfMemory => NativeProcHttp.httpFail(ctx, 14, "out of memory"),
+                            };
+                        };
+                        defer std.heap.c_allocator.free(req_blob);
+
+                        const fctx: *FlixCtx = requireCtx(ctx);
+                        const wait = flix_native_http_wait_new(req_blob.ptr, req_blob.len);
+                        ctxSetBlockedWait(fctx, .http, wait);
+
+                        const result_ptr: *anyopaque = blk2: {
+                            var guard = BlockedGuard.enter(current_ctx);
+                            defer guard.exitAndCooperate();
+                            if (flix_cancel_requested(ctx)) {
+                                flix_native_http_wait_cancel(wait);
+                            }
+                            const outcome = flix_native_http_wait_await(wait);
+                            ctxSetBlockedWait(fctx, .none, null);
+
+                            if (outcome == NativeHttpWaitCompleted) {
+                                    const resp_ptr_opt = flix_native_http_wait_response_ptr(wait);
+                                    const resp_len = flix_native_http_wait_response_len(wait);
+                                    if (resp_ptr_opt) |resp_ptr| {
+                                        const resp_blob: []const u8 = @as([*]const u8, @ptrCast(resp_ptr))[0..resp_len];
+                                        break :blk2 NativeProcHttp.decodeHttpResponseBlobToTuple(ctx, resp_blob);
+                                    }
+                                    break :blk2 NativeProcHttp.httpFail(ctx, 14, "missing HTTP response");
+                                }
+
+                                if (outcome != NativeHttpWaitCanceled) {
+                                    @panic("invalid native HTTP wait outcome");
+                                }
+
+                                break :blk2 NativeProcHttp.httpFail(ctx, 2, "canceled");
+                            };
+
+                        flix_native_http_wait_release(wait);
+                        break :blk result_ptr;
+                    };
+
+                    var tuple_slot: ?*anyopaque = tuple_ptr;
+                    flix_gc_push_root_ptr(ctx, @ptrCast(&tuple_slot));
+                    r = flix_resume_suspension(ctx, susp_ptr, payloadFromPtr(tuple_slot.?));
+                    flix_gc_pop_roots(ctx, 2);
+                } else if (eff_sym == WasmIoEffSymId and (op_index == 14 or op_index == 15 or op_index == 16 or op_index == 17 or op_index == 18 or op_index == 19 or op_index == 20 or op_index == 21)) {
+                    var susp_slot: ?*anyopaque = susp_ptr;
+                    flix_gc_push_root_ptr(ctx, @ptrCast(&susp_slot));
+
+                    const slots2: [*]i64 = objPayloadSlots(susp_ptr);
+                    const region_ptr0: ?*anyopaque = switch (op_index) {
+                        15, 16, 17 => ptrFromPayload(slots2[5]),
+                        else => null,
+                    };
+                    const data_ptr0: ?*anyopaque = switch (op_index) {
+                        18, 19, 20, 21 => ptrFromPayload(slots2[5]),
+                        else => null,
+                    };
+                    const path_ptr = switch (op_index) {
+                        14 => ptrFromPayload(slots2[5]),
+                        15, 16, 17, 18, 19, 20, 21 => ptrFromPayload(slots2[6]),
+                        else => unreachable,
+                    };
+                    const op: fs_async.FileOp = switch (op_index) {
+                        14 => .read,
+                        15 => .read_lines,
+                        16 => .read_bytes,
+                        17 => .list,
+                        18 => .write,
+                        19 => .write_bytes,
+                        20 => .append,
+                        21 => .append_bytes,
+                        else => unreachable,
+                    };
+
+                    const tuple_ptr: *anyopaque = blk: {
+                        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+                        defer arena.deinit();
+                        const path = flixStringToUtf8Alloc(arena.allocator(), path_ptr);
+
+                        const wait = switch (op) {
+                            .write, .append => blk2: {
+                                const data_ptr = data_ptr0 orelse unreachable;
+                                const data = flixStringToUtf8Alloc(arena.allocator(), data_ptr);
+                                break :blk2 fs_async.fileOpWriteWaitNew(op, path, data);
+                            },
+                            .write_bytes, .append_bytes => blk2: {
+                                const data_ptr = data_ptr0 orelse unreachable;
+                                const data = flixInt8ArrayToBytes(arena.allocator(), data_ptr);
+                                break :blk2 fs_async.fileOpWriteWaitNew(op, path, data);
+                            },
+                            else => fs_async.fileOpWaitNew(op, path),
+                        };
+                        const fctx: *FlixCtx = requireCtx(ctx);
+                        ctxSetBlockedWait(fctx, .file_op, wait);
+
+                        const result_ptr: *anyopaque = blk2: {
+                            var guard = BlockedGuard.enter(current_ctx);
+                            defer guard.exitAndCooperate();
+                            if (flix_cancel_requested(ctx)) {
+                                fs_async.fileOpWaitCancel(wait);
+                            }
+                            const outcome = fs_async.fileOpWaitAwait(wait);
+                            ctxSetBlockedWait(fctx, .none, null);
+
+                            if (outcome == .completed) {
+                                const payload = fs_async.fileOpWaitTakePayload(wait) orelse break :blk2 switch (op) {
+                                    .read => NativeFsTcp.fileFailStr(NativeFsTcp.IOERR_OTHER, "missing file read payload"),
+                                    .read_lines, .read_bytes, .list => NativeFsTcp.fileFailArray(ctx, region_ptr0, NativeFsTcp.IOERR_OTHER, "missing file read payload"),
+                                    .write, .write_bytes, .append, .append_bytes => NativeFsTcp.fileFailUnit(NativeFsTcp.IOERR_OTHER, "missing file write payload"),
+                                };
+                                defer fs_async.fileOpPayloadDeinit(payload);
+
+                                switch (payload) {
+                                    .unit => switch (op) {
+                                        .write, .write_bytes, .append, .append_bytes => break :blk2 NativeFsTcp.fileOkUnit(),
+                                        .read => break :blk2 NativeFsTcp.fileFailStr(NativeFsTcp.IOERR_OTHER, "unexpected unit payload for file read"),
+                                        .read_lines, .read_bytes, .list => break :blk2 NativeFsTcp.fileFailArray(ctx, region_ptr0, NativeFsTcp.IOERR_OTHER, "unexpected unit payload for file read"),
+                                    },
+                                    .bytes => |bytes| switch (op) {
+                                        .read => {
+                                            const str_ptr = allocFlixStringFromUtf8Lossy(bytes);
+                                            break :blk2 NativeFsTcp.fileOkStr(str_ptr);
+                                        },
+                                        .read_lines => {
+                                            const arr_ptr = NativeFsTcp.fileLinesArrayFromBytes(ctx, region_ptr0, bytes);
+                                            break :blk2 NativeFsTcp.fileOkArray(arr_ptr);
+                                        },
+                                        .read_bytes => {
+                                            const arr_ptr = allocFlixInt8ArrayFromBytesInRegion(ctx, region_ptr0, bytes);
+                                            break :blk2 NativeFsTcp.fileOkArray(arr_ptr);
+                                        },
+                                        .list => break :blk2 NativeFsTcp.fileFailArray(ctx, region_ptr0, NativeFsTcp.IOERR_OTHER, "unexpected byte payload for file list"),
+                                        .write, .write_bytes, .append, .append_bytes => break :blk2 NativeFsTcp.fileFailUnit(NativeFsTcp.IOERR_OTHER, "unexpected byte payload for file write"),
+                                    },
+                                    .names => |names| switch (op) {
+                                        .list => {
+                                            const arr_ptr = NativeFsTcp.fileStringArrayFromOwnedNames(ctx, region_ptr0, names);
+                                            break :blk2 NativeFsTcp.fileOkArray(arr_ptr);
+                                        },
+                                        .read, .read_lines, .read_bytes => break :blk2 NativeFsTcp.fileFailArray(ctx, region_ptr0, NativeFsTcp.IOERR_OTHER, "unexpected name payload for file read"),
+                                        .write, .write_bytes, .append, .append_bytes => break :blk2 NativeFsTcp.fileFailUnit(NativeFsTcp.IOERR_OTHER, "unexpected name payload for file write"),
+                                    },
+                                    .err => |err| switch (op) {
+                                        .read => break :blk2 NativeFsTcp.fileFailStr(err.kind, err.msg),
+                                        .read_lines, .read_bytes, .list => break :blk2 NativeFsTcp.fileFailArray(ctx, region_ptr0, err.kind, err.msg),
+                                        .write, .write_bytes, .append, .append_bytes => break :blk2 NativeFsTcp.fileFailUnit(err.kind, err.msg),
+                                    },
+                                }
+                            }
+
+                            break :blk2 switch (op) {
+                                .read => NativeFsTcp.fileFailStr(NativeFsTcp.IOERR_INTERRUPTED, "canceled"),
+                                .read_lines, .read_bytes, .list => NativeFsTcp.fileFailArray(ctx, region_ptr0, NativeFsTcp.IOERR_INTERRUPTED, "canceled"),
+                                .write, .write_bytes, .append, .append_bytes => NativeFsTcp.fileFailUnit(NativeFsTcp.IOERR_INTERRUPTED, "canceled"),
+                            };
+                        };
+
+                        fs_async.fileOpWaitRelease(wait);
+                        break :blk result_ptr;
+                    };
+
+                    var tuple_slot: ?*anyopaque = tuple_ptr;
+                    flix_gc_push_root_ptr(ctx, @ptrCast(&tuple_slot));
+                    r = flix_resume_suspension(ctx, susp_ptr, payloadFromPtr(tuple_slot.?));
+                    flix_gc_pop_roots(ctx, 2);
+                } else if (eff_sym == WasmIoEffSymId and op_index == 31) {
+                    var susp_slot: ?*anyopaque = susp_ptr;
+                    flix_gc_push_root_ptr(ctx, @ptrCast(&susp_slot));
+
+                    const slots2: [*]i64 = objPayloadSlots(susp_ptr);
+                    const process_id = slots2[5];
+
+                    const tuple_ptr: *anyopaque = blk: {
+                        const wait = NativeProcHttp.processWaitNew(process_id) orelse break :blk NativeProcHttp.procFail4(14, "invalid process handle.");
+                        const fctx: *FlixCtx = requireCtx(ctx);
+                        ctxSetBlockedWait(fctx, .process_wait, wait);
+
+                        const result_ptr: *anyopaque = blk2: {
+                            var guard = BlockedGuard.enter(current_ctx);
+                            defer guard.exitAndCooperate();
+                            if (flix_cancel_requested(ctx)) {
+                                NativeProcHttp.processWaitCancel(wait);
+                            }
+                            const outcome = NativeProcHttp.processWaitAwait(wait);
+                            ctxSetBlockedWait(fctx, .none, null);
+
+                            switch (outcome) {
+                                .completed => break :blk2 NativeProcHttp.processWaitForResult(wait),
+                                .canceled => break :blk2 NativeProcHttp.procFail4(2, "canceled"),
+                                .timed_out => @panic("unexpected timeout outcome for process wait"),
+                            }
+                        };
+
+                        NativeProcHttp.processWaitRelease(wait);
+                        break :blk result_ptr;
+                    };
+
+                    var tuple_slot: ?*anyopaque = tuple_ptr;
+                    flix_gc_push_root_ptr(ctx, @ptrCast(&tuple_slot));
+                    r = flix_resume_suspension(ctx, susp_ptr, payloadFromPtr(tuple_slot.?));
+                    flix_gc_pop_roots(ctx, 2);
+                } else if (eff_sym == WasmIoEffSymId and op_index == 32) {
+                    var susp_slot: ?*anyopaque = susp_ptr;
+                    flix_gc_push_root_ptr(ctx, @ptrCast(&susp_slot));
+
+                    const slots2: [*]i64 = objPayloadSlots(susp_ptr);
+                    const process_id = slots2[5];
+                    const timeout_ms = slots2[6];
+
+                    const tuple_ptr: *anyopaque = blk: {
+                        const wait = NativeProcHttp.processWaitNew(process_id) orelse break :blk NativeProcHttp.procFail4Bool(14, "invalid process handle.");
+                        const fctx: *FlixCtx = requireCtx(ctx);
+                        ctxSetBlockedWait(fctx, .process_wait, wait);
+
+                        const result_ptr: *anyopaque = blk2: {
+                            var guard = BlockedGuard.enter(current_ctx);
+                            defer guard.exitAndCooperate();
+                            if (flix_cancel_requested(ctx)) {
+                                NativeProcHttp.processWaitCancel(wait);
+                            }
+                            const outcome = NativeProcHttp.processWaitAwaitTimeout(wait, timeout_ms);
+                            ctxSetBlockedWait(fctx, .none, null);
+
+                            switch (outcome) {
+                                .completed => break :blk2 NativeProcHttp.processWaitForTimeoutResult(wait, true),
+                                .timed_out => break :blk2 NativeProcHttp.processWaitForTimeoutResult(wait, false),
+                                .canceled => break :blk2 NativeProcHttp.procFail4Bool(2, "canceled"),
+                            }
+                        };
+
+                        NativeProcHttp.processWaitRelease(wait);
+                        break :blk result_ptr;
+                    };
+
+                    var tuple_slot: ?*anyopaque = tuple_ptr;
+                    flix_gc_push_root_ptr(ctx, @ptrCast(&tuple_slot));
+                    r = flix_resume_suspension(ctx, susp_ptr, payloadFromPtr(tuple_slot.?));
+                    flix_gc_pop_roots(ctx, 2);
+                } else if (eff_sym == WasmIoEffSymId and (op_index == 33 or op_index == 34 or op_index == 35)) {
+                    var susp_slot: ?*anyopaque = susp_ptr;
+                    flix_gc_push_root_ptr(ctx, @ptrCast(&susp_slot));
+
+                    const slots2: [*]i64 = objPayloadSlots(susp_ptr);
+                    const process_id = slots2[5];
+                    const buf_ptr = ptrFromPayload(slots2[6]);
+
+                    const tuple_ptr: *anyopaque = blk: {
+                        const wait = switch (op_index) {
+                            33 => NativeProcHttp.processStdioWriteWaitNew(process_id, buf_ptr),
+                            34 => NativeProcHttp.processStdioReadWaitNew(process_id, .stdout_read, buf_ptr),
+                            35 => NativeProcHttp.processStdioReadWaitNew(process_id, .stderr_read, buf_ptr),
+                            else => unreachable,
+                        } catch |err| switch (err) {
+                            error.MissingPipe => break :blk switch (op_index) {
+                                33 => NativeProcHttp.procFail4Count(14, "stdin not available"),
+                                34 => NativeProcHttp.procFail4Count(14, "stdout not available"),
+                                35 => NativeProcHttp.procFail4Count(14, "stderr not available"),
+                                else => unreachable,
+                            },
+                            else => break :blk NativeProcHttp.procFail4Count(14, @errorName(err)),
+                        };
+                        const req = wait orelse break :blk NativeProcHttp.procFail4Count(14, "invalid process handle.");
+
+                        const fctx: *FlixCtx = requireCtx(ctx);
+                        ctxSetBlockedWait(fctx, .process_stdio, req);
+
+                        const result_ptr: *anyopaque = blk2: {
+                            var guard = BlockedGuard.enter(current_ctx);
+                            defer guard.exitAndCooperate();
+                            if (flix_cancel_requested(ctx)) {
+                                NativeProcHttp.processStdioWaitCancel(req);
+                            }
+                            const outcome = NativeProcHttp.processStdioWaitAwait(req);
+                            ctxSetBlockedWait(fctx, .none, null);
+
+                            switch (outcome) {
+                                .count => |count| {
+                                    if (count > std.math.maxInt(i32)) {
+                                        break :blk2 NativeProcHttp.procFail4Count(14, switch (op_index) {
+                                            33 => "write too large",
+                                            else => "read too large",
+                                        });
+                                    }
+                                    break :blk2 NativeProcHttp.procOk4Count(@intCast(count));
+                                },
+                                .error_msg => |msg| {
+                                    defer std.heap.c_allocator.free(msg);
+                                    break :blk2 NativeProcHttp.procFail4Count(14, msg);
+                                },
+                                .canceled => break :blk2 NativeProcHttp.procFail4Count(2, "canceled"),
+                            }
+                        };
+
+                        NativeProcHttp.processStdioWaitRelease(req);
+                        break :blk result_ptr;
+                    };
+
+                    var tuple_slot: ?*anyopaque = tuple_ptr;
+                    flix_gc_push_root_ptr(ctx, @ptrCast(&tuple_slot));
+                    r = flix_resume_suspension(ctx, susp_ptr, payloadFromPtr(tuple_slot.?));
+                    flix_gc_pop_roots(ctx, 2);
+                } else if (eff_sym == WasmIoEffSymId and op_index == 37) {
+                    var susp_slot: ?*anyopaque = susp_ptr;
+                    flix_gc_push_root_ptr(ctx, @ptrCast(&susp_slot));
+
+                    const slots2: [*]i64 = objPayloadSlots(susp_ptr);
+                    const ip_bytes_ptr = ptrFromPayload(slots2[5]);
+                    const port: u16 = @intCast(slots2[6]);
+                    const ip_bytes = flixInt8ArrayBytesView(ip_bytes_ptr);
+
+                    const tuple_ptr: *anyopaque = blk: {
+                        const wait = flix_native_tcp_connect_wait_new(ip_bytes.ptr, ip_bytes.len, port) orelse break :blk NativeFsTcp.tcpFail4(14, "failed to start TCP connect");
+                        const fctx: *FlixCtx = requireCtx(ctx);
+                        ctxSetBlockedWait(fctx, .tcp_socket_connect, wait);
+
+                        const result_ptr: *anyopaque = blk2: {
+                            var guard = BlockedGuard.enter(current_ctx);
+                            defer guard.exitAndCooperate();
+                            if (flix_cancel_requested(ctx)) {
+                                flix_native_tcp_connect_wait_cancel(wait);
+                            }
+                            const outcome = flix_native_tcp_connect_wait_await(wait);
+                            ctxSetBlockedWait(fctx, .none, null);
+
+                            if (outcome == NativeTcpConnectWaitCompleted) {
+                                const payload_kind = flix_native_tcp_connect_wait_payload_kind(wait);
+                                switch (payload_kind) {
+                                    NativeTcpConnectWaitPayloadSocket => {
+                                        const handle_bits = flix_native_tcp_connect_wait_take_socket_handle(wait);
+                                        break :blk2 NativeFsTcp.tcpSocketRegisterConnectedHandle(handle_bits);
+                                    },
+                                    NativeTcpConnectWaitPayloadError => {
+                                        const err_ptr_opt = flix_native_tcp_connect_wait_error_ptr(wait);
+                                        const err_len = flix_native_tcp_connect_wait_error_len(wait);
+                                        if (err_ptr_opt) |err_ptr| {
+                                            const err_msg: []const u8 = @as([*]const u8, @ptrCast(err_ptr))[0..err_len];
+                                            break :blk2 NativeFsTcp.tcpFail4(14, err_msg);
+                                        }
+                                        break :blk2 NativeFsTcp.tcpFail4(14, "missing TCP connect error");
+                                    },
+                                    else => break :blk2 NativeFsTcp.tcpFail4(14, "missing TCP connect payload"),
+                                }
+                            }
+
+                            if (outcome != NativeTcpConnectWaitCanceled) {
+                                @panic("invalid native TCP connect wait outcome");
+                            }
+
+                            break :blk2 NativeFsTcp.tcpFail4(2, "canceled");
+                        };
+
+                        flix_native_tcp_connect_wait_release(wait);
+                        break :blk result_ptr;
+                    };
+
+                    var tuple_slot: ?*anyopaque = tuple_ptr;
+                    flix_gc_push_root_ptr(ctx, @ptrCast(&tuple_slot));
+                    r = flix_resume_suspension(ctx, susp_ptr, payloadFromPtr(tuple_slot.?));
+                    flix_gc_pop_roots(ctx, 2);
+                } else if (eff_sym == WasmIoEffSymId and op_index == 38) {
+                    var susp_slot: ?*anyopaque = susp_ptr;
+                    flix_gc_push_root_ptr(ctx, @ptrCast(&susp_slot));
+
+                    const slots2: [*]i64 = objPayloadSlots(susp_ptr);
+                    const socket_id = slots2[5];
+                    const buf_ptr = ptrFromPayload(slots2[6]);
+                    const cap = flixArrayLen(buf_ptr);
+
+                    const tuple_ptr: *anyopaque = blk: {
+                        const wait = NativeFsTcp.tcpReadWaitNew(socket_id, cap) orelse break :blk NativeFsTcp.tcpFail3("invalid TCP socket handle.");
+                        const fctx: *FlixCtx = requireCtx(ctx);
+                        ctxSetBlockedWait(fctx, .tcp_socket_read, wait);
+
+                        const result_ptr: *anyopaque = blk2: {
+                            var guard = BlockedGuard.enter(current_ctx);
+                            defer guard.exitAndCooperate();
+                            if (flix_cancel_requested(ctx)) {
+                                NativeFsTcp.tcpReadWaitCancel(wait);
+                            }
+                            const outcome = NativeFsTcp.tcpReadWaitAwait(wait);
+                            ctxSetBlockedWait(fctx, .none, null);
+
+                            if (outcome == .completed) {
+                                const payload = NativeFsTcp.tcpReadWaitPayload(wait) orelse break :blk2 NativeFsTcp.tcpFail3("missing TCP read payload");
+                                if (payload.kind == 1) {
+                                    break :blk2 NativeFsTcp.tcpFail3(payload.data);
+                                }
+                                flixWriteBytesToInt8Array(buf_ptr, payload.data);
+                                break :blk2 allocFlixTupleFromPayloads(&.{ payloadFromBool(true), @as(i64, @intCast(payload.data.len)), payloadFromPtr(allocFlixStringFromAscii("")) }, 0b100);
+                            }
+
+                            break :blk2 NativeFsTcp.tcpFail3("canceled");
+                        };
+
+                        NativeFsTcp.tcpReadWaitRelease(wait);
+                        break :blk result_ptr;
+                    };
+
+                    var tuple_slot: ?*anyopaque = tuple_ptr;
+                    flix_gc_push_root_ptr(ctx, @ptrCast(&tuple_slot));
+                    r = flix_resume_suspension(ctx, susp_ptr, payloadFromPtr(tuple_slot.?));
+                    flix_gc_pop_roots(ctx, 2);
+                } else if (eff_sym == WasmIoEffSymId and op_index == 39) {
+                    var susp_slot: ?*anyopaque = susp_ptr;
+                    flix_gc_push_root_ptr(ctx, @ptrCast(&susp_slot));
+
+                    const slots2: [*]i64 = objPayloadSlots(susp_ptr);
+                    const socket_id = slots2[5];
+                    const buf_ptr = ptrFromPayload(slots2[6]);
+
+                    const tuple_ptr: *anyopaque = blk: {
+                        const wait = NativeFsTcp.tcpWriteWaitNew(socket_id, buf_ptr) orelse break :blk NativeFsTcp.tcpFail3("invalid TCP socket handle.");
+                        const fctx: *FlixCtx = requireCtx(ctx);
+                        ctxSetBlockedWait(fctx, .tcp_socket_write, wait);
+
+                        const result_ptr: *anyopaque = blk2: {
+                            var guard = BlockedGuard.enter(current_ctx);
+                            defer guard.exitAndCooperate();
+                            if (flix_cancel_requested(ctx)) {
+                                NativeFsTcp.tcpWriteWaitCancel(wait);
+                            }
+                            const outcome = NativeFsTcp.tcpWriteWaitAwait(wait);
+                            ctxSetBlockedWait(fctx, .none, null);
+
+                            if (outcome == .completed) {
+                                const payload = NativeFsTcp.tcpWriteWaitPayload(wait) orelse break :blk2 NativeFsTcp.tcpFail3("missing TCP write payload");
+                                switch (payload) {
+                                    .count => |count| break :blk2 allocFlixTupleFromPayloads(&.{ payloadFromBool(true), @as(i64, @intCast(count)), payloadFromPtr(allocFlixStringFromAscii("")) }, 0b100),
+                                    .error_msg => |msg| break :blk2 NativeFsTcp.tcpFail3(msg),
+                                }
+                            }
+
+                            break :blk2 NativeFsTcp.tcpFail3("canceled");
+                        };
+
+                        NativeFsTcp.tcpWriteWaitRelease(wait);
+                        break :blk result_ptr;
+                    };
+
+                    var tuple_slot: ?*anyopaque = tuple_ptr;
+                    flix_gc_push_root_ptr(ctx, @ptrCast(&tuple_slot));
+                    r = flix_resume_suspension(ctx, susp_ptr, payloadFromPtr(tuple_slot.?));
+                    flix_gc_pop_roots(ctx, 2);
+                } else if (eff_sym == WasmIoEffSymId and op_index == 42) {
+                    var susp_slot: ?*anyopaque = susp_ptr;
+                    flix_gc_push_root_ptr(ctx, @ptrCast(&susp_slot));
+
+                    const slots2: [*]i64 = objPayloadSlots(susp_ptr);
+                    const server_id = slots2[5];
+
+                    const tuple_ptr: *anyopaque = blk: {
+                        const wait = NativeFsTcp.tcpAcceptWaitNew(server_id) orelse break :blk NativeFsTcp.tcpFail4(14, "invalid TCP server handle.");
+                        const fctx: *FlixCtx = requireCtx(ctx);
+                        ctxSetBlockedWait(fctx, .tcp_server_accept, wait);
+
+                        const result_ptr: *anyopaque = blk2: {
+                            var guard = BlockedGuard.enter(current_ctx);
+                            defer guard.exitAndCooperate();
+                            if (flix_cancel_requested(ctx)) {
+                                NativeFsTcp.tcpAcceptWaitCancel(wait);
+                            }
+                            const outcome = NativeFsTcp.tcpAcceptWaitAwait(wait);
+                            ctxSetBlockedWait(fctx, .none, null);
+
+                            if (outcome == .completed) {
+                                const payload = NativeFsTcp.tcpAcceptWaitPayload(wait) orelse break :blk2 NativeFsTcp.tcpFail4(14, "missing TCP accept payload");
+                                switch (payload) {
+                                    .socket_id => |socket_id| break :blk2 allocFlixTupleFromPayloads(&.{ payloadFromBool(true), socket_id, 14, payloadFromPtr(allocFlixStringFromAscii("")) }, 0b1000),
+                                    .error_msg => |msg| break :blk2 NativeFsTcp.tcpFail4(14, msg),
+                                }
+                            }
+
+                            break :blk2 NativeFsTcp.tcpFail4(2, "canceled");
+                        };
+
+                        NativeFsTcp.tcpAcceptWaitRelease(wait);
+                        break :blk result_ptr;
+                    };
+
+                    var tuple_slot: ?*anyopaque = tuple_ptr;
+                    flix_gc_push_root_ptr(ctx, @ptrCast(&tuple_slot));
+                    r = flix_resume_suspension(ctx, susp_ptr, payloadFromPtr(tuple_slot.?));
+                    flix_gc_pop_roots(ctx, 2);
+                } else {
+                    return r;
+                }
+            },
+            else => @panic("unexpected result tag"),
+        }
+    }
+}
+
+export fn flix_native_drive_result(ctx: *anyopaque, tag: i64, payload: i64) FlixResult {
+    if (is_wasm) @panic("flix_native_drive_result: native-only");
+    return nativeDriveResult(ctx, .{ .tag = tag, .payload = payload });
+}
+
+export fn flix_sleep_millis_resumable(ctx: *anyopaque, ms: i64) FlixResult {
+    _ = ctx;
+    if (is_wasm) @panic("flix_sleep_millis_resumable: native-only");
+    if (ms <= 0) {
+        return .{ .tag = RESULT_TAG_VALUE, .payload = 0 };
+    }
+
+    const susp_ptr = allocTimerSleepSuspension(@intCast(ms));
+    return .{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
+}
+
+export fn flix_http_request_resumable(ctx: *anyopaque, method_ptr: *anyopaque, url_ptr: *anyopaque, req_headers_ptr: *anyopaque, has_body: bool, body_ptr: *anyopaque) FlixResult {
+    if (is_wasm) @panic("flix_http_request_resumable: native-only");
+
+    const req_blob = NativeProcHttp.encodeHttpRequestBlob(std.heap.c_allocator, method_ptr, url_ptr, req_headers_ptr, has_body, body_ptr) catch |err| {
+        const payload_ptr = switch (err) {
+            error.InvalidInput => NativeProcHttp.httpFail(ctx, 4, "invalid input"),
+            error.OutOfMemory => NativeProcHttp.httpFail(ctx, 14, "out of memory"),
+        };
+        return .{ .tag = RESULT_TAG_VALUE, .payload = payloadFromPtr(payload_ptr) };
+    };
+    defer std.heap.c_allocator.free(req_blob);
+
+    const susp_ptr = allocHttpRequestSuspension(method_ptr, url_ptr, req_headers_ptr, has_body, body_ptr);
+    return .{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
+}
+
+export fn flix_file_read_resumable(ctx: *anyopaque, path_ptr: *anyopaque) FlixResult {
+    _ = ctx;
+    if (is_wasm) @panic("flix_file_read_resumable: native-only");
+    const susp_ptr = allocFilePathSuspension(14, path_ptr);
+    return .{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
+}
+
+export fn flix_file_read_lines_resumable(ctx: *anyopaque, region_ptr: *anyopaque, path_ptr: *anyopaque) FlixResult {
+    _ = ctx;
+    if (is_wasm) @panic("flix_file_read_lines_resumable: native-only");
+    const susp_ptr = allocFileRegionPathSuspension(15, region_ptr, path_ptr);
+    return .{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
+}
+
+export fn flix_file_read_bytes_resumable(ctx: *anyopaque, region_ptr: *anyopaque, path_ptr: *anyopaque) FlixResult {
+    _ = ctx;
+    if (is_wasm) @panic("flix_file_read_bytes_resumable: native-only");
+    const susp_ptr = allocFileRegionPathSuspension(16, region_ptr, path_ptr);
+    return .{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
+}
+
+export fn flix_file_list_resumable(ctx: *anyopaque, region_ptr: *anyopaque, path_ptr: *anyopaque) FlixResult {
+    _ = ctx;
+    if (is_wasm) @panic("flix_file_list_resumable: native-only");
+    const susp_ptr = allocFileRegionPathSuspension(17, region_ptr, path_ptr);
+    return .{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
+}
+
+export fn flix_file_write_resumable(ctx: *anyopaque, data_ptr: *anyopaque, path_ptr: *anyopaque) FlixResult {
+    _ = ctx;
+    if (is_wasm) @panic("flix_file_write_resumable: native-only");
+    const susp_ptr = allocFileDataPathSuspension(18, data_ptr, path_ptr);
+    return .{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
+}
+
+export fn flix_file_write_bytes_resumable(ctx: *anyopaque, bytes_ptr: *anyopaque, path_ptr: *anyopaque) FlixResult {
+    _ = ctx;
+    if (is_wasm) @panic("flix_file_write_bytes_resumable: native-only");
+    const susp_ptr = allocFileDataPathSuspension(19, bytes_ptr, path_ptr);
+    return .{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
+}
+
+export fn flix_file_append_resumable(ctx: *anyopaque, data_ptr: *anyopaque, path_ptr: *anyopaque) FlixResult {
+    _ = ctx;
+    if (is_wasm) @panic("flix_file_append_resumable: native-only");
+    const susp_ptr = allocFileDataPathSuspension(20, data_ptr, path_ptr);
+    return .{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
+}
+
+export fn flix_file_append_bytes_resumable(ctx: *anyopaque, bytes_ptr: *anyopaque, path_ptr: *anyopaque) FlixResult {
+    _ = ctx;
+    if (is_wasm) @panic("flix_file_append_bytes_resumable: native-only");
+    const susp_ptr = allocFileDataPathSuspension(21, bytes_ptr, path_ptr);
+    return .{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
+}
+
+export fn flix_tcp_socket_connect_resumable(ctx: *anyopaque, ip_bytes_ptr: *anyopaque, port: i32) FlixResult {
+    _ = ctx;
+    if (is_wasm) @panic("flix_tcp_socket_connect_resumable: native-only");
+
+    const port_u16 = parsePortOrInvalid(port) orelse {
+        const payload_ptr = NativeFsTcp.tcpFail4(4, "invalid port");
+        return .{ .tag = RESULT_TAG_VALUE, .payload = payloadFromPtr(payload_ptr) };
+    };
+
+    const ip_bytes = flixInt8ArrayBytesView(ip_bytes_ptr);
+    if (ip_bytes.len != 4 and ip_bytes.len != 16) {
+        const payload_ptr = NativeFsTcp.tcpFail4(4, "invalid IP byte array length");
+        return .{ .tag = RESULT_TAG_VALUE, .payload = payloadFromPtr(payload_ptr) };
+    }
+
+    const susp_ptr = allocTcpSocketConnectSuspension(ip_bytes_ptr, port_u16);
+    return .{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
+}
+
+export fn flix_tcp_socket_read_resumable(ctx: *anyopaque, id: i64, buf_ptr: *anyopaque) FlixResult {
+    _ = ctx;
+    if (is_wasm) @panic("flix_tcp_socket_read_resumable: native-only");
+    const susp_ptr = allocTcpSocketReadSuspension(id, buf_ptr);
+    return .{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
+}
+
+export fn flix_tcp_socket_write_resumable(ctx: *anyopaque, id: i64, buf_ptr: *anyopaque) FlixResult {
+    _ = ctx;
+    if (is_wasm) @panic("flix_tcp_socket_write_resumable: native-only");
+    const susp_ptr = allocTcpSocketWriteSuspension(id, buf_ptr);
+    return .{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
+}
+
+export fn flix_tcp_server_accept_resumable(ctx: *anyopaque, id: i64) FlixResult {
+    _ = ctx;
+    if (is_wasm) @panic("flix_tcp_server_accept_resumable: native-only");
+    const susp_ptr = allocTcpServerAcceptSuspension(id);
+    return .{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
+}
+
+export fn flix_process_wait_for_resumable(ctx: *anyopaque, id: i64) FlixResult {
+    _ = ctx;
+    if (is_wasm) @panic("flix_process_wait_for_resumable: native-only");
+    const susp_ptr = allocProcessWaitForSuspension(id);
+    return .{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
+}
+
+export fn flix_process_wait_for_timeout_resumable(ctx: *anyopaque, id: i64, timeout_ms: i64) FlixResult {
+    _ = ctx;
+    if (is_wasm) @panic("flix_process_wait_for_timeout_resumable: native-only");
+    if (timeout_ms < 0) {
+        const payload_ptr = NativeProcHttp.procFail4Bool(4, "invalid timeout");
+        return .{ .tag = RESULT_TAG_VALUE, .payload = payloadFromPtr(payload_ptr) };
+    }
+    const susp_ptr = allocProcessWaitForTimeoutSuspension(id, timeout_ms);
+    return .{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
+}
+
 const SpawnArgs = struct {
     clo: *anyopaque,
     region: ?*FlixRegion,
@@ -6858,7 +9351,7 @@ fn spawnThreadMain(args: SpawnArgs) void {
     defer flix_ctx_free(ctx);
 
     // Inherit the lexical region (if any) for nested region scopes in this thread.
-    current_region = args.region;
+    setCurrentRegion(args.region);
 
     // Root the closure object for the duration of this thread. This is required because we do not
     // scan stacks conservatively, and thunks/closures are represented as heap objects.
@@ -6873,13 +9366,15 @@ fn spawnThreadMain(args: SpawnArgs) void {
     // temporary spawn root published by `flix_spawn`.
     spawnRootsRemove(args.clo);
 
-    var r = invokeThunk(ctx, args.clo, 0);
+    var r = invokeThunk(ctx, args.clo, RESULT_TAG_VALUE, 0);
 
     // Unwind thunks to completion.
     while (r.tag == RESULT_TAG_THUNK) {
         const thunk_ptr = ptrFromPayload(r.payload);
-        r = invokeThunk(ctx, thunk_ptr, 0);
+        r = invokeThunk(ctx, thunk_ptr, RESULT_TAG_VALUE, 0);
     }
+
+    r = nativeDriveResult(ctx, r);
 
     // Report uncaught exceptions (match JVM's default "print and terminate thread" behavior).
     if (r.tag == RESULT_TAG_EXCEPTION) {
@@ -6897,8 +9392,8 @@ fn spawnThreadMain(args: SpawnArgs) void {
                 // Request cooperative cancellation for siblings and parent.
                 const cause_ptr = region.child_exn orelse exn_ptr;
                 if (region.cancel_cause == null) region.cancel_cause = cause_ptr;
-                region.cancel_requested.store(true, .release);
                 region.mutex.unlock();
+                requestRegionCancellation(region);
             }
         } else {
             flix_exn_report_ptr(exn_ptr);
@@ -6906,7 +9401,7 @@ fn spawnThreadMain(args: SpawnArgs) void {
         return;
     }
 
-    // Bring-up: suspensions from spawned threads are not yet supported.
+    // Unsupported suspensions still report as uncaught runtime errors.
     if (r.tag == RESULT_TAG_SUSPENSION) {
         const susp_ptr = ptrFromPayload(r.payload);
         flix_suspension_report_ptr(susp_ptr);
@@ -6983,6 +9478,60 @@ fn deregisterRegion(region: *FlixRegion) void {
     _ = g_region_registry.remove(@intFromPtr(region));
 }
 
+fn regionIsSameOrDescendant(region: ?*FlixRegion, target: *FlixRegion) bool {
+    var cur = region;
+    while (cur) |r| {
+        if (r == target) return true;
+        cur = r.parent;
+    }
+    return false;
+}
+
+fn cancelBlockedWaitsForRegion(target: *FlixRegion) void {
+    if (!g_ctx_registry_initialized) return;
+
+    g_ctx_registry_mutex.lock();
+    defer g_ctx_registry_mutex.unlock();
+
+    var it = g_ctx_registry.iterator();
+    while (it.next()) |entry| {
+        const ctx: *FlixCtx = @ptrFromInt(entry.key_ptr.*);
+        const region = ctxCurrentRegion(ctx);
+        if (!regionIsSameOrDescendant(region, target)) continue;
+        const blocked = ctxBlockedWait(ctx);
+        if (blocked.ptr) |wait| switch (blocked.kind) {
+            .timer => flix_native_timer_wait_cancel(wait),
+            .http => flix_native_http_wait_cancel(wait),
+            .file_op => fs_async.fileOpWaitCancel(wait),
+            .tcp_socket_connect => flix_native_tcp_connect_wait_cancel(wait),
+            .tcp_socket_read => NativeFsTcp.tcpReadWaitCancel(wait),
+            .tcp_server_accept => NativeFsTcp.tcpAcceptWaitCancel(wait),
+            .tcp_socket_write => NativeFsTcp.tcpWriteWaitCancel(wait),
+            .process_wait => NativeProcHttp.processWaitCancel(wait),
+            .process_stdio => NativeProcHttp.processStdioWaitCancel(wait),
+            .reentrant_lock => nativeReentrantLockSignalAvailable(wait),
+            .channel_put => nativeChannelSignalNotFull(wait),
+            .channel_get => nativeChannelSignalNotEmpty(wait),
+            .channel_select => nativeChannelSelectWaiterSignal(@ptrCast(@alignCast(wait))),
+            .none => {},
+        };
+    }
+}
+
+fn requestRegionCancellation(region: *FlixRegion) void {
+    const was_requested = region.cancel_requested.swap(true, .acq_rel);
+    if (!was_requested) {
+        if (is_wasm) {
+            if (current_wit_ctx) |ctx_rep| {
+                wasmCancelBlockedChannelTasksForRegion(ctx_rep, region);
+                wasmCancelBlockedLockTasksForRegion(ctx_rep, region);
+            }
+        } else {
+            cancelBlockedWaitsForRegion(region);
+        }
+    }
+}
+
 export fn flix_region_enter(ctx: *anyopaque) *anyopaque {
     _ = ctx;
 
@@ -7004,7 +9553,7 @@ export fn flix_region_enter(ctx: *anyopaque) *anyopaque {
         .remembered_ptr_arrays = .{},
     };
 
-    current_region = region;
+    setCurrentRegion(region);
     registerRegion(region);
     const parent_bits: usize = if (parent) |p| @intFromPtr(p) else 0;
     dbg("region_enter: {x} parent={x}\n", .{ @intFromPtr(region), parent_bits });
@@ -7049,7 +9598,7 @@ export fn flix_region_exit(ctx: *anyopaque, region_ptr0: ?*anyopaque, body_tag: 
                 outcome_payload_slot = body_outcome.payload;
 
                 // Pop the region from the thread-local stack early so nested unwinding uses the parent.
-                current_region = region.parent;
+                setCurrentRegion(region.parent);
 
                 region.state = .Closing;
             },
@@ -7070,10 +9619,10 @@ export fn flix_region_exit(ctx: *anyopaque, region_ptr0: ?*anyopaque, body_tag: 
         // exception takes precedence over the parent exception at region exit.
         if (region.child_exn) |cause_ptr| {
             if (region.cancel_cause == null) region.cancel_cause = cause_ptr;
-            region.cancel_requested.store(true, .release);
         }
 
         region.mutex.unlock();
+        if (region.child_exn != null) requestRegionCancellation(region);
 
         // Join all attached children before reclaiming arena memory. On wasm this may suspend.
         for (region.children.items) |t| {
@@ -7135,7 +9684,7 @@ export fn flix_region_exit(ctx: *anyopaque, region_ptr0: ?*anyopaque, body_tag: 
         }
 
         // Pop the region from the thread-local stack early so nested unwinding uses the parent.
-        current_region = region.parent;
+        setCurrentRegion(region.parent);
 
         // Close region and snapshot children (prevents racy spawn/join).
         region.mutex.lock();
@@ -7150,12 +9699,12 @@ export fn flix_region_exit(ctx: *anyopaque, region_ptr0: ?*anyopaque, body_tag: 
         // (Cancellation requests due to a child exception are also performed eagerly in `spawnThreadMain`.)
         if (region.child_exn) |cause_ptr| {
             if (region.cancel_cause == null) region.cancel_cause = cause_ptr;
-            region.cancel_requested.store(true, .release);
         }
 
         var children = region.children;
         region.children = .{};
         region.mutex.unlock();
+        if (region.child_exn != null) requestRegionCancellation(region);
 
         // Join all attached children before reclaiming arena memory.
         fctx.blocked.store(true, .release);
@@ -7762,11 +10311,54 @@ const TaskState = union(enum) {
 };
 
 threadlocal var current_wit_ctx: ?*exports_flix_runtime_runtime_ctx_t = null;
+threadlocal var current_wasm_task_owner_token: u64 = 0;
 
 fn witSetCurrentCtx(ctx_rep: *exports_flix_runtime_runtime_ctx_t) void {
     // Ensure threadlocals used by the runtime point at the correct context for this call.
     current_ctx = @ptrCast(@alignCast(ctx_rep.flix_ctx));
     current_wit_ctx = ctx_rep;
+}
+
+fn setCurrentWasmTaskOwnerToken(task_id: u64) void {
+    current_wasm_task_owner_token = task_id;
+}
+
+fn currentTaskOwnerToken() u64 {
+    if (is_wasm) {
+        return current_wasm_task_owner_token;
+    }
+
+    const ctx = current_ctx orelse @panic("missing current FlixCtx");
+    return @intCast(@intFromPtr(ctx));
+}
+
+fn isWasmChannelSuspensionHandle(ctx_rep: *exports_flix_runtime_runtime_ctx_t, susp_handle: i64) bool {
+    const susp_ptr = flix_handle_get(ctx_rep.flix_ctx, susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    if (slots[0] != WasmChanEffSymId) return false;
+    return switch (slots[1]) {
+        WasmChanOpGet, WasmChanOpPut, WasmChanOpSelect => true,
+        else => false,
+    };
+}
+
+fn wasmCancelBlockedChannelTasksForRegion(ctx_rep: *exports_flix_runtime_runtime_ctx_t, target: *FlixRegion) void {
+    var it = ctx_rep.tasks.iterator();
+    while (it.next()) |entry| {
+        const task_id = entry.key_ptr.*;
+        const task_ptr = entry.value_ptr;
+        if (!regionIsSameOrDescendant(task_ptr.region, target)) continue;
+
+        switch (task_ptr.state) {
+            .Blocked => |st| {
+                if (!isWasmChannelSuspensionHandle(ctx_rep, st.susp_handle)) continue;
+                const resume_handle = flix_handle_new_i64(ctx_rep.flix_ctx, 0);
+                task_ptr.state = .{ .ReadyResumeOk = .{ .susp_handle = st.susp_handle, .resume_handle = resume_handle } };
+                taskQueuePush(ctx_rep, task_id);
+            },
+            else => {},
+        }
+    }
 }
 
 fn witBytesToOwned(buf: []const u8) flix_list_u8_t {
@@ -7933,8 +10525,8 @@ fn taskMarkCompleted(ctx_rep: *exports_flix_runtime_runtime_ctx_t, t: *Task, tag
                 // Request cooperative cancellation for siblings and parent.
                 const cause_ptr = region.child_exn orelse exn_ptr;
                 if (region.cancel_cause == null) region.cancel_cause = cause_ptr;
-                region.cancel_requested.store(true, .release);
                 region.mutex.unlock();
+                requestRegionCancellation(region);
             }
         }
     }
@@ -7965,11 +10557,16 @@ fn taskMakeSuspensionForHost(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_
 }
 
 fn taskHandleSuspension(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, susp_handle: i64) ?exports_flix_runtime_runtime_own_suspension_t {
+    if (isWasmLockSuspensionHandle(ctx_rep, susp_handle)) {
+        wasmLockRegisterWaiter(ctx_rep, task_id, susp_handle);
+        return null;
+    }
+
     const susp_ptr = flix_handle_get(ctx_rep.flix_ctx, susp_handle);
     const slots: [*]i64 = objPayloadSlots(susp_ptr);
     if (slots[0] == WasmChanEffSymId) {
         const op_index: i64 = slots[1];
-        if (op_index == WasmChanOpGet or op_index == WasmChanOpPut) {
+        if (op_index == WasmChanOpGet or op_index == WasmChanOpPut or op_index == WasmChanOpSelect) {
             wasmChannelRegisterWaiter(ctx_rep, task_id, susp_handle);
             return null;
         }
@@ -7979,20 +10576,23 @@ fn taskHandleSuspension(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u
 
 fn withTaskRegion(task: *Task, f: fn () void) void {
     const saved = current_region;
-    current_region = task.region;
-    defer current_region = saved;
+    setCurrentRegion(task.region);
+    defer setCurrentRegion(saved);
     f();
     task.region = current_region;
 }
 
 fn runTaskOnce(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, t: *Task) ?exports_flix_runtime_runtime_own_suspension_t {
     witSetCurrentCtx(ctx_rep);
+    const saved_owner_token = current_wasm_task_owner_token;
+    setCurrentWasmTaskOwnerToken(task_id);
+    defer setCurrentWasmTaskOwnerToken(saved_owner_token);
 
     const saved_region = current_region;
-    current_region = t.region;
+    setCurrentRegion(t.region);
     defer {
         t.region = current_region;
-        current_region = saved_region;
+        setCurrentRegion(saved_region);
     }
 
     switch (t.state) {
@@ -8033,10 +10633,10 @@ fn runTaskOnce(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, t: *T
                     const thunk_ptr = flix_handle_get(ctx_rep.flix_ctx, thunk_handle);
 
                     // Invoke the thunk and unwind to a stable non-thunk result.
-                    var r0 = invokeThunk(ctx_rep.flix_ctx, thunk_ptr, 0);
+                    var r0 = invokeThunk(ctx_rep.flix_ctx, thunk_ptr, RESULT_TAG_VALUE, 0);
                     while (r0.tag == RESULT_TAG_THUNK) {
                         const tptr = ptrFromPayload(r0.payload);
-                        r0 = invokeThunk(ctx_rep.flix_ctx, tptr, 0);
+                        r0 = invokeThunk(ctx_rep.flix_ctx, tptr, RESULT_TAG_VALUE, 0);
                     }
 
                     switch (r0.tag) {
@@ -9298,8 +11898,8 @@ export fn exports_flix_runtime_runtime_resume_http_ok(ctx: exports_flix_runtime_
     const srep = exports_flix_runtime_runtime_suspension_rep(s);
     const task_ptr = ctx.tasks.getPtr(srep.task_id) orelse @panic("unknown task");
     const saved = current_region;
-    current_region = task_ptr.region;
-    defer current_region = saved;
+    setCurrentRegion(task_ptr.region);
+    defer setCurrentRegion(saved);
 
     const region_ptr0: ?*anyopaque = if (current_region) |r| @ptrCast(r) else null;
 
@@ -9332,8 +11932,8 @@ export fn exports_flix_runtime_runtime_resume_http_err(ctx: exports_flix_runtime
     const srep = exports_flix_runtime_runtime_suspension_rep(s);
     const task_ptr = ctx.tasks.getPtr(srep.task_id) orelse @panic("unknown task");
     const saved = current_region;
-    current_region = task_ptr.region;
-    defer current_region = saved;
+    setCurrentRegion(task_ptr.region);
+    defer setCurrentRegion(saved);
 
     const region_ptr0: ?*anyopaque = if (current_region) |r| @ptrCast(r) else null;
     const empty_pairs = allocFlixArrayFromPtrPayloadsInRegion(ctx.flix_ctx, region_ptr0, &[_]*anyopaque{});
@@ -9649,11 +12249,11 @@ export fn exports_flix_runtime_runtime_resume_process_stdin_write_ok(ctx: export
     const slots: [*]i64 = objPayloadSlots(susp_ptr);
     const buf_ptr = ptrFromPayload(slots[6]); // arg1 = buffer
     const n: i64 = @intCast(flixArrayLen(buf_ptr));
-    resumeIoOkTuple3(ctx, s, true, n, allocFlixStringFromAscii(""));
+    resumeIoOkTuple4Bool(ctx, s, true, n, 14, allocFlixStringFromAscii(""));
 }
 
 export fn exports_flix_runtime_runtime_resume_process_stdin_write_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
-    resumeIoOkTuple3(ctx, s, false, 0, ioMsgFromWit(err_));
+    resumeIoOkTuple4Bool(ctx, s, false, 0, err_.kind_code, ioMsgFromWit(err_));
 }
 
 export fn exports_flix_runtime_runtime_resume_process_stdout_read_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, bytes: *flix_list_u8_t) void {
@@ -9665,11 +12265,11 @@ export fn exports_flix_runtime_runtime_resume_process_stdout_read_ok(ctx: export
     const slice = bytes.ptr[0..bytes.len];
     flixWriteBytesToInt8Array(buf_ptr, slice);
     const n: i64 = @intCast(@min(bytes.len, flixArrayLen(buf_ptr)));
-    resumeIoOkTuple3(ctx, s, true, n, allocFlixStringFromAscii(""));
+    resumeIoOkTuple4Bool(ctx, s, true, n, 14, allocFlixStringFromAscii(""));
 }
 
 export fn exports_flix_runtime_runtime_resume_process_stdout_read_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
-    resumeIoOkTuple3(ctx, s, false, 0, ioMsgFromWit(err_));
+    resumeIoOkTuple4Bool(ctx, s, false, 0, err_.kind_code, ioMsgFromWit(err_));
 }
 
 export fn exports_flix_runtime_runtime_resume_process_stderr_read_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, bytes: *flix_list_u8_t) void {
@@ -9681,11 +12281,11 @@ export fn exports_flix_runtime_runtime_resume_process_stderr_read_ok(ctx: export
     const slice = bytes.ptr[0..bytes.len];
     flixWriteBytesToInt8Array(buf_ptr, slice);
     const n: i64 = @intCast(@min(bytes.len, flixArrayLen(buf_ptr)));
-    resumeIoOkTuple3(ctx, s, true, n, allocFlixStringFromAscii(""));
+    resumeIoOkTuple4Bool(ctx, s, true, n, 14, allocFlixStringFromAscii(""));
 }
 
 export fn exports_flix_runtime_runtime_resume_process_stderr_read_err(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t, err_: *exports_flix_runtime_runtime_io_error_t) void {
-    resumeIoOkTuple3(ctx, s, false, 0, ioMsgFromWit(err_));
+    resumeIoOkTuple4Bool(ctx, s, false, 0, err_.kind_code, ioMsgFromWit(err_));
 }
 
 export fn exports_flix_runtime_runtime_resume_process_release_ok(ctx: exports_flix_runtime_runtime_borrow_ctx_t, s: exports_flix_runtime_runtime_own_suspension_t) void {

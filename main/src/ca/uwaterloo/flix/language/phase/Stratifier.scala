@@ -376,6 +376,21 @@ object Stratifier {
       val e2 = visitExp(exp2)
       Expr.PutChannel(e1, e2, tpe, eff, loc)
 
+    case Expr.NewReentrantLock(tpe, eff, loc) =>
+      Expr.NewReentrantLock(tpe, eff, loc)
+
+    case Expr.LockReentrantLock(exp, tpe, eff, loc) =>
+      val e = visitExp(exp)
+      Expr.LockReentrantLock(e, tpe, eff, loc)
+
+    case Expr.TryLockReentrantLock(exp, tpe, eff, loc) =>
+      val e = visitExp(exp)
+      Expr.TryLockReentrantLock(e, tpe, eff, loc)
+
+    case Expr.UnlockReentrantLock(exp, tpe, eff, loc) =>
+      val e = visitExp(exp)
+      Expr.UnlockReentrantLock(e, tpe, eff, loc)
+
     case Expr.SelectChannel(rules, exp, tpe, eff, loc) =>
       val e = exp.map(visitExp)
       val rs = rules.map(visitSelectChannelRule)

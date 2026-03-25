@@ -554,6 +554,24 @@ object TypeReconstruction {
       val tpe = Type.mkUnit(loc)
       TypedAst.Expr.PutChannel(e1, e2, tpe, subst(evar), loc)
 
+    case KindedAst.Expr.NewReentrantLock(loc) =>
+      val tpe = Type.Cst(TypeConstructor.ReentrantLockHandle, loc)
+      val eff = Type.IO
+      TypedAst.Expr.NewReentrantLock(tpe, eff, loc)
+
+    case KindedAst.Expr.LockReentrantLock(exp, evar, loc) =>
+      val e = visitExp(exp)
+      val tpe = Type.mkUnit(loc)
+      TypedAst.Expr.LockReentrantLock(e, tpe, subst(evar), loc)
+
+    case KindedAst.Expr.TryLockReentrantLock(exp, evar, loc) =>
+      val e = visitExp(exp)
+      TypedAst.Expr.TryLockReentrantLock(e, Type.Bool, subst(evar), loc)
+
+    case KindedAst.Expr.UnlockReentrantLock(exp, evar, loc) =>
+      val e = visitExp(exp)
+      TypedAst.Expr.UnlockReentrantLock(e, Type.Bool, subst(evar), loc)
+
     case KindedAst.Expr.SelectChannel(rules, default, tvar, evar, loc) =>
       val rs = rules map {
         case KindedAst.SelectChannelRule(sym, chan, exp, ruleLoc) =>

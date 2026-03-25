@@ -202,6 +202,14 @@ object KindedAst {
 
     case class PutChannel(exp1: Expr, exp2: Expr, evar: Type.Var, loc: SourceLocation) extends Expr
 
+    case class NewReentrantLock(loc: SourceLocation) extends Expr
+
+    case class LockReentrantLock(exp: Expr, evar: Type.Var, loc: SourceLocation) extends Expr
+
+    case class TryLockReentrantLock(exp: Expr, evar: Type.Var, loc: SourceLocation) extends Expr
+
+    case class UnlockReentrantLock(exp: Expr, evar: Type.Var, loc: SourceLocation) extends Expr
+
     case class SelectChannel(rules: List[SelectChannelRule], default: Option[Expr], tvar: Type.Var, evar: Type.Var, loc: SourceLocation) extends Expr
 
     case class Spawn(exp1: Expr, exp2: Expr, loc: SourceLocation) extends Expr

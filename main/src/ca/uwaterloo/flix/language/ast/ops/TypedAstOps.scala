@@ -103,6 +103,10 @@ object TypedAstOps {
     case Expr.NewChannel(exp, _, _, _) => sigSymsOf(exp)
     case Expr.GetChannel(exp, _, _, _) => sigSymsOf(exp)
     case Expr.PutChannel(exp1, exp2, _, _, _) => sigSymsOf(exp1) ++ sigSymsOf(exp2)
+    case Expr.NewReentrantLock(_, _, _) => Set.empty
+    case Expr.LockReentrantLock(exp, _, _, _) => sigSymsOf(exp)
+    case Expr.TryLockReentrantLock(exp, _, _, _) => sigSymsOf(exp)
+    case Expr.UnlockReentrantLock(exp, _, _, _) => sigSymsOf(exp)
     case Expr.SelectChannel(rules, default, _, _, _) => rules.flatMap(rule => sigSymsOf(rule.chan) ++ sigSymsOf(rule.exp)).toSet ++ default.toSet.flatMap(sigSymsOf)
     case Expr.Spawn(exp1, exp2, _, _, _) => sigSymsOf(exp1) ++ sigSymsOf(exp2)
     case Expr.ParYield(frags, exp, _, _, _) => sigSymsOf(exp) ++ frags.flatMap(f => sigSymsOf(f.exp))
@@ -383,6 +387,18 @@ object TypedAstOps {
 
     case Expr.PutChannel(exp1, exp2, _, _, _) =>
       freeVars(exp1) ++ freeVars(exp2)
+
+    case Expr.NewReentrantLock(_, _, _) =>
+      Map.empty
+
+    case Expr.LockReentrantLock(exp, _, _, _) =>
+      freeVars(exp)
+
+    case Expr.TryLockReentrantLock(exp, _, _, _) =>
+      freeVars(exp)
+
+    case Expr.UnlockReentrantLock(exp, _, _, _) =>
+      freeVars(exp)
 
     case Expr.SelectChannel(rules, default, _, _, _) =>
       val d = default.map(freeVars).getOrElse(Map.empty)

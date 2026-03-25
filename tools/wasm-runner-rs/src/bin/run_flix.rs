@@ -44,9 +44,9 @@ impl SysHost for State {
     fn has_capability(&mut self, cap: Capability) -> bool {
         // Be conservative: only claim capabilities that we implement with portable semantics.
         //
-        // (HTTP parity across hosts is subtle; keep it disabled here until we intentionally
-        // add a real HTTP implementation + test coverage.)
-        matches!(cap, Capability::Filesystem)
+        // HTTP parity across hosts is still subtle, so keep it disabled here until we intentionally
+        // add a real HTTP implementation + test coverage.
+        matches!(cap, Capability::Filesystem | Capability::Process | Capability::Sockets)
     }
 }
 
@@ -64,7 +64,6 @@ struct ExportedDef {
     is_main: bool,
     arity: u64,
     params: Vec<String>,
-    result: String,
 }
 
 fn usage() -> ! {

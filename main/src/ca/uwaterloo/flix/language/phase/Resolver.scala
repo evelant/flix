@@ -1239,6 +1239,21 @@ object Resolver {
       val e2 = resolveExp(exp2, scp0)
       ResolvedAst.Expr.PutChannel(e1, e2, loc)
 
+    case NamedAst.Expr.NewReentrantLock(loc) =>
+      ResolvedAst.Expr.NewReentrantLock(loc)
+
+    case NamedAst.Expr.LockReentrantLock(exp, loc) =>
+      val e = resolveExp(exp, scp0)
+      ResolvedAst.Expr.LockReentrantLock(e, loc)
+
+    case NamedAst.Expr.TryLockReentrantLock(exp, loc) =>
+      val e = resolveExp(exp, scp0)
+      ResolvedAst.Expr.TryLockReentrantLock(e, loc)
+
+    case NamedAst.Expr.UnlockReentrantLock(exp, loc) =>
+      val e = resolveExp(exp, scp0)
+      ResolvedAst.Expr.UnlockReentrantLock(e, loc)
+
     case NamedAst.Expr.SelectChannel(rules, default, loc) =>
       val rs = rules.map {
         case NamedAst.SelectChannelRule(sym, chan, body, ruleLoc) =>
@@ -2272,6 +2287,7 @@ object Resolver {
         case "Regex" => UnkindedType.Cst(TypeConstructor.Regex, loc)
         case "StringBuilderHandle" => UnkindedType.Cst(TypeConstructor.StringBuilderHandle, loc)
         case "RegexMatcher" => UnkindedType.Cst(TypeConstructor.RegexMatcher, loc)
+        case "ReentrantLockHandle" => UnkindedType.Cst(TypeConstructor.ReentrantLockHandle, loc)
         case "Sender" => UnkindedType.Cst(TypeConstructor.Sender, loc)
         case "Receiver" => UnkindedType.Cst(TypeConstructor.Receiver, loc)
         case "Lazy" => UnkindedType.Cst(TypeConstructor.Lazy, loc)

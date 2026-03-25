@@ -310,6 +310,7 @@ object Namer {
     case "Regex" => true
     case "StringBuilderHandle" => true
     case "RegexMatcher" => true
+    case "ReentrantLockHandle" => true
     case _ => false
   }
 
@@ -981,6 +982,21 @@ object Namer {
       val e1 = visitExp(exp1)
       val e2 = visitExp(exp2)
       NamedAst.Expr.PutChannel(e1, e2, loc)
+
+    case DesugaredAst.Expr.NewReentrantLock(loc) =>
+      NamedAst.Expr.NewReentrantLock(loc)
+
+    case DesugaredAst.Expr.LockReentrantLock(exp, loc) =>
+      val e = visitExp(exp)
+      NamedAst.Expr.LockReentrantLock(e, loc)
+
+    case DesugaredAst.Expr.TryLockReentrantLock(exp, loc) =>
+      val e = visitExp(exp)
+      NamedAst.Expr.TryLockReentrantLock(e, loc)
+
+    case DesugaredAst.Expr.UnlockReentrantLock(exp, loc) =>
+      val e = visitExp(exp)
+      NamedAst.Expr.UnlockReentrantLock(e, loc)
 
     case DesugaredAst.Expr.SelectChannel(rules, exp, loc) =>
       val rs = rules.map(visitSelectChannelRule)

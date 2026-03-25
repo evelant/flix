@@ -58,6 +58,7 @@ object ExnKindId {
     case SimpleType.StringBuilderHandle => "StringBuilderHandle"
     case SimpleType.RegexMatcher => "RegexMatcher"
     case SimpleType.ChannelHandle => "ChannelHandle"
+    case SimpleType.ReentrantLockHandle => "ReentrantLockHandle"
     case SimpleType.Region => "Region"
     case SimpleType.Null => "Null"
 
@@ -89,4 +90,3 @@ object ExnKindId {
   }
 
 }
-

@@ -5,5 +5,6 @@ pub mod bindings {
     });
 }
 
+pub mod effects;
 pub mod host;
 pub mod runner;

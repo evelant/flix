@@ -26,7 +26,7 @@ import java.io.{BufferedReader, IOException, InputStreamReader}
 import java.net.{InetAddress, InetSocketAddress, ServerSocket, Socket}
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
-import java.util.concurrent.{ArrayBlockingQueue, Callable, ConcurrentLinkedQueue, ExecutorService, Executors, TimeUnit}
+import java.util.concurrent.{ArrayBlockingQueue, Callable, ConcurrentLinkedQueue, CountDownLatch, ExecutorService, Executors, TimeUnit}
 import scala.jdk.CollectionConverters.*
 
 /**
@@ -47,23 +47,8 @@ class PortableTcpLlvmNativeSuite extends AnyFunSuite {
   test("portable-tcp-llvm-native") {
     assume(hasZig, "zig not found on PATH (skipping LLVM-native portable TCP runtime test)")
 
-    val server = new ServerSocket()
-    server.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0))
-    server.setSoTimeout(10_000)
-    val port = server.getLocalPort
-
-    val executor: ExecutorService = Executors.newSingleThreadExecutor()
-    val serverFuture = executor.submit(new Callable[Unit] {
-      override def call(): Unit = {
-        val socket = server.accept()
-        try {
-          socket.setSoTimeout(10_000)
-          handleEcho(socket)
-        } finally {
-          socket.close()
-        }
-      }
-    })
+    val testFile = Files.createTempFile("flix-portable-tcp-llvm-native-", ".flix")
+    val outDir = Files.createTempDirectory("flix-llvm-native-tcp-")
 
     val program =
       s"""
@@ -103,7 +88,7 @@ class PortableTcpLlvmNativeSuite extends AnyFunSuite {
          |
          |def main(): Unit \\ IO = region rc {
          |    let ip = IpAddr.V4(Ipv4Addr.localhost());
-         |    match TcpConnect.runWithIO(() -> TcpConnect.connect(ip, ${port}i32)) {
+         |    match TcpConnect.runWithIO(() -> TcpConnect.connect(ip, PORT_HEREi32)) {
          |        case Ok(sock) => {
          |            let msg = Array#{112i8, 105i8, 110i8, 103i8} @ rc; // "ping"
          |
@@ -130,13 +115,27 @@ class PortableTcpLlvmNativeSuite extends AnyFunSuite {
          |}
          |""".stripMargin
 
-    val testFile = Files.createTempFile("flix-portable-tcp-llvm-native-", ".flix")
-    Files.writeString(testFile, program, StandardCharsets.UTF_8)
+    val server = new ServerSocket()
+    server.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0))
+    server.setSoTimeout(10_000)
+    val port = server.getLocalPort
 
-    val outDir = Files.createTempDirectory("flix-llvm-native-tcp-")
+    val executor: ExecutorService = Executors.newSingleThreadExecutor()
     try {
+      Files.writeString(testFile, program.replace("PORT_HERE", port.toString), StandardCharsets.UTF_8)
       val exe = compileLlvmNative(testFile, outDir)
-      val (exit, output) = runExecutable(exe)
+      val serverFuture = executor.submit(new Callable[Unit] {
+        override def call(): Unit = {
+          val socket = server.accept()
+          try {
+            socket.setSoTimeout(10_000)
+            handleEcho(socket)
+          } finally {
+            socket.close()
+          }
+        }
+      })
+      val (exit, output) = runExecutable(exe, timeoutSeconds = 15)
       if (exit != 0) {
         fail(s"LLVM-native portable TCP test program failed with exit $exit:\n$output")
       }
@@ -245,6 +244,251 @@ class PortableTcpLlvmNativeSuite extends AnyFunSuite {
     }
   }
 
+  test("portable-tcp-read-cancellation-llvm-native") {
+    assume(hasZig, "zig not found on PATH (skipping LLVM-native portable TCP runtime test)")
+
+    val testFile = Files.createTempFile("flix-portable-tcp-read-cancel-llvm-native-", ".flix")
+    val outDir = Files.createTempDirectory("flix-llvm-native-tcp-read-cancel-")
+
+    val program =
+      s"""
+         |def expect(cond: Bool, msg: String): Unit =
+         |    if (cond) () else bug!(msg)
+         |
+         |def unexpectedErr(e: a): Unit with ToString[a] =
+         |    expect(false, "unexpected Err: " + ToString.toString(e))
+         |
+         |def connectOrCrash(ip: IpAddr, port: Int32): TcpSocket \\ IO =
+         |    match TcpConnect.runWithIO(() -> TcpConnect.connect(ip, port)) {
+         |        case Ok(sock) => sock
+         |        case Err(e) => bug!("unexpected Err: " + ToString.toString(e))
+         |    }
+         |
+         |def main(): Unit \\ IO = {
+         |    let start = Clock.runWithIO(() -> Clock.now());
+         |    let payload = try {
+         |        region rc {
+         |            let ip = IpAddr.V4(Ipv4Addr.localhost());
+         |            let sock = connectOrCrash(ip, PORT_HEREi32);
+         |
+         |            spawn {
+         |                let buf = Array.empty(Static, 8i32);
+         |                let _ = TcpSocket.read(buf, sock);
+         |                ()
+         |            } @ rc;
+         |
+         |            spawn {
+         |                Timer.runWithIO(() -> Timer.sleepMillis(50i64));
+         |                throw Exn.mk(7);
+         |                ()
+         |            } @ rc;
+         |
+         |            ()
+         |        };
+         |        -1
+         |    } catch {
+         |        case exn: Int32 => Exn.payloadAs(exn)
+         |        case _: Exn => -2
+         |    };
+         |
+         |    let elapsed = Clock.runWithIO(() -> Clock.now()) - start;
+         |    let _ = expect(payload == 7, "expected child exception to win during TCP read cancellation test");
+         |    let _ = expect(elapsed < 2000i64, "expected region cancellation to interrupt in-flight TCP read promptly");
+         |    ()
+         |}
+         |""".stripMargin
+
+    val server = new ServerSocket()
+    server.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0))
+    server.setSoTimeout(10_000)
+    val port = server.getLocalPort
+
+    val executor: ExecutorService = Executors.newSingleThreadExecutor()
+    try {
+      Files.writeString(testFile, program.replace("PORT_HERE", port.toString), StandardCharsets.UTF_8)
+      val exe = compileLlvmNative(testFile, outDir)
+      val accepted = new CountDownLatch(1)
+      val release = new CountDownLatch(1)
+      val serverFuture = executor.submit(new Callable[Unit] {
+        override def call(): Unit = {
+          val socket = server.accept()
+          try {
+            accepted.countDown()
+            release.await(15, TimeUnit.SECONDS)
+          } finally {
+            socket.close()
+          }
+        }
+      })
+      val (exit, output) = runExecutable(exe, timeoutSeconds = 15)
+      if (exit != 0) {
+        fail(s"LLVM-native portable TCP read cancellation test program failed with exit $exit:\n$output")
+      }
+      if (!accepted.await(1, TimeUnit.SECONDS)) {
+        fail("cancellation test did not establish the loopback TCP connection")
+      }
+      release.countDown()
+      serverFuture.get(10, TimeUnit.SECONDS)
+    } finally {
+      Files.deleteIfExists(testFile)
+      server.close()
+      executor.shutdownNow()
+      deleteRecursive(outDir)
+    }
+  }
+
+  test("portable-tcp-accept-cancellation-llvm-native") {
+    assume(hasZig, "zig not found on PATH (skipping LLVM-native portable TCP runtime test)")
+
+    val testFile = Files.createTempFile("flix-portable-tcp-accept-cancel-llvm-native-", ".flix")
+    val outDir = Files.createTempDirectory("flix-llvm-native-tcp-accept-cancel-")
+
+    val program =
+      s"""
+         |def expect(cond: Bool, msg: String): Unit =
+         |    if (cond) () else bug!(msg)
+         |
+         |def main(): Unit \\ IO = {
+         |    let start = Clock.runWithIO(() -> Clock.now());
+         |    let payload = try {
+         |        region rc {
+         |            let ip = IpAddr.V4(Ipv4Addr.localhost());
+         |            let server = match TcpBind.runWithIO(() -> TcpBind.bind(ip, 0i32)) {
+         |                case Ok(server) => server
+         |                case Err(e) => bug!("unexpected bind error: " + ToString.toString(e))
+         |            };
+         |
+         |            spawn {
+         |                let _ = TcpAccept.runWithIO(() -> TcpAccept.accept(server));
+         |                ()
+         |            } @ rc;
+         |
+         |            spawn {
+         |                Timer.runWithIO(() -> Timer.sleepMillis(50i64));
+         |                throw Exn.mk(9);
+         |                ()
+         |            } @ rc;
+         |
+         |            ()
+         |        };
+         |        -1
+         |    } catch {
+         |        case exn: Int32 => Exn.payloadAs(exn)
+         |        case _: Exn => -2
+         |    };
+         |
+         |    let elapsed = Clock.runWithIO(() -> Clock.now()) - start;
+         |    let _ = expect(payload == 9, "expected child exception to win during TCP accept cancellation test");
+         |    let _ = expect(elapsed < 2000i64, "expected region cancellation to interrupt in-flight TCP accept promptly");
+         |    ()
+         |}
+         |""".stripMargin
+
+    try {
+      Files.writeString(testFile, program, StandardCharsets.UTF_8)
+      val exe = compileLlvmNative(testFile, outDir)
+      val (exit, output) = runExecutable(exe, timeoutSeconds = 15)
+      if (exit != 0) {
+        fail(s"LLVM-native portable TCP accept cancellation test program failed with exit $exit:\n$output")
+      }
+    } finally {
+      Files.deleteIfExists(testFile)
+      deleteRecursive(outDir)
+    }
+  }
+
+  test("portable-tcp-write-cancellation-llvm-native") {
+    assume(hasZig, "zig not found on PATH (skipping LLVM-native portable TCP runtime test)")
+
+    val testFile = Files.createTempFile("flix-portable-tcp-write-cancel-llvm-native-", ".flix")
+    val outDir = Files.createTempDirectory("flix-llvm-native-tcp-write-cancel-")
+
+    val program =
+      s"""
+         |def expect(cond: Bool, msg: String): Unit =
+         |    if (cond) () else bug!(msg)
+         |
+         |def connectOrCrash(ip: IpAddr, port: Int32): TcpSocket \\ IO =
+         |    match TcpConnect.runWithIO(() -> TcpConnect.connect(ip, port)) {
+         |        case Ok(sock) => sock
+         |        case Err(e) => bug!("unexpected Err: " + ToString.toString(e))
+         |    }
+         |
+         |def main(): Unit \\ IO = {
+         |    let start = Clock.runWithIO(() -> Clock.now());
+         |    let payload = try {
+         |        region rc {
+         |            let ip = IpAddr.V4(Ipv4Addr.localhost());
+         |            let sock = connectOrCrash(ip, PORT_HEREi32);
+         |            let buf = Array.empty(Static, 64_000_000i32);
+         |
+         |            spawn {
+         |                let _ = TcpSocket.write(buf, sock);
+         |                ()
+         |            } @ rc;
+         |
+         |            spawn {
+         |                Timer.runWithIO(() -> Timer.sleepMillis(50i64));
+         |                throw Exn.mk(11);
+         |                ()
+         |            } @ rc;
+         |
+         |            ()
+         |        };
+         |        -1
+         |    } catch {
+         |        case exn: Int32 => Exn.payloadAs(exn)
+         |        case _: Exn => -2
+         |    };
+         |
+         |    let elapsed = Clock.runWithIO(() -> Clock.now()) - start;
+         |    let _ = expect(payload == 11, "expected child exception to win during TCP write cancellation test");
+         |    let _ = expect(elapsed < 4000i64, "expected region cancellation to interrupt in-flight TCP write promptly");
+         |    ()
+         |}
+         |""".stripMargin
+
+    val server = new ServerSocket()
+    server.setReceiveBufferSize(1024)
+    server.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0))
+    server.setSoTimeout(10_000)
+    val port = server.getLocalPort
+
+    val executor: ExecutorService = Executors.newSingleThreadExecutor()
+    try {
+      Files.writeString(testFile, program.replace("PORT_HERE", port.toString), StandardCharsets.UTF_8)
+      val exe = compileLlvmNative(testFile, outDir)
+      val accepted = new CountDownLatch(1)
+      val release = new CountDownLatch(1)
+      val serverFuture = executor.submit(new Callable[Unit] {
+        override def call(): Unit = {
+          val socket = server.accept()
+          try {
+            socket.setReceiveBufferSize(1024)
+            accepted.countDown()
+            release.await(15, TimeUnit.SECONDS)
+          } finally {
+            socket.close()
+          }
+        }
+      })
+      val (exit, output) = runExecutable(exe, timeoutSeconds = 20)
+      if (exit != 0) {
+        fail(s"LLVM-native portable TCP write cancellation test program failed with exit $exit:\n$output")
+      }
+      if (!accepted.await(1, TimeUnit.SECONDS)) {
+        fail("write cancellation test did not establish the loopback TCP connection")
+      }
+      release.countDown()
+      serverFuture.get(10, TimeUnit.SECONDS)
+    } finally {
+      Files.deleteIfExists(testFile)
+      server.close()
+      executor.shutdownNow()
+      deleteRecursive(outDir)
+    }
+  }
+
   private def runServerAndClient(executable: Path): Unit = {
     val pb = new ProcessBuilder(List(executable.toString).asJava)
     pb.redirectErrorStream(true)
@@ -329,6 +573,18 @@ class PortableTcpLlvmNativeSuite extends AnyFunSuite {
     out.flush()
   }
 
+  private def waitForPeerClose(socket: Socket): Unit = {
+    val in = socket.getInputStream
+    val buf = new Array[Byte](16)
+    var done = false
+    while (!done) {
+      val n = in.read(buf)
+      if (n < 0) {
+        done = true
+      }
+    }
+  }
+
   private def compileLlvmNative(file: Path, outDir: Path): Path = {
     val flix = new Flix()
     flix.setOptions(TestOptions.copy(outputPath = outDir))
@@ -344,12 +600,35 @@ class PortableTcpLlvmNativeSuite extends AnyFunSuite {
     executablePath(outDir)
   }
 
-  private def runExecutable(executable: Path): (Int, String) = {
+  private def runExecutable(executable: Path, timeoutSeconds: Long): (Int, String) = {
     val pb = new ProcessBuilder(List(executable.toString).asJava)
     pb.redirectErrorStream(true)
     val p = pb.start()
-    val output = new String(p.getInputStream.readAllBytes(), StandardCharsets.UTF_8)
-    val exit = p.waitFor()
+    val outputLines = new ConcurrentLinkedQueue[String]()
+    val readerThread = new Thread(() => {
+      val reader = new BufferedReader(new InputStreamReader(p.getInputStream, StandardCharsets.UTF_8))
+      var line: String = null
+      while ({
+        line = reader.readLine()
+        line != null
+      }) {
+        outputLines.add(line)
+      }
+    })
+
+    readerThread.setDaemon(true)
+    readerThread.start()
+
+    val finished = p.waitFor(timeoutSeconds, TimeUnit.SECONDS)
+    if (!finished) {
+      p.destroyForcibly()
+      readerThread.join(1_000)
+      fail(s"executable did not exit in ${timeoutSeconds}s.\nOutput so far:\n${outputLines.asScala.mkString("\n")}")
+    }
+
+    readerThread.join(1_000)
+    val exit = p.exitValue()
+    val output = outputLines.asScala.mkString("\n")
     (exit, output)
   }
 

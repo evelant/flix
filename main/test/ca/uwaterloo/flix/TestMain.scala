@@ -75,6 +75,15 @@ class TestMain extends AnyFunSuite {
     assert(opts.command == Main.Command.Doctor)
   }
 
+  test("bind wasm-effects") {
+    val args = Array("bind", "wasm-effects", "--wit", "foo", "--world", "demo", "--out", "bar")
+    val opts = Main.parseCmdOpts(args).get
+    assert(opts.command == Main.Command.BindWasmEffects)
+    assert(opts.bindWit.contains(java.nio.file.Paths.get("foo")))
+    assert(opts.bindWorld.contains("demo"))
+    assert(opts.bindOut.contains(java.nio.file.Paths.get("bar")))
+  }
+
   test("format") {
     val args = Array("format")
     val opts = Main.parseCmdOpts(args).get

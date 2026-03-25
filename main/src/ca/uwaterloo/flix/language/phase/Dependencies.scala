@@ -458,9 +458,28 @@ object Dependencies {
       visitType(tpe)
       visitType(eff)
 
+    case Expr.NewReentrantLock(tpe, eff, _) =>
+      visitType(tpe)
+      visitType(eff)
+
     case Expr.PutChannel(exp1, exp2, tpe, eff, _) =>
       visitExp(exp1)
       visitExp(exp2)
+      visitType(tpe)
+      visitType(eff)
+
+    case Expr.LockReentrantLock(exp, tpe, eff, _) =>
+      visitExp(exp)
+      visitType(tpe)
+      visitType(eff)
+
+    case Expr.TryLockReentrantLock(exp, tpe, eff, _) =>
+      visitExp(exp)
+      visitType(tpe)
+      visitType(eff)
+
+    case Expr.UnlockReentrantLock(exp, tpe, eff, _) =>
+      visitExp(exp)
       visitType(tpe)
       visitType(eff)
 

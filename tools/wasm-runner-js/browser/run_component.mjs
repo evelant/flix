@@ -1,5 +1,6 @@
 import { FlixRunner } from "../runner.mjs";
 import { makeOpfsFsHandlers, makeOpfsSandbox } from "../opfs-handlers.mjs";
+import { makeUnsupportedProcessHandlers } from "./process-handlers.mjs";
 
 const disposeSym = Symbol.dispose ?? Symbol.for("dispose");
 const consoleLevels = ["log", "info", "warn", "error"];
@@ -212,6 +213,7 @@ async function main() {
       httpTimeoutMs,
       handlers: {
         ...makeOpfsFsHandlers({ rootDirHandle: sandbox.rootDirHandle }),
+        ...makeUnsupportedProcessHandlers(),
       },
     });
 

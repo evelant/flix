@@ -60,6 +60,9 @@ object ArtifactNames {
   def wasmExportsManifestFileName(raw: String): String =
     s"${baseName(raw)}.exports.json"
 
+  def wasmEffectsManifestFileName(raw: String): String =
+    s"${baseName(raw)}.effects.json"
+
   def wasmBindingsJsFileName(raw: String): String =
     s"${baseName(raw)}.bindings.mjs"
 

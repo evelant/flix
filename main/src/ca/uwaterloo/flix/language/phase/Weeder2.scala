@@ -2299,7 +2299,7 @@ object Weeder2 {
       * Returns the intrinsic expression corresponding to the given intrinsic.
       *
       *   - `args = None` is an unapplied intrinsic (e.g. `%%LINE%%`)
-      *   - `args = Some(Nil)` is an applied intrinsic with zero arguments (e.g. `%%EXAMPLE%%()`)
+      *   - `args = Some(List(Unit))` is an applied intrinsic with zero arguments (e.g. `%%EXAMPLE%%()`)
       *   - `args = Some(Cons(.., ..))` is an applied intrinsic with some arguments (e.g. `%%VECTOR_LENGTH%%(v)`)
       */
     private def visitIntrinsic(tree: Tree, args: Option[List[Expr]])(implicit sctx: SharedContext): Validation[Expr, CompilationMessage] = {
@@ -2319,6 +2319,12 @@ object Weeder2 {
         case ("CHANNEL_GET", Some(e1 :: Nil)) => Expr.GetChannel(e1, loc)
         case ("CHANNEL_NEW", Some(e :: Nil)) => Expr.NewChannel(e, loc)
         case ("CHANNEL_PUT", Some(e1 :: e2 :: Nil)) => Expr.PutChannel(e1, e2, loc)
+        case ("REENTRANT_LOCK_NEW", None) => Expr.NewReentrantLock(loc)
+        case ("REENTRANT_LOCK_NEW", Some(Nil)) => Expr.NewReentrantLock(loc)
+        case ("REENTRANT_LOCK_NEW", Some(_ :: Nil)) => Expr.NewReentrantLock(loc)
+        case ("REENTRANT_LOCK_LOCK", Some(e1 :: Nil)) => Expr.LockReentrantLock(e1, loc)
+        case ("REENTRANT_LOCK_TRY_LOCK", Some(e1 :: Nil)) => Expr.TryLockReentrantLock(e1, loc)
+        case ("REENTRANT_LOCK_UNLOCK", Some(e1 :: Nil)) => Expr.UnlockReentrantLock(e1, loc)
         case ("CHAR_EQ", Some(e1 :: e2 :: Nil)) => Expr.Binary(SemanticOp.CharOp.Eq, e1, e2, loc)
         case ("CHAR_GE", Some(e1 :: e2 :: Nil)) => Expr.Binary(SemanticOp.CharOp.Ge, e1, e2, loc)
         case ("CHAR_GT", Some(e1 :: e2 :: Nil)) => Expr.Binary(SemanticOp.CharOp.Gt, e1, e2, loc)

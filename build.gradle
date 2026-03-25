@@ -104,6 +104,11 @@ jar {
         into 'runtime/src'
     }
 
+    from('vendor/libxev/src') {
+        include '**/*.zig'
+        into 'vendor/libxev/src'
+    }
+
     from('runtime/src/wit') {
         include '**/*.c'
         include '**/*.h'
@@ -128,6 +133,12 @@ jar {
         include 'Cargo.lock'
         include 'src/**/*.rs'
         into 'tools/wasm-runner-rs'
+    }
+
+    from('tools/wit-flix-gen-rs') {
+        include 'Cargo.toml'
+        include 'src/**/*.rs'
+        into 'tools/wit-flix-gen-rs'
     }
 
     from('runtime/wit/flix-bindings') {

@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const wire = @import("http_wire_v0.zig");
-const http = @import("http_request_xev_wire_v0.zig");
+const http = @import("http_request_std_wire_v0.zig");
 
 fn parseHeaderLine(line: []const u8) !wire.Header {
     const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.InvalidHeader;
@@ -67,7 +67,11 @@ pub fn main() !void {
     );
     defer alloc.free(req_blob);
 
-    const resp_blob = try http.httpRequest(alloc, req_blob);
+    const outcome = try http.httpRequest(alloc, req_blob, null);
+    const resp_blob = switch (outcome) {
+        .completed => |blob| blob,
+        .canceled => return error.Canceled,
+    };
     defer alloc.free(resp_blob);
 
     var resp = try wire.decodeResponse(alloc, resp_blob);
@@ -90,4 +94,3 @@ pub fn main() !void {
         std.debug.print("[wire] body (first {d} bytes):\n{s}\n", .{ preview_len, resp.body[0..preview_len] });
     }
 }
-
