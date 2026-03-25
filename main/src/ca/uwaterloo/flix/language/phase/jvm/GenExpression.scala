@@ -4593,32 +4593,24 @@ object GenExpression {
         GETFIELD(valueField)
         castIfNotPrim(returnTpe)
 
-      case AtomicOp.ReentrantLockNew =>
-        import BytecodeInstructions.*
-        addLoc(loc)
-        INVOKESTATIC(JvmName.LockSupport, "newLock", mkDescriptor()(BackendType.Object))
-
-      case AtomicOp.ReentrantLockLock =>
-        import BytecodeInstructions.*
-        val List(exp) = exps
-        addLoc(loc)
-        compileExpr(exp)
-        INVOKESTATIC(JvmName.LockSupport, "lock", mkDescriptor(BackendType.Object)(VoidableType.Void))
-        GETSTATIC(BackendObjType.Unit.SingletonField)
-
-      case AtomicOp.ReentrantLockTryLock =>
-        import BytecodeInstructions.*
-        val List(exp) = exps
-        addLoc(loc)
-        compileExpr(exp)
-        INVOKESTATIC(JvmName.LockSupport, "tryLock", mkDescriptor(BackendType.Object)(BackendType.Bool))
-
-      case AtomicOp.ReentrantLockUnlock =>
-        import BytecodeInstructions.*
-        val List(exp) = exps
-        addLoc(loc)
-        compileExpr(exp)
-        INVOKESTATIC(JvmName.LockSupport, "unlock", mkDescriptor(BackendType.Object)(BackendType.Bool))
+      case op @ (AtomicOp.ReentrantLockNew |
+          AtomicOp.ReentrantLockLock |
+          AtomicOp.ReentrantLockTryLock |
+          AtomicOp.ReentrantLockUnlock |
+          AtomicOp.ConditionNew |
+          AtomicOp.ConditionAwait |
+          AtomicOp.ConditionSignal |
+          AtomicOp.ConditionSignalAll |
+          AtomicOp.CyclicBarrierNew |
+          AtomicOp.CyclicBarrierAwait |
+          AtomicOp.CountDownLatchNew |
+          AtomicOp.CountDownLatchAwait |
+          AtomicOp.CountDownLatchCountDown |
+          AtomicOp.SemaphoreNew |
+          AtomicOp.SemaphoreAcquire |
+          AtomicOp.SemaphoreTryAcquire |
+          AtomicOp.SemaphoreRelease) =>
+        compileSyncAtomic(op, exps, tpe, loc)
 
       case AtomicOp.Lazy =>
         import BytecodeInstructions.*
@@ -6977,6 +6969,120 @@ object GenExpression {
     mv.visitJumpInsn(GOTO, after)
 
     mv.visitLabel(after)
+  }
+
+  private def compileSyncAtomic(op: AtomicOp, exps: List[Expr], tpe: SimpleType, loc: SourceLocation)(implicit mv: MethodVisitor, ctx: MethodContext, root: Root, flix: Flix): Unit = {
+    import BytecodeInstructions.*
+
+    op match {
+      case AtomicOp.ReentrantLockNew =>
+        addLoc(loc)
+        INVOKESTATIC(JvmName.LockSupport, "newLock", mkDescriptor()(BackendType.Object))
+
+      case AtomicOp.ReentrantLockLock =>
+        val List(exp) = exps
+        addLoc(loc)
+        compileExpr(exp)
+        INVOKESTATIC(JvmName.LockSupport, "lock", mkDescriptor(BackendType.Object)(VoidableType.Void))
+        GETSTATIC(BackendObjType.Unit.SingletonField)
+
+      case AtomicOp.ReentrantLockTryLock =>
+        val List(exp) = exps
+        addLoc(loc)
+        compileExpr(exp)
+        INVOKESTATIC(JvmName.LockSupport, "tryLock", mkDescriptor(BackendType.Object)(BackendType.Bool))
+
+      case AtomicOp.ReentrantLockUnlock =>
+        val List(exp) = exps
+        addLoc(loc)
+        compileExpr(exp)
+        INVOKESTATIC(JvmName.LockSupport, "unlock", mkDescriptor(BackendType.Object)(BackendType.Bool))
+
+      case AtomicOp.ConditionNew =>
+        val List(exp) = exps
+        addLoc(loc)
+        compileExpr(exp)
+        INVOKESTATIC(JvmName.LockSupport, "newCondition", mkDescriptor(BackendType.Object)(BackendType.Object))
+
+      case AtomicOp.ConditionAwait =>
+        val List(exp) = exps
+        addLoc(loc)
+        compileExpr(exp)
+        INVOKESTATIC(JvmName.LockSupport, "awaitCondition", mkDescriptor(BackendType.Object)(BackendType.Int32))
+
+      case AtomicOp.ConditionSignal =>
+        val List(exp) = exps
+        addLoc(loc)
+        compileExpr(exp)
+        INVOKESTATIC(JvmName.LockSupport, "signalCondition", mkDescriptor(BackendType.Object)(BackendType.Bool))
+
+      case AtomicOp.ConditionSignalAll =>
+        val List(exp) = exps
+        addLoc(loc)
+        compileExpr(exp)
+        INVOKESTATIC(JvmName.LockSupport, "signalAllCondition", mkDescriptor(BackendType.Object)(BackendType.Bool))
+
+      case AtomicOp.CyclicBarrierNew =>
+        val List(exp) = exps
+        addLoc(loc)
+        compileExpr(exp)
+        INVOKESTATIC(JvmName.LockSupport, "newBarrier", mkDescriptor(BackendType.Int32)(BackendType.Object))
+
+      case AtomicOp.CyclicBarrierAwait =>
+        val List(exp) = exps
+        addLoc(loc)
+        compileExpr(exp)
+        INVOKESTATIC(JvmName.LockSupport, "awaitBarrier", mkDescriptor(BackendType.Object)(BackendType.Int32))
+
+      case AtomicOp.CountDownLatchNew =>
+        val List(exp) = exps
+        addLoc(loc)
+        compileExpr(exp)
+        INVOKESTATIC(JvmName.LockSupport, "newCountDownLatch", mkDescriptor(BackendType.Int32)(BackendType.Object))
+
+      case AtomicOp.CountDownLatchAwait =>
+        val List(exp) = exps
+        addLoc(loc)
+        compileExpr(exp)
+        INVOKESTATIC(JvmName.LockSupport, "awaitCountDownLatch", mkDescriptor(BackendType.Object)(VoidableType.Void))
+        GETSTATIC(BackendObjType.Unit.SingletonField)
+
+      case AtomicOp.CountDownLatchCountDown =>
+        val List(exp) = exps
+        addLoc(loc)
+        compileExpr(exp)
+        INVOKESTATIC(JvmName.LockSupport, "countDownCountDownLatch", mkDescriptor(BackendType.Object)(VoidableType.Void))
+        GETSTATIC(BackendObjType.Unit.SingletonField)
+
+      case AtomicOp.SemaphoreNew =>
+        val List(exp) = exps
+        addLoc(loc)
+        compileExpr(exp)
+        INVOKESTATIC(JvmName.LockSupport, "newSemaphore", mkDescriptor(BackendType.Int32)(BackendType.Object))
+
+      case AtomicOp.SemaphoreAcquire =>
+        val List(exp) = exps
+        addLoc(loc)
+        compileExpr(exp)
+        INVOKESTATIC(JvmName.LockSupport, "acquireSemaphore", mkDescriptor(BackendType.Object)(VoidableType.Void))
+        GETSTATIC(BackendObjType.Unit.SingletonField)
+
+      case AtomicOp.SemaphoreTryAcquire =>
+        val List(exp) = exps
+        addLoc(loc)
+        compileExpr(exp)
+        INVOKESTATIC(JvmName.LockSupport, "tryAcquireSemaphore", mkDescriptor(BackendType.Object)(BackendType.Bool))
+
+      case AtomicOp.SemaphoreRelease =>
+        val List(exp) = exps
+        addLoc(loc)
+        compileExpr(exp)
+        INVOKESTATIC(JvmName.LockSupport, "releaseSemaphore", mkDescriptor(BackendType.Object)(VoidableType.Void))
+        GETSTATIC(BackendObjType.Unit.SingletonField)
+
+      case _ =>
+        throw InternalCompilerException(s"Unexpected sync atomic op: $op.", loc)
+    }
   }
 
   /**

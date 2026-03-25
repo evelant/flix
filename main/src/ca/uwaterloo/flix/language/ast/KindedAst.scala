@@ -210,6 +210,32 @@ object KindedAst {
 
     case class UnlockReentrantLock(exp: Expr, evar: Type.Var, loc: SourceLocation) extends Expr
 
+    case class NewCondition(exp: Expr, evar: Type.Var, loc: SourceLocation) extends Expr
+
+    case class AwaitCondition(exp: Expr, evar: Type.Var, loc: SourceLocation) extends Expr
+
+    case class SignalCondition(exp: Expr, evar: Type.Var, loc: SourceLocation) extends Expr
+
+    case class SignalAllCondition(exp: Expr, evar: Type.Var, loc: SourceLocation) extends Expr
+
+    case class NewCyclicBarrier(exp: Expr, evar: Type.Var, loc: SourceLocation) extends Expr
+
+    case class AwaitCyclicBarrier(exp: Expr, evar: Type.Var, loc: SourceLocation) extends Expr
+
+    case class NewCountDownLatch(exp: Expr, evar: Type.Var, loc: SourceLocation) extends Expr
+
+    case class AwaitCountDownLatch(exp: Expr, evar: Type.Var, loc: SourceLocation) extends Expr
+
+    case class CountDownLatchCountDown(exp: Expr, evar: Type.Var, loc: SourceLocation) extends Expr
+
+    case class NewSemaphore(exp: Expr, evar: Type.Var, loc: SourceLocation) extends Expr
+
+    case class AcquireSemaphore(exp: Expr, evar: Type.Var, loc: SourceLocation) extends Expr
+
+    case class TryAcquireSemaphore(exp: Expr, evar: Type.Var, loc: SourceLocation) extends Expr
+
+    case class ReleaseSemaphore(exp: Expr, evar: Type.Var, loc: SourceLocation) extends Expr
+
     case class SelectChannel(rules: List[SelectChannelRule], default: Option[Expr], tvar: Type.Var, evar: Type.Var, loc: SourceLocation) extends Expr
 
     case class Spawn(exp1: Expr, exp2: Expr, loc: SourceLocation) extends Expr

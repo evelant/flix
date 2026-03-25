@@ -48,6 +48,10 @@ object TypeConstructorPrinter {
     case TypeConstructor.RegexMatcher => DocAst.Type.AsIs("RegexMatcher")
     case TypeConstructor.ChannelHandle => DocAst.Type.AsIs("ChannelHandle")
     case TypeConstructor.ReentrantLockHandle => DocAst.Type.AsIs("ReentrantLockHandle")
+    case TypeConstructor.ConditionHandle => DocAst.Type.AsIs("ConditionHandle")
+    case TypeConstructor.CyclicBarrierHandle => DocAst.Type.AsIs("CyclicBarrierHandle")
+    case TypeConstructor.CountDownLatchHandle => DocAst.Type.AsIs("CountDownLatchHandle")
+    case TypeConstructor.SemaphoreHandle => DocAst.Type.AsIs("SemaphoreHandle")
     case TypeConstructor.Arrow(arity) => DocAst.Type.AsIs(s"Arrow($arity)")
     case TypeConstructor.ArrowWithoutEffect(arity) => DocAst.Type.AsIs(s"ArrowWithoutEffect($arity)")
     case TypeConstructor.RecordRowEmpty => DocAst.Type.RecordRowEmpty

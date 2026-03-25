@@ -107,6 +107,19 @@ object TypedAstOps {
     case Expr.LockReentrantLock(exp, _, _, _) => sigSymsOf(exp)
     case Expr.TryLockReentrantLock(exp, _, _, _) => sigSymsOf(exp)
     case Expr.UnlockReentrantLock(exp, _, _, _) => sigSymsOf(exp)
+    case Expr.NewCondition(exp, _, _, _) => sigSymsOf(exp)
+    case Expr.AwaitCondition(exp, _, _, _) => sigSymsOf(exp)
+    case Expr.SignalCondition(exp, _, _, _) => sigSymsOf(exp)
+    case Expr.SignalAllCondition(exp, _, _, _) => sigSymsOf(exp)
+    case Expr.NewCyclicBarrier(exp, _, _, _) => sigSymsOf(exp)
+    case Expr.AwaitCyclicBarrier(exp, _, _, _) => sigSymsOf(exp)
+    case Expr.NewCountDownLatch(exp, _, _, _) => sigSymsOf(exp)
+    case Expr.AwaitCountDownLatch(exp, _, _, _) => sigSymsOf(exp)
+    case Expr.CountDownLatchCountDown(exp, _, _, _) => sigSymsOf(exp)
+    case Expr.NewSemaphore(exp, _, _, _) => sigSymsOf(exp)
+    case Expr.AcquireSemaphore(exp, _, _, _) => sigSymsOf(exp)
+    case Expr.TryAcquireSemaphore(exp, _, _, _) => sigSymsOf(exp)
+    case Expr.ReleaseSemaphore(exp, _, _, _) => sigSymsOf(exp)
     case Expr.SelectChannel(rules, default, _, _, _) => rules.flatMap(rule => sigSymsOf(rule.chan) ++ sigSymsOf(rule.exp)).toSet ++ default.toSet.flatMap(sigSymsOf)
     case Expr.Spawn(exp1, exp2, _, _, _) => sigSymsOf(exp1) ++ sigSymsOf(exp2)
     case Expr.ParYield(frags, exp, _, _, _) => sigSymsOf(exp) ++ frags.flatMap(f => sigSymsOf(f.exp))
@@ -398,6 +411,45 @@ object TypedAstOps {
       freeVars(exp)
 
     case Expr.UnlockReentrantLock(exp, _, _, _) =>
+      freeVars(exp)
+
+    case Expr.NewCondition(exp, _, _, _) =>
+      freeVars(exp)
+
+    case Expr.AwaitCondition(exp, _, _, _) =>
+      freeVars(exp)
+
+    case Expr.SignalCondition(exp, _, _, _) =>
+      freeVars(exp)
+
+    case Expr.SignalAllCondition(exp, _, _, _) =>
+      freeVars(exp)
+
+    case Expr.NewCyclicBarrier(exp, _, _, _) =>
+      freeVars(exp)
+
+    case Expr.AwaitCyclicBarrier(exp, _, _, _) =>
+      freeVars(exp)
+
+    case Expr.NewCountDownLatch(exp, _, _, _) =>
+      freeVars(exp)
+
+    case Expr.AwaitCountDownLatch(exp, _, _, _) =>
+      freeVars(exp)
+
+    case Expr.CountDownLatchCountDown(exp, _, _, _) =>
+      freeVars(exp)
+
+    case Expr.NewSemaphore(exp, _, _, _) =>
+      freeVars(exp)
+
+    case Expr.AcquireSemaphore(exp, _, _, _) =>
+      freeVars(exp)
+
+    case Expr.TryAcquireSemaphore(exp, _, _, _) =>
+      freeVars(exp)
+
+    case Expr.ReleaseSemaphore(exp, _, _, _) =>
       freeVars(exp)
 
     case Expr.SelectChannel(rules, default, _, _, _) =>

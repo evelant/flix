@@ -363,6 +363,45 @@ object EffectVerifier {
     case Expr.UnlockReentrantLock(exp, tpe, eff, loc) =>
       visitExp(exp)
       ()
+    case Expr.NewCondition(exp, tpe, eff, loc) =>
+      visitExp(exp)
+      ()
+    case Expr.AwaitCondition(exp, tpe, eff, loc) =>
+      visitExp(exp)
+      ()
+    case Expr.SignalCondition(exp, tpe, eff, loc) =>
+      visitExp(exp)
+      ()
+    case Expr.SignalAllCondition(exp, tpe, eff, loc) =>
+      visitExp(exp)
+      ()
+    case Expr.NewCyclicBarrier(exp, tpe, eff, loc) =>
+      visitExp(exp)
+      ()
+    case Expr.AwaitCyclicBarrier(exp, tpe, eff, loc) =>
+      visitExp(exp)
+      ()
+    case Expr.NewCountDownLatch(exp, tpe, eff, loc) =>
+      visitExp(exp)
+      ()
+    case Expr.AwaitCountDownLatch(exp, tpe, eff, loc) =>
+      visitExp(exp)
+      ()
+    case Expr.CountDownLatchCountDown(exp, tpe, eff, loc) =>
+      visitExp(exp)
+      ()
+    case Expr.NewSemaphore(exp, tpe, eff, loc) =>
+      visitExp(exp)
+      ()
+    case Expr.AcquireSemaphore(exp, tpe, eff, loc) =>
+      visitExp(exp)
+      ()
+    case Expr.TryAcquireSemaphore(exp, tpe, eff, loc) =>
+      visitExp(exp)
+      ()
+    case Expr.ReleaseSemaphore(exp, tpe, eff, loc) =>
+      visitExp(exp)
+      ()
     case Expr.SelectChannel(rules, default, tpe, eff, loc) =>
       rules.foreach { r => visitExp(r.exp) }
       default.foreach { d => visitExp(d) }

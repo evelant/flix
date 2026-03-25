@@ -116,6 +116,32 @@ object AtomicOp {
 
   case object ReentrantLockUnlock extends AtomicOp
 
+  case object ConditionNew extends AtomicOp
+
+  case object ConditionAwait extends AtomicOp
+
+  case object ConditionSignal extends AtomicOp
+
+  case object ConditionSignalAll extends AtomicOp
+
+  case object CyclicBarrierNew extends AtomicOp
+
+  case object CyclicBarrierAwait extends AtomicOp
+
+  case object CountDownLatchNew extends AtomicOp
+
+  case object CountDownLatchAwait extends AtomicOp
+
+  case object CountDownLatchCountDown extends AtomicOp
+
+  case object SemaphoreNew extends AtomicOp
+
+  case object SemaphoreAcquire extends AtomicOp
+
+  case object SemaphoreTryAcquire extends AtomicOp
+
+  case object SemaphoreRelease extends AtomicOp
+
   case object Lazy extends AtomicOp
 
   case object Force extends AtomicOp

@@ -64,6 +64,25 @@ mod Test.Portable.ReentrantLock {
     }
 
     @Test
+    def blockedLockWake01(): Unit \ {Assert, Chan, IO, NonDet} = {
+        let lock = ReentrantLock.newLock();
+        region rc {
+            let (readyTx, readyRx): (Sender[Unit], Receiver[Unit]) = Channel.unbuffered();
+            let (doneTx, doneRx): (Sender[Result[UnlockError, Unit]], Receiver[Result[UnlockError, Unit]]) = Channel.buffered(1);
+            ReentrantLock.lock(lock);
+            spawn {
+                Channel.send((), readyTx);
+                ReentrantLock.lock(lock);
+                Channel.send(ReentrantLock.unlock(lock), doneTx);
+                ()
+            } @ rc;
+            Channel.recv(readyRx);
+            assertEq(expected = Ok(()), ReentrantLock.unlock(lock));
+            assertEq(expected = Some(Ok(())), Channel.recvWithTimeout(doneRx, 5, TimeUnit.Seconds))
+        }
+    }
+
+    @Test
     def blockedLockCancellation01(): Unit \ {Assert, IO} = {
         let start = Clock.runWithIO(() -> Clock.now());
         let payload = try {
@@ -97,6 +116,7 @@ mod Test.Portable.ReentrantLock {
         let _ = tryLockOwnedBySelf01();
         let _ = tryLockOwnedByOther01();
         let _ = wrongTaskUnlock01();
+        let _ = blockedLockWake01();
         let _ = blockedLockCancellation01();
         ()
     }

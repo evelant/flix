@@ -566,6 +566,71 @@ object Lowering {
       val t = lowerType(tpe)
       MonoAst.Expr.ApplyAtomic(AtomicOp.ReentrantLockUnlock, List(e), t, eff, loc)
 
+    case TypedAst.Expr.NewCondition(exp0, tpe, eff, loc) =>
+      val e = lowerExp(exp0)
+      val t = lowerType(tpe)
+      MonoAst.Expr.ApplyAtomic(AtomicOp.ConditionNew, List(e), t, eff, loc)
+
+    case TypedAst.Expr.AwaitCondition(exp0, tpe, eff, loc) =>
+      val e = lowerExp(exp0)
+      val t = lowerType(tpe)
+      MonoAst.Expr.ApplyAtomic(AtomicOp.ConditionAwait, List(e), t, eff, loc)
+
+    case TypedAst.Expr.SignalCondition(exp0, tpe, eff, loc) =>
+      val e = lowerExp(exp0)
+      val t = lowerType(tpe)
+      MonoAst.Expr.ApplyAtomic(AtomicOp.ConditionSignal, List(e), t, eff, loc)
+
+    case TypedAst.Expr.SignalAllCondition(exp0, tpe, eff, loc) =>
+      val e = lowerExp(exp0)
+      val t = lowerType(tpe)
+      MonoAst.Expr.ApplyAtomic(AtomicOp.ConditionSignalAll, List(e), t, eff, loc)
+
+    case TypedAst.Expr.NewCyclicBarrier(exp0, tpe, eff, loc) =>
+      val e = lowerExp(exp0)
+      val t = lowerType(tpe)
+      MonoAst.Expr.ApplyAtomic(AtomicOp.CyclicBarrierNew, List(e), t, eff, loc)
+
+    case TypedAst.Expr.AwaitCyclicBarrier(exp0, tpe, eff, loc) =>
+      val e = lowerExp(exp0)
+      val t = lowerType(tpe)
+      MonoAst.Expr.ApplyAtomic(AtomicOp.CyclicBarrierAwait, List(e), t, eff, loc)
+
+    case TypedAst.Expr.NewCountDownLatch(exp0, tpe, eff, loc) =>
+      val e = lowerExp(exp0)
+      val t = lowerType(tpe)
+      MonoAst.Expr.ApplyAtomic(AtomicOp.CountDownLatchNew, List(e), t, eff, loc)
+
+    case TypedAst.Expr.AwaitCountDownLatch(exp0, tpe, eff, loc) =>
+      val e = lowerExp(exp0)
+      val t = lowerType(tpe)
+      MonoAst.Expr.ApplyAtomic(AtomicOp.CountDownLatchAwait, List(e), t, eff, loc)
+
+    case TypedAst.Expr.CountDownLatchCountDown(exp0, tpe, eff, loc) =>
+      val e = lowerExp(exp0)
+      val t = lowerType(tpe)
+      MonoAst.Expr.ApplyAtomic(AtomicOp.CountDownLatchCountDown, List(e), t, eff, loc)
+
+    case TypedAst.Expr.NewSemaphore(exp0, tpe, eff, loc) =>
+      val e = lowerExp(exp0)
+      val t = lowerType(tpe)
+      MonoAst.Expr.ApplyAtomic(AtomicOp.SemaphoreNew, List(e), t, eff, loc)
+
+    case TypedAst.Expr.AcquireSemaphore(exp0, tpe, eff, loc) =>
+      val e = lowerExp(exp0)
+      val t = lowerType(tpe)
+      MonoAst.Expr.ApplyAtomic(AtomicOp.SemaphoreAcquire, List(e), t, eff, loc)
+
+    case TypedAst.Expr.TryAcquireSemaphore(exp0, tpe, eff, loc) =>
+      val e = lowerExp(exp0)
+      val t = lowerType(tpe)
+      MonoAst.Expr.ApplyAtomic(AtomicOp.SemaphoreTryAcquire, List(e), t, eff, loc)
+
+    case TypedAst.Expr.ReleaseSemaphore(exp0, tpe, eff, loc) =>
+      val e = lowerExp(exp0)
+      val t = lowerType(tpe)
+      MonoAst.Expr.ApplyAtomic(AtomicOp.SemaphoreRelease, List(e), t, eff, loc)
+
     case TypedAst.Expr.SelectChannel(rules0, default0, tpe, eff, loc) =>
       val rules = rules0.map {
         case TypedAst.SelectChannelRule(bnd, chan, exp, _) =>

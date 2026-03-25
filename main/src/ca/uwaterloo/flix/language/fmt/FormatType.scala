@@ -179,6 +179,10 @@ object FormatType {
       case DisplayType.RegexMatcher => true
       case DisplayType.ChannelHandle => true
       case DisplayType.ReentrantLockHandle => true
+      case DisplayType.ConditionHandle => true
+      case DisplayType.CyclicBarrierHandle => true
+      case DisplayType.CountDownLatchHandle => true
+      case DisplayType.SemaphoreHandle => true
       case DisplayType.Array => true
       case DisplayType.ArrayWithoutRegion => true
       case DisplayType.Vector => true
@@ -263,6 +267,10 @@ object FormatType {
       case DisplayType.RegexMatcher => "RegexMatcher"
       case DisplayType.ChannelHandle => "ChannelHandle"
       case DisplayType.ReentrantLockHandle => "ReentrantLockHandle"
+      case DisplayType.ConditionHandle => "ConditionHandle"
+      case DisplayType.CyclicBarrierHandle => "CyclicBarrierHandle"
+      case DisplayType.CountDownLatchHandle => "CountDownLatchHandle"
+      case DisplayType.SemaphoreHandle => "SemaphoreHandle"
       case DisplayType.Array => "Array"
       case DisplayType.ArrayWithoutRegion => "ArrayWithoutRegion"
       case DisplayType.Vector => "Vector"

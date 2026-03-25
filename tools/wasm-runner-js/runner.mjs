@@ -67,41 +67,53 @@ export class FlixRunner {
     const budget = options.budget ?? this.budget;
 
     const pending = new Set();
+    const runState = { closed: false };
 
-    while (true) {
-      const out = this.runtime.pollTask(ctx, taskId);
-      if (out != null) return out;
+    try {
+      while (true) {
+        const out = this.runtime.pollTask(ctx, taskId);
+        if (out != null) {
+          runState.closed = true;
+          return out;
+        }
 
-      const suspensions = this.runtime.schedStep(ctx, budget);
-      for (const s of suspensions) {
-        const p = this._handleSuspension(ctx, s)
-          .catch((e) => {
-            // Best-effort: if a handler throws, try to resume with an `Other` IO error (when possible).
-            try {
-              const msg = e instanceof Error ? e.message : String(e);
-              this._resumeIoErr(ctx, s, this.runtime.suspensionRequest(ctx, s).tag, {
-                kindCode: 14,
-                msg,
-              });
-            } catch {
-              // If we can't resume, surface the error to the host.
-              throw e;
-            }
-          })
-          .finally(() => pending.delete(p));
-        pending.add(p);
+        const suspensions = this.runtime.schedStep(ctx, budget);
+        for (const s of suspensions) {
+          const p = this._handleSuspension(ctx, s, runState)
+            .catch((e) => {
+              if (runState.closed) return;
+              // Best-effort: if a handler throws, try to resume with an `Other` IO error (when possible).
+              try {
+                const msg = e instanceof Error ? e.message : String(e);
+                this._resumeIoErr(ctx, s, this.runtime.suspensionRequest(ctx, s).tag, {
+                  kindCode: 14,
+                  msg,
+                });
+              } catch {
+                // If we can't resume, surface the error to the host.
+                throw e;
+              }
+            })
+            .finally(() => pending.delete(p));
+          pending.add(p);
+        }
+
+        if (pending.size > 0) {
+          // Keep pumping the cooperative scheduler even while host I/O is pending.
+          // Otherwise a long-lived external promise (e.g. a detached timeout task)
+          // can stall purely internal wakeups that have already made tasks runnable.
+          await sleep(1);
+        } else {
+          // Ensure we yield to the JS event loop even for pure computations.
+          await Promise.resolve();
+        }
       }
-
-      if (pending.size > 0) {
-        await Promise.race(pending);
-      } else {
-        // Ensure we yield to the JS event loop even for pure computations.
-        await Promise.resolve();
-      }
+    } finally {
+      runState.closed = true;
     }
   }
 
-  async _handleSuspension(ctx, suspension) {
+  async _handleSuspension(ctx, suspension, runState) {
     const req = this.runtime.suspensionRequest(ctx, suspension);
     const tag = req.tag;
 
@@ -112,6 +124,7 @@ export class FlixRunner {
         ctx,
         suspension,
         request: req.val,
+        isClosed: () => runState.closed,
       });
       return;
     }
@@ -120,6 +133,7 @@ export class FlixRunner {
       case "timer-sleep": {
         const ms = clampMs(bigintToSafeNumber(req.val.ms));
         await sleep(ms);
+        if (runState.closed) return;
         this.runtime.resumeTimerSleep(ctx, suspension);
         return;
       }
@@ -134,17 +148,19 @@ export class FlixRunner {
         if (line.endsWith("\n")) line = line.slice(0, -1);
         if (line.endsWith("\r")) line = line.slice(0, -1);
 
+        if (runState.closed) return;
         this.runtime.resumeConsoleReadlnOk(ctx, suspension, line);
         return;
       }
       case "http-request": {
-        await this._handleHttpRequest(ctx, suspension, req.val);
+        await this._handleHttpRequest(ctx, suspension, req.val, runState);
         return;
       }
       case "unknown": {
         const msg = `unsupported op: effId=${req.val.effId} opId=${req.val.opId}`;
         const v = this.runtime.boxString(ctx, msg);
         try {
+          if (runState.closed) return;
           this.runtime.resumeThrow(ctx, suspension, v);
         } finally {
           // `resumeThrow` consumes the suspension, not the value.
@@ -175,9 +191,10 @@ export class FlixRunner {
     fn.call(this.runtime, ctx, suspension, err);
   }
 
-  async _handleHttpRequest(ctx, suspension, req) {
+  async _handleHttpRequest(ctx, suspension, req, runState) {
     const fetchFn = globalThis.fetch;
     if (typeof fetchFn !== "function") {
+      if (runState.closed) return;
       this.runtime.resumeHttpErr(ctx, suspension, {
         kindCode: 12,
         msg: "fetch unavailable",
@@ -189,6 +206,7 @@ export class FlixRunner {
     try {
       initialUrl = new URL(req.url);
     } catch (e) {
+      if (runState.closed) return;
       this.runtime.resumeHttpErr(ctx, suspension, {
         kindCode: 4,
         msg: "invalid URL",
@@ -198,6 +216,7 @@ export class FlixRunner {
 
     const initialScheme = initialUrl.protocol.replace(/:$/, "").toLowerCase();
     if (initialScheme !== "http" && initialScheme !== "https") {
+      if (runState.closed) return;
       this.runtime.resumeHttpErr(ctx, suspension, {
         kindCode: 12,
         msg: "unsupported URL scheme",
@@ -246,6 +265,7 @@ export class FlixRunner {
 
         // Timeout / abort.
         if (e?.name === "AbortError") {
+          if (runState.closed) return;
           this.runtime.resumeHttpErr(ctx, suspension, { kindCode: 10, msg: "timeout" });
           return;
         }
@@ -254,6 +274,7 @@ export class FlixRunner {
         const msg = e instanceof Error ? e.message : String(e);
         const kindCode =
           /ENOTFOUND|Unknown host|getaddrinfo/i.test(msg) ? 13 : 1; // UnknownHost vs ConnectionFailed
+        if (runState.closed) return;
         this.runtime.resumeHttpErr(ctx, suspension, { kindCode, msg });
         return;
       } finally {
@@ -268,12 +289,14 @@ export class FlixRunner {
         try {
           next = new URL(loc, url);
         } catch {
+          if (runState.closed) return;
           this.runtime.resumeHttpErr(ctx, suspension, { kindCode: 14, msg: "invalid redirect URL" });
           return;
         }
 
         const nextScheme = next.protocol.replace(/:$/, "").toLowerCase();
         if (initialScheme === "https" && nextScheme === "http") {
+          if (runState.closed) return;
           this.runtime.resumeHttpErr(ctx, suspension, {
             kindCode: 9, // PolicyViolation
             msg: "redirect disallowed: https -> http",
@@ -282,6 +305,7 @@ export class FlixRunner {
         }
 
         if (nextScheme !== "http" && nextScheme !== "https") {
+          if (runState.closed) return;
           this.runtime.resumeHttpErr(ctx, suspension, {
             kindCode: 12,
             msg: "unsupported redirect scheme",
@@ -315,6 +339,7 @@ export class FlixRunner {
         }
       }
 
+      if (runState.closed) return;
       this.runtime.resumeHttpOk(ctx, suspension, {
         status: resp.status,
         headers: outHeaders,
@@ -323,6 +348,7 @@ export class FlixRunner {
       return;
     }
 
+    if (runState.closed) return;
     this.runtime.resumeHttpErr(ctx, suspension, { kindCode: 14, msg: "redirect loop" });
   }
 }

@@ -260,6 +260,32 @@ object TypedAst {
 
     case class UnlockReentrantLock(exp: Expr, tpe: Type, eff: Type, loc: SourceLocation) extends Expr
 
+    case class NewCondition(exp: Expr, tpe: Type, eff: Type, loc: SourceLocation) extends Expr
+
+    case class AwaitCondition(exp: Expr, tpe: Type, eff: Type, loc: SourceLocation) extends Expr
+
+    case class SignalCondition(exp: Expr, tpe: Type, eff: Type, loc: SourceLocation) extends Expr
+
+    case class SignalAllCondition(exp: Expr, tpe: Type, eff: Type, loc: SourceLocation) extends Expr
+
+    case class NewCyclicBarrier(exp: Expr, tpe: Type, eff: Type, loc: SourceLocation) extends Expr
+
+    case class AwaitCyclicBarrier(exp: Expr, tpe: Type, eff: Type, loc: SourceLocation) extends Expr
+
+    case class NewCountDownLatch(exp: Expr, tpe: Type, eff: Type, loc: SourceLocation) extends Expr
+
+    case class AwaitCountDownLatch(exp: Expr, tpe: Type, eff: Type, loc: SourceLocation) extends Expr
+
+    case class CountDownLatchCountDown(exp: Expr, tpe: Type, eff: Type, loc: SourceLocation) extends Expr
+
+    case class NewSemaphore(exp: Expr, tpe: Type, eff: Type, loc: SourceLocation) extends Expr
+
+    case class AcquireSemaphore(exp: Expr, tpe: Type, eff: Type, loc: SourceLocation) extends Expr
+
+    case class TryAcquireSemaphore(exp: Expr, tpe: Type, eff: Type, loc: SourceLocation) extends Expr
+
+    case class ReleaseSemaphore(exp: Expr, tpe: Type, eff: Type, loc: SourceLocation) extends Expr
+
     case class SelectChannel(rules: List[SelectChannelRule], default: Option[Expr], tpe: Type, eff: Type, loc: SourceLocation) extends Expr
 
     case class Spawn(exp1: Expr, exp2: Expr, tpe: Type, eff: Type, loc: SourceLocation) extends Expr

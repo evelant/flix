@@ -168,6 +168,42 @@ object TypeConstructor {
   }
 
   /**
+    * A type constructor that represents the type of portable condition handles.
+    *
+    * This type exists to allow a portable stdlib synchronization implementation without JVM interop.
+    */
+  case object ConditionHandle extends TypeConstructor {
+    def kind: Kind = Kind.Star
+  }
+
+  /**
+    * A type constructor that represents the type of portable cyclic barrier handles.
+    *
+    * This type exists to allow a portable stdlib synchronization implementation without JVM interop.
+    */
+  case object CyclicBarrierHandle extends TypeConstructor {
+    def kind: Kind = Kind.Star
+  }
+
+  /**
+    * A type constructor that represents the type of portable count-down latch handles.
+    *
+    * This type exists to allow a portable stdlib synchronization implementation without JVM interop.
+    */
+  case object CountDownLatchHandle extends TypeConstructor {
+    def kind: Kind = Kind.Star
+  }
+
+  /**
+    * A type constructor that represents the type of portable semaphore handles.
+    *
+    * This type exists to allow a portable stdlib synchronization implementation without JVM interop.
+    */
+  case object SemaphoreHandle extends TypeConstructor {
+    def kind: Kind = Kind.Star
+  }
+
+  /**
     * A type constructor that represents the type of functions.
     */
   @IntroducedBy(Kinder.getClass)

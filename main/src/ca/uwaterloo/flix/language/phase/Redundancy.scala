@@ -863,6 +863,45 @@ object Redundancy {
     case Expr.UnlockReentrantLock(exp, _, _, _) =>
       visitExp(exp, env0, rc)
 
+    case Expr.NewCondition(exp, _, _, _) =>
+      visitExp(exp, env0, rc)
+
+    case Expr.AwaitCondition(exp, _, _, _) =>
+      visitExp(exp, env0, rc)
+
+    case Expr.SignalCondition(exp, _, _, _) =>
+      visitExp(exp, env0, rc)
+
+    case Expr.SignalAllCondition(exp, _, _, _) =>
+      visitExp(exp, env0, rc)
+
+    case Expr.NewCyclicBarrier(exp, _, _, _) =>
+      visitExp(exp, env0, rc)
+
+    case Expr.AwaitCyclicBarrier(exp, _, _, _) =>
+      visitExp(exp, env0, rc)
+
+    case Expr.NewCountDownLatch(exp, _, _, _) =>
+      visitExp(exp, env0, rc)
+
+    case Expr.AwaitCountDownLatch(exp, _, _, _) =>
+      visitExp(exp, env0, rc)
+
+    case Expr.CountDownLatchCountDown(exp, _, _, _) =>
+      visitExp(exp, env0, rc)
+
+    case Expr.NewSemaphore(exp, _, _, _) =>
+      visitExp(exp, env0, rc)
+
+    case Expr.AcquireSemaphore(exp, _, _, _) =>
+      visitExp(exp, env0, rc)
+
+    case Expr.TryAcquireSemaphore(exp, _, _, _) =>
+      visitExp(exp, env0, rc)
+
+    case Expr.ReleaseSemaphore(exp, _, _, _) =>
+      visitExp(exp, env0, rc)
+
     case Expr.SelectChannel(rules, defaultOpt, _, _, _) =>
       val defaultUsed = defaultOpt match {
         case None => Used.empty

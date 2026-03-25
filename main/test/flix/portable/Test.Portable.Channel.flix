@@ -1,6 +1,7 @@
 mod Test.Portable.Channel {
 
     use Assert.{assertEq, assertNone, assertTrue}
+    use Sync.ReentrantLock
 
     @Test
     def basic01(): Unit \ {Chan, NonDet} =
@@ -124,6 +125,36 @@ mod Test.Portable.Channel {
         ()
     }
 
+    @Test
+    def detachedTimeoutLateWakeAfterCancellation01(): Unit \ {Assert, Chan, NonDet, IO} = {
+        let (tx, rx) = Channel.buffered(1);
+        Channel.send(21, tx);
+        assertEq(expected = Some(21), Channel.recvWithTimeout(rx, 50, TimeUnit.Milliseconds));
+
+        let payload = try {
+            region rc {
+                let lock = ReentrantLock.newLock();
+                ReentrantLock.lock(lock);
+                spawn {
+                    ReentrantLock.lock(lock);
+                    ()
+                } @ rc;
+                spawn {
+                    throw Exn.mk(13);
+                    ()
+                } @ rc;
+                ()
+            };
+            -1
+        } catch {
+            case exn: Int32 => Exn.payloadAs(exn)
+            case _: Exn => -2
+        };
+
+        assertEq(expected = 13, payload);
+        Timer.runWithIO(() -> Timer.sleepFor(100i64, TimeUnit.Milliseconds))
+    }
+
     pub def runAll(): Unit \ {Assert, Chan, NonDet, IO} = {
         let _ = basic01();
         let _ = timeout01();
@@ -134,6 +165,7 @@ mod Test.Portable.Channel {
         let _ = blockedRecvCancellation01();
         let _ = blockedBufferedSendCancellation01();
         let _ = blockedUnbufferedSendParentCancellation01();
+        let _ = detachedTimeoutLateWakeAfterCancellation01();
         ()
     }
 

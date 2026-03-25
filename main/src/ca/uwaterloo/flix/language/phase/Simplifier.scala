@@ -343,6 +343,14 @@ object Simplifier {
 
           case TypeConstructor.ReentrantLockHandle => SimpleType.ReentrantLockHandle
 
+          case TypeConstructor.ConditionHandle => SimpleType.ConditionHandle
+
+          case TypeConstructor.CyclicBarrierHandle => SimpleType.CyclicBarrierHandle
+
+          case TypeConstructor.CountDownLatchHandle => SimpleType.CountDownLatchHandle
+
+          case TypeConstructor.SemaphoreHandle => SimpleType.SemaphoreHandle
+
           case TypeConstructor.RecordRowEmpty => SimpleType.RecordEmpty
 
           case TypeConstructor.Sender => throw InternalCompilerException("Unexpected Sender", tpe.loc)
@@ -523,6 +531,14 @@ object Simplifier {
           case TypeConstructor.ChannelHandle => cst
 
           case TypeConstructor.ReentrantLockHandle => cst
+
+          case TypeConstructor.ConditionHandle => cst
+
+          case TypeConstructor.CyclicBarrierHandle => cst
+
+          case TypeConstructor.CountDownLatchHandle => cst
+
+          case TypeConstructor.SemaphoreHandle => cst
 
           case TypeConstructor.RecordRowEmpty => cst
 

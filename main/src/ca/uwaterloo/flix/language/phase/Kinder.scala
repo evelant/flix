@@ -793,6 +793,71 @@ object Kinder {
         val evar = Type.freshVar(Kind.Eff, loc.asSynthetic)
         KindedAst.Expr.UnlockReentrantLock(exp, evar, loc)
 
+      case ResolvedAst.Expr.NewCondition(exp0, loc) =>
+        val exp = visitExp(exp0, kenv0, root)
+        val evar = Type.freshVar(Kind.Eff, loc.asSynthetic)
+        KindedAst.Expr.NewCondition(exp, evar, loc)
+
+      case ResolvedAst.Expr.AwaitCondition(exp0, loc) =>
+        val exp = visitExp(exp0, kenv0, root)
+        val evar = Type.freshVar(Kind.Eff, loc.asSynthetic)
+        KindedAst.Expr.AwaitCondition(exp, evar, loc)
+
+      case ResolvedAst.Expr.SignalCondition(exp0, loc) =>
+        val exp = visitExp(exp0, kenv0, root)
+        val evar = Type.freshVar(Kind.Eff, loc.asSynthetic)
+        KindedAst.Expr.SignalCondition(exp, evar, loc)
+
+      case ResolvedAst.Expr.SignalAllCondition(exp0, loc) =>
+        val exp = visitExp(exp0, kenv0, root)
+        val evar = Type.freshVar(Kind.Eff, loc.asSynthetic)
+        KindedAst.Expr.SignalAllCondition(exp, evar, loc)
+
+      case ResolvedAst.Expr.NewCyclicBarrier(exp0, loc) =>
+        val exp = visitExp(exp0, kenv0, root)
+        val evar = Type.freshVar(Kind.Eff, loc.asSynthetic)
+        KindedAst.Expr.NewCyclicBarrier(exp, evar, loc)
+
+      case ResolvedAst.Expr.AwaitCyclicBarrier(exp0, loc) =>
+        val exp = visitExp(exp0, kenv0, root)
+        val evar = Type.freshVar(Kind.Eff, loc.asSynthetic)
+        KindedAst.Expr.AwaitCyclicBarrier(exp, evar, loc)
+
+      case ResolvedAst.Expr.NewCountDownLatch(exp0, loc) =>
+        val exp = visitExp(exp0, kenv0, root)
+        val evar = Type.freshVar(Kind.Eff, loc.asSynthetic)
+        KindedAst.Expr.NewCountDownLatch(exp, evar, loc)
+
+      case ResolvedAst.Expr.AwaitCountDownLatch(exp0, loc) =>
+        val exp = visitExp(exp0, kenv0, root)
+        val evar = Type.freshVar(Kind.Eff, loc.asSynthetic)
+        KindedAst.Expr.AwaitCountDownLatch(exp, evar, loc)
+
+      case ResolvedAst.Expr.CountDownLatchCountDown(exp0, loc) =>
+        val exp = visitExp(exp0, kenv0, root)
+        val evar = Type.freshVar(Kind.Eff, loc.asSynthetic)
+        KindedAst.Expr.CountDownLatchCountDown(exp, evar, loc)
+
+      case ResolvedAst.Expr.NewSemaphore(exp0, loc) =>
+        val exp = visitExp(exp0, kenv0, root)
+        val evar = Type.freshVar(Kind.Eff, loc.asSynthetic)
+        KindedAst.Expr.NewSemaphore(exp, evar, loc)
+
+      case ResolvedAst.Expr.AcquireSemaphore(exp0, loc) =>
+        val exp = visitExp(exp0, kenv0, root)
+        val evar = Type.freshVar(Kind.Eff, loc.asSynthetic)
+        KindedAst.Expr.AcquireSemaphore(exp, evar, loc)
+
+      case ResolvedAst.Expr.TryAcquireSemaphore(exp0, loc) =>
+        val exp = visitExp(exp0, kenv0, root)
+        val evar = Type.freshVar(Kind.Eff, loc.asSynthetic)
+        KindedAst.Expr.TryAcquireSemaphore(exp, evar, loc)
+
+      case ResolvedAst.Expr.ReleaseSemaphore(exp0, loc) =>
+        val exp = visitExp(exp0, kenv0, root)
+        val evar = Type.freshVar(Kind.Eff, loc.asSynthetic)
+        KindedAst.Expr.ReleaseSemaphore(exp, evar, loc)
+
       case ResolvedAst.Expr.SelectChannel(rules0, exp0, loc) =>
         val rules = rules0.map(visitSelectChannelRule(_, kenv0, root))
         val exp = exp0.map(visitExp(_, kenv0, root))

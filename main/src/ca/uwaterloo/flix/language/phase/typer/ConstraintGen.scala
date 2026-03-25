@@ -2141,6 +2141,110 @@ object ConstraintGen {
         val resEff = evar
         (resTpe, resEff)
 
+      case Expr.NewCondition(exp, evar, loc) =>
+        val (tpe, eff) = visitExp(exp)
+        c.expectType(expected = Type.Cst(TypeConstructor.ReentrantLockHandle, loc), actual = tpe, exp.loc)
+        c.unifyType(evar, Type.mkUnion(eff, Type.IO, loc), loc)
+        val resTpe = Type.Cst(TypeConstructor.ConditionHandle, loc)
+        val resEff = evar
+        (resTpe, resEff)
+
+      case Expr.AwaitCondition(exp, evar, loc) =>
+        val (tpe, eff) = visitExp(exp)
+        c.expectType(expected = Type.Cst(TypeConstructor.ConditionHandle, loc), actual = tpe, exp.loc)
+        c.unifyType(evar, Type.mkUnion(eff, Type.IO, loc), loc)
+        val resTpe = Type.Int32
+        val resEff = evar
+        (resTpe, resEff)
+
+      case Expr.SignalCondition(exp, evar, loc) =>
+        val (tpe, eff) = visitExp(exp)
+        c.expectType(expected = Type.Cst(TypeConstructor.ConditionHandle, loc), actual = tpe, exp.loc)
+        c.unifyType(evar, Type.mkUnion(eff, Type.IO, loc), loc)
+        val resTpe = Type.Bool
+        val resEff = evar
+        (resTpe, resEff)
+
+      case Expr.SignalAllCondition(exp, evar, loc) =>
+        val (tpe, eff) = visitExp(exp)
+        c.expectType(expected = Type.Cst(TypeConstructor.ConditionHandle, loc), actual = tpe, exp.loc)
+        c.unifyType(evar, Type.mkUnion(eff, Type.IO, loc), loc)
+        val resTpe = Type.Bool
+        val resEff = evar
+        (resTpe, resEff)
+
+      case Expr.NewCyclicBarrier(exp, evar, loc) =>
+        val (tpe, eff) = visitExp(exp)
+        c.expectType(expected = Type.Int32, actual = tpe, exp.loc)
+        c.unifyType(evar, Type.mkUnion(eff, Type.IO, loc), loc)
+        val resTpe = Type.Cst(TypeConstructor.CyclicBarrierHandle, loc)
+        val resEff = evar
+        (resTpe, resEff)
+
+      case Expr.AwaitCyclicBarrier(exp, evar, loc) =>
+        val (tpe, eff) = visitExp(exp)
+        c.expectType(expected = Type.Cst(TypeConstructor.CyclicBarrierHandle, loc), actual = tpe, exp.loc)
+        c.unifyType(evar, Type.mkUnion(eff, Type.IO, loc), loc)
+        val resTpe = Type.Int32
+        val resEff = evar
+        (resTpe, resEff)
+
+      case Expr.NewCountDownLatch(exp, evar, loc) =>
+        val (tpe, eff) = visitExp(exp)
+        c.expectType(expected = Type.Int32, actual = tpe, exp.loc)
+        c.unifyType(evar, Type.mkUnion(eff, Type.IO, loc), loc)
+        val resTpe = Type.Cst(TypeConstructor.CountDownLatchHandle, loc)
+        val resEff = evar
+        (resTpe, resEff)
+
+      case Expr.AwaitCountDownLatch(exp, evar, loc) =>
+        val (tpe, eff) = visitExp(exp)
+        c.expectType(expected = Type.Cst(TypeConstructor.CountDownLatchHandle, loc), actual = tpe, exp.loc)
+        c.unifyType(evar, Type.mkUnion(eff, Type.IO, loc), loc)
+        val resTpe = Type.Unit
+        val resEff = evar
+        (resTpe, resEff)
+
+      case Expr.CountDownLatchCountDown(exp, evar, loc) =>
+        val (tpe, eff) = visitExp(exp)
+        c.expectType(expected = Type.Cst(TypeConstructor.CountDownLatchHandle, loc), actual = tpe, exp.loc)
+        c.unifyType(evar, Type.mkUnion(eff, Type.IO, loc), loc)
+        val resTpe = Type.Unit
+        val resEff = evar
+        (resTpe, resEff)
+
+      case Expr.NewSemaphore(exp, evar, loc) =>
+        val (tpe, eff) = visitExp(exp)
+        c.expectType(expected = Type.Int32, actual = tpe, exp.loc)
+        c.unifyType(evar, Type.mkUnion(eff, Type.IO, loc), loc)
+        val resTpe = Type.Cst(TypeConstructor.SemaphoreHandle, loc)
+        val resEff = evar
+        (resTpe, resEff)
+
+      case Expr.AcquireSemaphore(exp, evar, loc) =>
+        val (tpe, eff) = visitExp(exp)
+        c.expectType(expected = Type.Cst(TypeConstructor.SemaphoreHandle, loc), actual = tpe, exp.loc)
+        c.unifyType(evar, Type.mkUnion(eff, Type.IO, loc), loc)
+        val resTpe = Type.Unit
+        val resEff = evar
+        (resTpe, resEff)
+
+      case Expr.TryAcquireSemaphore(exp, evar, loc) =>
+        val (tpe, eff) = visitExp(exp)
+        c.expectType(expected = Type.Cst(TypeConstructor.SemaphoreHandle, loc), actual = tpe, exp.loc)
+        c.unifyType(evar, Type.mkUnion(eff, Type.IO, loc), loc)
+        val resTpe = Type.Bool
+        val resEff = evar
+        (resTpe, resEff)
+
+      case Expr.ReleaseSemaphore(exp, evar, loc) =>
+        val (tpe, eff) = visitExp(exp)
+        c.expectType(expected = Type.Cst(TypeConstructor.SemaphoreHandle, loc), actual = tpe, exp.loc)
+        c.unifyType(evar, Type.mkUnion(eff, Type.IO, loc), loc)
+        val resTpe = Type.Unit
+        val resEff = evar
+        (resTpe, resEff)
+
       case Expr.SelectChannel(rules, default, tvar, evar, loc) =>
         val (ruleTypes, ruleEffs) = rules.map(visitSelectRule).unzip
         val (defaultType, eff2) = visitDefaultRule(default, loc)

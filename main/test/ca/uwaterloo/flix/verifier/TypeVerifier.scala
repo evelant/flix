@@ -715,6 +715,71 @@ object TypeVerifier {
           check(expected = SimpleType.ReentrantLockHandle)(actual = lockTpe, loc)
           check(expected = SimpleType.Bool)(actual = tpe, loc)
 
+        case AtomicOp.ConditionNew =>
+          val List(lockTpe) = ts
+          check(expected = SimpleType.ReentrantLockHandle)(actual = lockTpe, loc)
+          check(expected = SimpleType.ConditionHandle)(actual = tpe, loc)
+
+        case AtomicOp.ConditionAwait =>
+          val List(conditionTpe) = ts
+          check(expected = SimpleType.ConditionHandle)(actual = conditionTpe, loc)
+          check(expected = SimpleType.Int32)(actual = tpe, loc)
+
+        case AtomicOp.ConditionSignal =>
+          val List(conditionTpe) = ts
+          check(expected = SimpleType.ConditionHandle)(actual = conditionTpe, loc)
+          check(expected = SimpleType.Bool)(actual = tpe, loc)
+
+        case AtomicOp.ConditionSignalAll =>
+          val List(conditionTpe) = ts
+          check(expected = SimpleType.ConditionHandle)(actual = conditionTpe, loc)
+          check(expected = SimpleType.Bool)(actual = tpe, loc)
+
+        case AtomicOp.CyclicBarrierNew =>
+          val List(partiesTpe) = ts
+          check(expected = SimpleType.Int32)(actual = partiesTpe, loc)
+          check(expected = SimpleType.CyclicBarrierHandle)(actual = tpe, loc)
+
+        case AtomicOp.CyclicBarrierAwait =>
+          val List(barrierTpe) = ts
+          check(expected = SimpleType.CyclicBarrierHandle)(actual = barrierTpe, loc)
+          check(expected = SimpleType.Int32)(actual = tpe, loc)
+
+        case AtomicOp.CountDownLatchNew =>
+          val List(countTpe) = ts
+          check(expected = SimpleType.Int32)(actual = countTpe, loc)
+          check(expected = SimpleType.CountDownLatchHandle)(actual = tpe, loc)
+
+        case AtomicOp.CountDownLatchAwait =>
+          val List(latchTpe) = ts
+          check(expected = SimpleType.CountDownLatchHandle)(actual = latchTpe, loc)
+          check(expected = SimpleType.Unit)(actual = tpe, loc)
+
+        case AtomicOp.CountDownLatchCountDown =>
+          val List(latchTpe) = ts
+          check(expected = SimpleType.CountDownLatchHandle)(actual = latchTpe, loc)
+          check(expected = SimpleType.Unit)(actual = tpe, loc)
+
+        case AtomicOp.SemaphoreNew =>
+          val List(permitsTpe) = ts
+          check(expected = SimpleType.Int32)(actual = permitsTpe, loc)
+          check(expected = SimpleType.SemaphoreHandle)(actual = tpe, loc)
+
+        case AtomicOp.SemaphoreAcquire =>
+          val List(semTpe) = ts
+          check(expected = SimpleType.SemaphoreHandle)(actual = semTpe, loc)
+          check(expected = SimpleType.Unit)(actual = tpe, loc)
+
+        case AtomicOp.SemaphoreTryAcquire =>
+          val List(semTpe) = ts
+          check(expected = SimpleType.SemaphoreHandle)(actual = semTpe, loc)
+          check(expected = SimpleType.Bool)(actual = tpe, loc)
+
+        case AtomicOp.SemaphoreRelease =>
+          val List(semTpe) = ts
+          check(expected = SimpleType.SemaphoreHandle)(actual = semTpe, loc)
+          check(expected = SimpleType.Unit)(actual = tpe, loc)
+
         case AtomicOp.GetField(field) =>
           val List(t) = ts
           checkJavaSubtype(t, field.getDeclaringClass, loc)

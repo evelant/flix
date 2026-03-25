@@ -25,9 +25,12 @@ import java.nio.file.{FileSystem, FileSystemNotFoundException, FileSystems, File
 import scala.jdk.CollectionConverters.*
 
 /**
-  * Drives the host toolchain to turn textual LLVM IR (`.ll`) into a native executable.
-  *
-  * Bring-up choice: use `zig cc` as the portable compiler+linker driver.
+ * Drives the host toolchain to turn textual LLVM IR (`.ll`) into a native executable.
+ *
+ * Bring-up choice: use `zig cc` to compile LLVM IR and Zig runtime sources into objects.
+ * On macOS we use the platform C linker for the final link step because the current
+ * Zig 0.15 toolchain on this host does not reliably resolve libc symbols when linking
+ * object-only inputs.
   */
 object LlvmNativeDriver {
 
@@ -55,15 +58,11 @@ object LlvmNativeDriver {
     }
 
     val runtimeZig = resolveRuntimeZig(outDir)
-
     val runtimeObjs = compileRuntime(runtimeZig, outDir, optFlag)
+    val moduleObj = compileModule(modulePath, outDir, optFlag)
 
-    val cmd = List(
-      "zig",
-      "cc",
-      "-Wno-override-module",
-      optFlag,
-      modulePath.toString,
+    val cmd = linkerCommand(optFlag) ::: List(
+      moduleObj.toString,
     ) ::: runtimeObjs.map(_.toString) ::: List(
       "-o",
       exePath.toString
@@ -140,13 +139,7 @@ object LlvmNativeDriver {
     val linkModeFlag = if (isMac) "-dynamiclib" else "-shared"
     val windowsExportFlags = if (isWindows) List("-Wl,--export-all-symbols") else Nil
 
-    val linkCmd = List(
-      "zig",
-      "cc",
-      linkModeFlag,
-      "-Wno-override-module",
-      optFlag
-    ) ::: windowsExportFlags ::: List(
+    val linkCmd = linkerCommand(optFlag, Some(linkModeFlag)) ::: windowsExportFlags ::: List(
       moduleObj.toString,
     ) ::: runtimeObjs.map(_.toString) ::: List(
       "-o",
@@ -244,6 +237,7 @@ object LlvmNativeDriver {
       val runtimeObj = outDir.resolve(objectName)
       val compileRuntimeCmd =
         List("zig", "cc", "-c", "-Wno-override-module") :::
+          zigSafetyFlags :::
           picFlags :::
           List(optFlag, source.toString, "-o", runtimeObj.toString)
       val (rtExit, rtOutput) = exec(compileRuntimeCmd, outDir)
@@ -265,6 +259,7 @@ object LlvmNativeDriver {
     val moduleObj = outDir.resolve("module.o")
     val compileModuleCmd =
       List("zig", "cc", "-c", "-Wno-override-module") :::
+        zigSafetyFlags :::
         picFlags :::
         List(optFlag, modulePath.toString, "-o", moduleObj.toString)
 
@@ -307,5 +302,20 @@ object LlvmNativeDriver {
 
   private def picFlags: List[String] =
     if (isWindows) Nil else List("-fPIC")
+
+  /**
+    * Zig 0.15 on this host injects the UBSan runtime by default when compiling/linking C/Zig
+    * objects through `zig cc`. That is the wrong default for our native runtime build, and on
+    * macOS it breaks final linking for ordinary libc symbols. Disable it explicitly.
+    */
+  private def zigSafetyFlags: List[String] = List("-fno-sanitize=undefined")
+
+  private def linkerCommand(optFlag: String, linkModeFlag: Option[String] = None): List[String] = {
+    val base =
+      if (isMac) List("cc")
+      else List("zig", "cc", "-Wno-override-module") ::: zigSafetyFlags ::: List(optFlag)
+
+    base ::: linkModeFlag.toList
+  }
 
 }

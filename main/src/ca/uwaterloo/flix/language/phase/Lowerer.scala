@@ -312,7 +312,7 @@ object Lowerer {
     case CompilationTarget.LlvmWasm =>
       op match {
         case AtomicOp.Unary(sop) => isSuspendableIoOp(sop)
-        case AtomicOp.ChannelGet | AtomicOp.ChannelPut | AtomicOp.ChannelSelect | AtomicOp.ReentrantLockLock => true
+        case AtomicOp.ChannelGet | AtomicOp.ChannelPut | AtomicOp.ChannelSelect | AtomicOp.ReentrantLockLock | AtomicOp.ConditionAwait | AtomicOp.CyclicBarrierAwait | AtomicOp.CountDownLatchAwait | AtomicOp.SemaphoreAcquire => true
         case _ => false
       }
     case CompilationTarget.LlvmNative =>
@@ -333,6 +333,10 @@ object Lowerer {
         case AtomicOp.Unary(SemanticOp.IoOp.ProcessStdoutRead) => true
         case AtomicOp.Unary(SemanticOp.IoOp.ProcessStderrRead) => true
         case AtomicOp.ReentrantLockLock => true
+        case AtomicOp.ConditionAwait => true
+        case AtomicOp.CyclicBarrierAwait => true
+        case AtomicOp.CountDownLatchAwait => true
+        case AtomicOp.SemaphoreAcquire => true
         case _ => false
       }
     case _ => false

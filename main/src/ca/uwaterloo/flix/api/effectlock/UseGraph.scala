@@ -259,6 +259,45 @@ object UseGraph {
     case Expr.UnlockReentrantLock(exp, _, _, _) =>
       visitExp(exp)
 
+    case Expr.NewCondition(exp, _, _, _) =>
+      visitExp(exp)
+
+    case Expr.AwaitCondition(exp, _, _, _) =>
+      visitExp(exp)
+
+    case Expr.SignalCondition(exp, _, _, _) =>
+      visitExp(exp)
+
+    case Expr.SignalAllCondition(exp, _, _, _) =>
+      visitExp(exp)
+
+    case Expr.NewCyclicBarrier(exp, _, _, _) =>
+      visitExp(exp)
+
+    case Expr.AwaitCyclicBarrier(exp, _, _, _) =>
+      visitExp(exp)
+
+    case Expr.NewCountDownLatch(exp, _, _, _) =>
+      visitExp(exp)
+
+    case Expr.AwaitCountDownLatch(exp, _, _, _) =>
+      visitExp(exp)
+
+    case Expr.CountDownLatchCountDown(exp, _, _, _) =>
+      visitExp(exp)
+
+    case Expr.NewSemaphore(exp, _, _, _) =>
+      visitExp(exp)
+
+    case Expr.AcquireSemaphore(exp, _, _, _) =>
+      visitExp(exp)
+
+    case Expr.TryAcquireSemaphore(exp, _, _, _) =>
+      visitExp(exp)
+
+    case Expr.ReleaseSemaphore(exp, _, _, _) =>
+      visitExp(exp)
+
     case Expr.SelectChannel(selects, optExp, _, _, _) =>
       visitExps(selects.map(_.exp)) ++ visitExps(selects.map(_.chan)) ++ optExp.map(visitExp).getOrElse(ListMap.empty)
 

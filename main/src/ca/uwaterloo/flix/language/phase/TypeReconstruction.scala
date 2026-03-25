@@ -572,6 +572,62 @@ object TypeReconstruction {
       val e = visitExp(exp)
       TypedAst.Expr.UnlockReentrantLock(e, Type.Bool, subst(evar), loc)
 
+    case KindedAst.Expr.NewCondition(exp, evar, loc) =>
+      val e = visitExp(exp)
+      val tpe = Type.Cst(TypeConstructor.ConditionHandle, loc)
+      TypedAst.Expr.NewCondition(e, tpe, subst(evar), loc)
+
+    case KindedAst.Expr.AwaitCondition(exp, evar, loc) =>
+      val e = visitExp(exp)
+      TypedAst.Expr.AwaitCondition(e, Type.Int32, subst(evar), loc)
+
+    case KindedAst.Expr.SignalCondition(exp, evar, loc) =>
+      val e = visitExp(exp)
+      TypedAst.Expr.SignalCondition(e, Type.Bool, subst(evar), loc)
+
+    case KindedAst.Expr.SignalAllCondition(exp, evar, loc) =>
+      val e = visitExp(exp)
+      TypedAst.Expr.SignalAllCondition(e, Type.Bool, subst(evar), loc)
+
+    case KindedAst.Expr.NewCyclicBarrier(exp, evar, loc) =>
+      val e = visitExp(exp)
+      val tpe = Type.Cst(TypeConstructor.CyclicBarrierHandle, loc)
+      TypedAst.Expr.NewCyclicBarrier(e, tpe, subst(evar), loc)
+
+    case KindedAst.Expr.AwaitCyclicBarrier(exp, evar, loc) =>
+      val e = visitExp(exp)
+      TypedAst.Expr.AwaitCyclicBarrier(e, Type.Int32, subst(evar), loc)
+
+    case KindedAst.Expr.NewCountDownLatch(exp, evar, loc) =>
+      val e = visitExp(exp)
+      val tpe = Type.Cst(TypeConstructor.CountDownLatchHandle, loc)
+      TypedAst.Expr.NewCountDownLatch(e, tpe, subst(evar), loc)
+
+    case KindedAst.Expr.AwaitCountDownLatch(exp, evar, loc) =>
+      val e = visitExp(exp)
+      TypedAst.Expr.AwaitCountDownLatch(e, Type.Unit, subst(evar), loc)
+
+    case KindedAst.Expr.CountDownLatchCountDown(exp, evar, loc) =>
+      val e = visitExp(exp)
+      TypedAst.Expr.CountDownLatchCountDown(e, Type.Unit, subst(evar), loc)
+
+    case KindedAst.Expr.NewSemaphore(exp, evar, loc) =>
+      val e = visitExp(exp)
+      val tpe = Type.Cst(TypeConstructor.SemaphoreHandle, loc)
+      TypedAst.Expr.NewSemaphore(e, tpe, subst(evar), loc)
+
+    case KindedAst.Expr.AcquireSemaphore(exp, evar, loc) =>
+      val e = visitExp(exp)
+      TypedAst.Expr.AcquireSemaphore(e, Type.Unit, subst(evar), loc)
+
+    case KindedAst.Expr.TryAcquireSemaphore(exp, evar, loc) =>
+      val e = visitExp(exp)
+      TypedAst.Expr.TryAcquireSemaphore(e, Type.Bool, subst(evar), loc)
+
+    case KindedAst.Expr.ReleaseSemaphore(exp, evar, loc) =>
+      val e = visitExp(exp)
+      TypedAst.Expr.ReleaseSemaphore(e, Type.Unit, subst(evar), loc)
+
     case KindedAst.Expr.SelectChannel(rules, default, tvar, evar, loc) =>
       val rs = rules map {
         case KindedAst.SelectChannelRule(sym, chan, exp, ruleLoc) =>

@@ -393,7 +393,7 @@ object JvmLowerer {
       case Some((tpe, taskList)) =>
         val taskList1 = tpe match {
           case Void | AnyType | Unit | Bool | Char | Float32 | Float64 | BigDecimal | Int8 | Int16 |
-               Int32 | Int64 | BigInt | String | Regex | StringBuilderHandle | RegexMatcher | ChannelHandle | ReentrantLockHandle | Region | RecordEmpty | ExtensibleEmpty |
+               Int32 | Int64 | BigInt | String | Regex | StringBuilderHandle | RegexMatcher | ChannelHandle | ReentrantLockHandle | ConditionHandle | CyclicBarrierHandle | CountDownLatchHandle | SemaphoreHandle | Region | RecordEmpty | ExtensibleEmpty |
                Native(_) | Null => taskList
           case Array(elm) => taskList.enqueue(elm)
           case Lazy(elm) => taskList.enqueue(elm)

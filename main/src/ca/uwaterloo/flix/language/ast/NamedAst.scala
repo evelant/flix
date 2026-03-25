@@ -211,6 +211,32 @@ object NamedAst {
 
     case class UnlockReentrantLock(exp: Expr, loc: SourceLocation) extends Expr
 
+    case class NewCondition(exp: Expr, loc: SourceLocation) extends Expr
+
+    case class AwaitCondition(exp: Expr, loc: SourceLocation) extends Expr
+
+    case class SignalCondition(exp: Expr, loc: SourceLocation) extends Expr
+
+    case class SignalAllCondition(exp: Expr, loc: SourceLocation) extends Expr
+
+    case class NewCyclicBarrier(exp: Expr, loc: SourceLocation) extends Expr
+
+    case class AwaitCyclicBarrier(exp: Expr, loc: SourceLocation) extends Expr
+
+    case class NewCountDownLatch(exp: Expr, loc: SourceLocation) extends Expr
+
+    case class AwaitCountDownLatch(exp: Expr, loc: SourceLocation) extends Expr
+
+    case class CountDownLatchCountDown(exp: Expr, loc: SourceLocation) extends Expr
+
+    case class NewSemaphore(exp: Expr, loc: SourceLocation) extends Expr
+
+    case class AcquireSemaphore(exp: Expr, loc: SourceLocation) extends Expr
+
+    case class TryAcquireSemaphore(exp: Expr, loc: SourceLocation) extends Expr
+
+    case class ReleaseSemaphore(exp: Expr, loc: SourceLocation) extends Expr
+
     case class SelectChannel(rules: List[SelectChannelRule], default: Option[Expr], loc: SourceLocation) extends Expr
 
     case class Spawn(exp1: Expr, exp2: Expr, loc: SourceLocation) extends Expr

@@ -862,6 +862,10 @@ const BlockedNativeWaitKind = enum(u32) {
     channel_get = 11,
     channel_select = 12,
     reentrant_lock = 13,
+    condition_wait = 14,
+    cyclic_barrier = 15,
+    count_down_latch = 16,
+    semaphore = 17,
 };
 
 const FlixCtx = struct {
@@ -4011,7 +4015,38 @@ const ChannelWaiter = struct {
     susp_handle: i64,
 };
 
-const LockWaiter = ChannelWaiter;
+const LockWaiter = struct {
+    task_id: u64,
+    susp_handle: i64,
+    recursion: usize,
+    resume_payload: i64,
+};
+
+const ConditionWaiter = LockWaiter;
+
+const BarrierWaiter = struct {
+    task_id: u64,
+    susp_handle: i64,
+    generation: usize,
+    arrival_index: i32,
+};
+
+const CountDownLatchWaiter = struct {
+    task_id: u64,
+    susp_handle: i64,
+};
+
+const SemaphoreWaiter = struct {
+    task_id: u64,
+    susp_handle: i64,
+};
+
+const NativeConditionWaiter = struct {
+    mutex: RtMutex = .{},
+    cond: RtCondition = .{},
+    signaled: bool = false,
+    canceled: bool = false,
+};
 
 const NativeChannelSelectWaiter = struct {
     mutex: RtMutex = .{},
@@ -4065,6 +4100,39 @@ const ReentrantLockObj = struct {
     waiters_head: usize = 0,
 };
 
+const ConditionObj = struct {
+    lock: *ReentrantLockObj,
+    native_waiters: std.ArrayListUnmanaged(*NativeConditionWaiter) = .{},
+    waiters: std.ArrayListUnmanaged(ConditionWaiter) = .{},
+    waiters_head: usize = 0,
+};
+
+const CyclicBarrierObj = struct {
+    mutex: RtMutex = .{},
+    tripped: RtCondition = .{},
+    parties: usize,
+    waiting: usize = 0,
+    generation: usize = 0,
+    waiters: std.ArrayListUnmanaged(BarrierWaiter) = .{},
+    waiters_head: usize = 0,
+};
+
+const CountDownLatchObj = struct {
+    mutex: RtMutex = .{},
+    opened: RtCondition = .{},
+    count: usize,
+    waiters: std.ArrayListUnmanaged(CountDownLatchWaiter) = .{},
+    waiters_head: usize = 0,
+};
+
+const SemaphoreObj = struct {
+    mutex: RtMutex = .{},
+    available: RtCondition = .{},
+    permits: usize,
+    waiters: std.ArrayListUnmanaged(SemaphoreWaiter) = .{},
+    waiters_head: usize = 0,
+};
+
 // Internal (wasm-only) suspension tags for cooperative channel ops.
 const WasmChanEffSymId: i64 = -2;
 const WasmChanOpGet: i64 = 1;
@@ -4072,6 +4140,19 @@ const WasmChanOpPut: i64 = 2;
 const WasmChanOpSelect: i64 = 3;
 const WasmLockEffSymId: i64 = -4;
 const WasmLockOpAcquire: i64 = 1;
+const WasmConditionEffSymId: i64 = -5;
+const WasmConditionOpAwait: i64 = 1;
+const WasmBarrierEffSymId: i64 = -6;
+const WasmBarrierOpAwait: i64 = 1;
+const WasmCountDownLatchEffSymId: i64 = -7;
+const WasmCountDownLatchOpAwait: i64 = 1;
+const WasmSemaphoreEffSymId: i64 = -8;
+const WasmSemaphoreOpAcquire: i64 = 1;
+
+const ConditionAwaitOk: i32 = 0;
+const ConditionAwaitNotOwner: i32 = 1;
+const ConditionAwaitCancelled: i32 = 2;
+const BarrierAwaitCancelled: i32 = -1;
 
 // Registered live channels (GC root source for queued payloads).
 var g_channel_registry_initialized: bool = false;
@@ -4227,6 +4308,94 @@ fn channelQueuePop(list: *std.ArrayListUnmanaged(ChannelWaiter), head: *usize) ?
         const rem = list.items.len - head.*;
         if (rem > 0) {
             std.mem.copyForwards(ChannelWaiter, list.items[0..rem], list.items[head.* .. list.items.len]);
+        }
+        list.items.len = rem;
+        head.* = 0;
+    }
+
+    return w;
+}
+
+fn lockQueueAppend(list: *std.ArrayListUnmanaged(LockWaiter), w: LockWaiter) void {
+    list.append(rt_alloc, w) catch @panic("oom");
+}
+
+fn lockQueueRequeue(list: *std.ArrayListUnmanaged(LockWaiter), waiter: LockWaiter) void {
+    list.append(rt_alloc, waiter) catch @panic("oom");
+}
+
+fn lockQueuePop(list: *std.ArrayListUnmanaged(LockWaiter), head: *usize) ?LockWaiter {
+    if (head.* >= list.items.len) return null;
+    const w = list.items[head.*];
+    head.* += 1;
+
+    if (head.* > 64 and head.* * 2 >= list.items.len) {
+        const rem = list.items.len - head.*;
+        if (rem > 0) {
+            std.mem.copyForwards(LockWaiter, list.items[0..rem], list.items[head.* .. list.items.len]);
+        }
+        list.items.len = rem;
+        head.* = 0;
+    }
+
+    return w;
+}
+
+fn barrierQueueAppend(list: *std.ArrayListUnmanaged(BarrierWaiter), w: BarrierWaiter) void {
+    list.append(rt_alloc, w) catch @panic("oom");
+}
+
+fn barrierQueuePop(list: *std.ArrayListUnmanaged(BarrierWaiter), head: *usize) ?BarrierWaiter {
+    if (head.* >= list.items.len) return null;
+    const w = list.items[head.*];
+    head.* += 1;
+
+    if (head.* > 64 and head.* * 2 >= list.items.len) {
+        const rem = list.items.len - head.*;
+        if (rem > 0) {
+            std.mem.copyForwards(BarrierWaiter, list.items[0..rem], list.items[head.* .. list.items.len]);
+        }
+        list.items.len = rem;
+        head.* = 0;
+    }
+
+    return w;
+}
+
+fn countDownLatchQueueAppend(list: *std.ArrayListUnmanaged(CountDownLatchWaiter), w: CountDownLatchWaiter) void {
+    list.append(rt_alloc, w) catch @panic("oom");
+}
+
+fn countDownLatchQueuePop(list: *std.ArrayListUnmanaged(CountDownLatchWaiter), head: *usize) ?CountDownLatchWaiter {
+    if (head.* >= list.items.len) return null;
+    const w = list.items[head.*];
+    head.* += 1;
+
+    if (head.* > 64 and head.* * 2 >= list.items.len) {
+        const rem = list.items.len - head.*;
+        if (rem > 0) {
+            std.mem.copyForwards(CountDownLatchWaiter, list.items[0..rem], list.items[head.* .. list.items.len]);
+        }
+        list.items.len = rem;
+        head.* = 0;
+    }
+
+    return w;
+}
+
+fn semaphoreQueueAppend(list: *std.ArrayListUnmanaged(SemaphoreWaiter), w: SemaphoreWaiter) void {
+    list.append(rt_alloc, w) catch @panic("oom");
+}
+
+fn semaphoreQueuePop(list: *std.ArrayListUnmanaged(SemaphoreWaiter), head: *usize) ?SemaphoreWaiter {
+    if (head.* >= list.items.len) return null;
+    const w = list.items[head.*];
+    head.* += 1;
+
+    if (head.* > 64 and head.* * 2 >= list.items.len) {
+        const rem = list.items.len - head.*;
+        if (rem > 0) {
+            std.mem.copyForwards(SemaphoreWaiter, list.items[0..rem], list.items[head.* .. list.items.len]);
         }
         list.items.len = rem;
         head.* = 0;
@@ -4609,7 +4778,7 @@ fn wasmChannelPopValidSelectWaiter(ctx_rep: *exports_flix_runtime_runtime_ctx_t,
     }
 }
 
-fn wasmResumeTaskOk(ctx_rep: *exports_flix_runtime_runtime_ctx_t, w: ChannelWaiter, resume_payload: i64) void {
+fn wasmResumeTaskOk(ctx_rep: *exports_flix_runtime_runtime_ctx_t, w: anytype, resume_payload: i64) void {
     const task_ptr = ctx_rep.tasks.getPtr(w.task_id) orelse return;
     switch (task_ptr.state) {
         .Blocked => |st| {
@@ -4855,7 +5024,7 @@ fn reentrantLockTryAcquireLocked(lock_obj: *ReentrantLockObj, owner_token: u64) 
 
 fn wasmLockPopValidWaiter(ctx_rep: *exports_flix_runtime_runtime_ctx_t, lock_obj: *ReentrantLockObj) ?LockWaiter {
     while (true) {
-        const w = channelQueuePop(&lock_obj.waiters, &lock_obj.waiters_head) orelse return null;
+        const w = lockQueuePop(&lock_obj.waiters, &lock_obj.waiters_head) orelse return null;
         const task_ptr = ctx_rep.tasks.getPtr(w.task_id) orelse continue;
         switch (task_ptr.state) {
             .Blocked => |st| {
@@ -4890,7 +5059,7 @@ fn wasmLockRegisterWaiter(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id:
 
     const lock_ptr = ptrFromPayload(slots[5]);
     const lock_obj: *ReentrantLockObj = @ptrCast(@alignCast(lock_ptr));
-    channelQueueAppend(&lock_obj.waiters, .{ .task_id = task_id, .susp_handle = susp_handle });
+    lockQueueAppend(&lock_obj.waiters, .{ .task_id = task_id, .susp_handle = susp_handle, .recursion = 1, .resume_payload = 0 });
 }
 
 fn isWasmLockSuspensionHandle(ctx_rep: *exports_flix_runtime_runtime_ctx_t, susp_handle: i64) bool {
@@ -4916,6 +5085,705 @@ fn wasmCancelBlockedLockTasksForRegion(ctx_rep: *exports_flix_runtime_runtime_ct
             else => {},
         }
     }
+}
+
+fn wasmLockGrantToWaiterLocked(ctx_rep: *exports_flix_runtime_runtime_ctx_t, lock_obj: *ReentrantLockObj, waiter: LockWaiter) void {
+    lock_obj.owner_token = waiter.task_id;
+    lock_obj.recursion = waiter.recursion;
+    wasmResumeTaskOk(ctx_rep, waiter, waiter.resume_payload);
+}
+
+fn wasmLockTryWakeNextWaiterLocked(ctx_rep: *exports_flix_runtime_runtime_ctx_t, lock_obj: *ReentrantLockObj) bool {
+    if (lock_obj.owner_token != 0) return false;
+    while (wasmLockPopValidWaiter(ctx_rep, lock_obj)) |waiter| {
+        wasmLockGrantToWaiterLocked(ctx_rep, lock_obj, waiter);
+        return true;
+    }
+    return false;
+}
+
+fn wasmLockReleaseLocked(ctx_rep: *exports_flix_runtime_runtime_ctx_t, lock_obj: *ReentrantLockObj) void {
+    lock_obj.owner_token = 0;
+    if (!wasmLockTryWakeNextWaiterLocked(ctx_rep, lock_obj)) {
+        lock_obj.available.signal();
+    }
+}
+
+fn conditionInit(lock_ptr: *anyopaque) *ConditionObj {
+    const obj = rt_alloc.create(ConditionObj) catch @panic("oom");
+    obj.* = .{ .lock = @ptrCast(@alignCast(lock_ptr)) };
+    return obj;
+}
+
+fn nativeConditionWaiterSignal(waiter: *NativeConditionWaiter, canceled: bool) void {
+    waiter.mutex.lock();
+    if (canceled) {
+        waiter.canceled = true;
+    } else {
+        waiter.signaled = true;
+    }
+    waiter.cond.signal();
+    waiter.mutex.unlock();
+}
+
+fn nativeConditionWaiterCancel(wait_ptr: *anyopaque) void {
+    nativeConditionWaiterSignal(@ptrCast(@alignCast(wait_ptr)), true);
+}
+
+fn nativeConditionWaiterAwait(waiter: *NativeConditionWaiter, ctx_opt: ?*FlixCtx) bool {
+    waiter.mutex.lock();
+    while (!waiter.signaled and !waiter.canceled) {
+        if (ctx_opt) |ctx| {
+            if (flix_cancel_requested(@ptrCast(ctx))) {
+                waiter.canceled = true;
+                break;
+            }
+            ctxSetBlockedWait(ctx, .condition_wait, waiter);
+            ctx.blocked.store(true, .release);
+        }
+        waiter.cond.wait(&waiter.mutex);
+        waiter.mutex.unlock();
+        if (ctx_opt) |ctx| {
+            ctxSetBlockedWait(ctx, .none, null);
+            pollcheckCooperate(ctx);
+            ctx.blocked.store(false, .release);
+            if (flix_cancel_requested(@ptrCast(ctx))) {
+                waiter.canceled = true;
+            }
+        }
+        waiter.mutex.lock();
+    }
+    const canceled = waiter.canceled;
+    waiter.mutex.unlock();
+    return canceled;
+}
+
+fn conditionRemoveNativeWaiterLocked(cond_obj: *ConditionObj, waiter: *NativeConditionWaiter) void {
+    var i: usize = 0;
+    while (i < cond_obj.native_waiters.items.len) : (i += 1) {
+        if (cond_obj.native_waiters.items[i] == waiter) {
+            _ = cond_obj.native_waiters.swapRemove(i);
+            return;
+        }
+    }
+}
+
+fn nativeConditionSignalOneLocked(cond_obj: *ConditionObj) void {
+    if (cond_obj.native_waiters.items.len == 0) return;
+    const waiter = cond_obj.native_waiters.swapRemove(0);
+    nativeConditionWaiterSignal(waiter, false);
+}
+
+fn nativeConditionSignalAllLocked(cond_obj: *ConditionObj) void {
+    if (cond_obj.native_waiters.items.len == 0) return;
+    const waiters = cond_obj.native_waiters.items;
+    cond_obj.native_waiters.clearRetainingCapacity();
+    for (waiters) |waiter| {
+        nativeConditionWaiterSignal(waiter, false);
+    }
+}
+
+fn allocWasmConditionSuspension(condition_bits: i64, recursion: usize) *anyopaque {
+    const argc: usize = 2;
+    const slots_total: usize = 5 + argc;
+    const size_bytes: usize = @sizeOf(FlixObj) + slots_total * @sizeOf(i64);
+    const mem = gcAllocBytes(size_bytes, &flix_ti_suspension);
+    const slots: [*]i64 = objPayloadSlots(mem);
+
+    slots[0] = WasmConditionEffSymId;
+    slots[1] = WasmConditionOpAwait;
+    slots[2] = 0;
+    slots[3] = 0;
+    slots[4] = 2;
+    slots[5] = condition_bits;
+    slots[6] = @intCast(recursion);
+    return mem;
+}
+
+fn isWasmConditionSuspensionHandle(ctx_rep: *exports_flix_runtime_runtime_ctx_t, susp_handle: i64) bool {
+    const susp_ptr = flix_handle_get(ctx_rep.flix_ctx, susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    return slots[0] == WasmConditionEffSymId and slots[1] == WasmConditionOpAwait;
+}
+
+fn wasmConditionRegisterWaiter(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, susp_handle: i64) void {
+    const susp_ptr = flix_handle_get(ctx_rep.flix_ctx, susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    if (slots[0] != WasmConditionEffSymId or slots[1] != WasmConditionOpAwait or slots[4] != 2) return;
+
+    const condition_ptr = ptrFromPayload(slots[5]);
+    const cond_obj: *ConditionObj = @ptrCast(@alignCast(condition_ptr));
+    const recursion: usize = @intCast(slots[6]);
+    cond_obj.lock.mutex.lock();
+    defer cond_obj.lock.mutex.unlock();
+    lockQueueAppend(&cond_obj.waiters, .{ .task_id = task_id, .susp_handle = susp_handle, .recursion = recursion, .resume_payload = ConditionAwaitOk });
+}
+
+fn wasmConditionPopValidWaiter(ctx_rep: *exports_flix_runtime_runtime_ctx_t, cond_obj: *ConditionObj) ?ConditionWaiter {
+    while (true) {
+        const waiter = lockQueuePop(&cond_obj.waiters, &cond_obj.waiters_head) orelse return null;
+        const task_ptr = ctx_rep.tasks.getPtr(waiter.task_id) orelse continue;
+        switch (task_ptr.state) {
+            .Blocked => |st| {
+                if (st.susp_handle != waiter.susp_handle) continue;
+                return waiter;
+            },
+            else => continue,
+        }
+    }
+}
+
+fn conditionRemoveQueuedWaiterLocked(list: *std.ArrayListUnmanaged(ConditionWaiter), head: usize, task_id: u64, susp_handle: i64) bool {
+    var i: usize = head;
+    while (i < list.items.len) : (i += 1) {
+        const waiter = list.items[i];
+        if (waiter.task_id == task_id and waiter.susp_handle == susp_handle) {
+            _ = list.swapRemove(i);
+            return true;
+        }
+    }
+    return false;
+}
+
+fn wasmConditionRequeueOneLocked(ctx_rep: *exports_flix_runtime_runtime_ctx_t, cond_obj: *ConditionObj, resume_payload: i64) void {
+    if (wasmConditionPopValidWaiter(ctx_rep, cond_obj)) |waiter| {
+        lockQueueAppend(&cond_obj.lock.waiters, .{
+            .task_id = waiter.task_id,
+            .susp_handle = waiter.susp_handle,
+            .recursion = waiter.recursion,
+            .resume_payload = resume_payload,
+        });
+    }
+}
+
+fn wasmConditionRequeueAllLocked(ctx_rep: *exports_flix_runtime_runtime_ctx_t, cond_obj: *ConditionObj, resume_payload: i64) void {
+    while (wasmConditionPopValidWaiter(ctx_rep, cond_obj)) |waiter| {
+        lockQueueAppend(&cond_obj.lock.waiters, .{
+            .task_id = waiter.task_id,
+            .susp_handle = waiter.susp_handle,
+            .recursion = waiter.recursion,
+            .resume_payload = resume_payload,
+        });
+    }
+}
+
+fn wasmCancelBlockedConditionTasksForRegion(ctx_rep: *exports_flix_runtime_runtime_ctx_t, target: *FlixRegion) void {
+    var it = ctx_rep.tasks.iterator();
+    while (it.next()) |entry| {
+        const task_ptr = entry.value_ptr;
+        if (!regionIsSameOrDescendant(task_ptr.region, target)) continue;
+
+        switch (task_ptr.state) {
+            .Blocked => |st| {
+                if (!isWasmConditionSuspensionHandle(ctx_rep, st.susp_handle)) continue;
+                const susp_ptr = flix_handle_get(ctx_rep.flix_ctx, st.susp_handle);
+                const slots: [*]i64 = objPayloadSlots(susp_ptr);
+                const condition_ptr = ptrFromPayload(slots[5]);
+                const cond_obj: *ConditionObj = @ptrCast(@alignCast(condition_ptr));
+                const recursion: usize = @intCast(slots[6]);
+                cond_obj.lock.mutex.lock();
+                defer cond_obj.lock.mutex.unlock();
+                _ = conditionRemoveQueuedWaiterLocked(&cond_obj.waiters, cond_obj.waiters_head, entry.key_ptr.*, st.susp_handle);
+                lockQueueAppend(&cond_obj.lock.waiters, .{
+                    .task_id = entry.key_ptr.*,
+                    .susp_handle = st.susp_handle,
+                    .recursion = recursion,
+                    .resume_payload = ConditionAwaitCancelled,
+                });
+                _ = wasmLockTryWakeNextWaiterLocked(ctx_rep, cond_obj.lock);
+            },
+            else => {},
+        }
+    }
+}
+
+fn cyclicBarrierInit(parties: usize) *CyclicBarrierObj {
+    const obj = rt_alloc.create(CyclicBarrierObj) catch @panic("oom");
+    obj.* = .{ .parties = parties };
+    return obj;
+}
+
+fn nativeCyclicBarrierBroadcast(wait_ptr: *anyopaque) void {
+    const barrier_obj: *CyclicBarrierObj = @ptrCast(@alignCast(wait_ptr));
+    barrier_obj.mutex.lock();
+    barrier_obj.tripped.broadcast();
+    barrier_obj.mutex.unlock();
+}
+
+fn nativeCyclicBarrierCancelLocked(barrier_obj: *CyclicBarrierObj, generation0: usize) void {
+    if (barrier_obj.generation == generation0 and barrier_obj.waiting > 0) {
+        barrier_obj.waiting -= 1;
+        barrier_obj.tripped.broadcast();
+    }
+}
+
+fn allocWasmBarrierSuspension(barrier_bits: i64, generation: usize, arrival_index: i32) *anyopaque {
+    const argc: usize = 3;
+    const slots_total: usize = 5 + argc;
+    const size_bytes: usize = @sizeOf(FlixObj) + slots_total * @sizeOf(i64);
+    const mem = gcAllocBytes(size_bytes, &flix_ti_suspension);
+    const slots: [*]i64 = objPayloadSlots(mem);
+
+    slots[0] = WasmBarrierEffSymId;
+    slots[1] = WasmBarrierOpAwait;
+    slots[2] = 0;
+    slots[3] = 0;
+    slots[4] = 3;
+    slots[5] = barrier_bits;
+    slots[6] = @intCast(generation);
+    slots[7] = arrival_index;
+    return mem;
+}
+
+fn isWasmBarrierSuspensionHandle(ctx_rep: *exports_flix_runtime_runtime_ctx_t, susp_handle: i64) bool {
+    const susp_ptr = flix_handle_get(ctx_rep.flix_ctx, susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    return slots[0] == WasmBarrierEffSymId and slots[1] == WasmBarrierOpAwait;
+}
+
+fn wasmBarrierRegisterWaiter(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, susp_handle: i64) void {
+    const susp_ptr = flix_handle_get(ctx_rep.flix_ctx, susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    if (slots[0] != WasmBarrierEffSymId or slots[1] != WasmBarrierOpAwait or slots[4] != 3) return;
+
+    const barrier_ptr = ptrFromPayload(slots[5]);
+    const barrier_obj: *CyclicBarrierObj = @ptrCast(@alignCast(barrier_ptr));
+    const generation: usize = @intCast(slots[6]);
+    const arrival_index: i32 = @intCast(slots[7]);
+
+    barrier_obj.mutex.lock();
+    defer barrier_obj.mutex.unlock();
+    barrierQueueAppend(&barrier_obj.waiters, .{
+        .task_id = task_id,
+        .susp_handle = susp_handle,
+        .generation = generation,
+        .arrival_index = arrival_index,
+    });
+}
+
+fn wasmBarrierPopValidWaiter(ctx_rep: *exports_flix_runtime_runtime_ctx_t, barrier_obj: *CyclicBarrierObj, generation0: usize) ?BarrierWaiter {
+    while (true) {
+        const waiter = barrierQueuePop(&barrier_obj.waiters, &barrier_obj.waiters_head) orelse return null;
+        if (waiter.generation != generation0) continue;
+        const task_ptr = ctx_rep.tasks.getPtr(waiter.task_id) orelse continue;
+        switch (task_ptr.state) {
+            .Blocked => |st| {
+                if (st.susp_handle != waiter.susp_handle) continue;
+                return waiter;
+            },
+            else => continue,
+        }
+    }
+}
+
+fn barrierRemoveQueuedWaiterLocked(list: *std.ArrayListUnmanaged(BarrierWaiter), head: usize, task_id: u64, susp_handle: i64, generation: usize) bool {
+    var i: usize = head;
+    while (i < list.items.len) : (i += 1) {
+        const waiter = list.items[i];
+        if (waiter.task_id == task_id and waiter.susp_handle == susp_handle and waiter.generation == generation) {
+            _ = list.swapRemove(i);
+            return true;
+        }
+    }
+    return false;
+}
+
+fn wasmCancelBlockedBarrierTasksForRegion(ctx_rep: *exports_flix_runtime_runtime_ctx_t, target: *FlixRegion) void {
+    var it = ctx_rep.tasks.iterator();
+    while (it.next()) |entry| {
+        const task_id = entry.key_ptr.*;
+        const task_ptr = entry.value_ptr;
+        if (!regionIsSameOrDescendant(task_ptr.region, target)) continue;
+
+        switch (task_ptr.state) {
+            .Blocked => |st| {
+                if (!isWasmBarrierSuspensionHandle(ctx_rep, st.susp_handle)) continue;
+                const susp_ptr = flix_handle_get(ctx_rep.flix_ctx, st.susp_handle);
+                const slots: [*]i64 = objPayloadSlots(susp_ptr);
+                const barrier_ptr = ptrFromPayload(slots[5]);
+                const barrier_obj: *CyclicBarrierObj = @ptrCast(@alignCast(barrier_ptr));
+                const generation: usize = @intCast(slots[6]);
+
+                barrier_obj.mutex.lock();
+                defer barrier_obj.mutex.unlock();
+
+                if (!barrierRemoveQueuedWaiterLocked(&barrier_obj.waiters, barrier_obj.waiters_head, task_id, st.susp_handle, generation)) continue;
+                if (barrier_obj.generation == generation and barrier_obj.waiting > 0) {
+                    barrier_obj.waiting -= 1;
+                }
+
+                const resume_handle = flix_handle_new_i64(ctx_rep.flix_ctx, BarrierAwaitCancelled);
+                task_ptr.state = .{ .ReadyResumeOk = .{ .susp_handle = st.susp_handle, .resume_handle = resume_handle } };
+                taskQueuePush(ctx_rep, task_id);
+            },
+            else => {},
+        }
+    }
+}
+
+fn countDownLatchInit(count: usize) *CountDownLatchObj {
+    const obj = rt_alloc.create(CountDownLatchObj) catch @panic("oom");
+    obj.* = .{ .count = count };
+    return obj;
+}
+
+fn semaphoreInit(permits: usize) *SemaphoreObj {
+    const obj = rt_alloc.create(SemaphoreObj) catch @panic("oom");
+    obj.* = .{ .permits = permits };
+    return obj;
+}
+
+fn nativeCountDownLatchBroadcast(wait_ptr: *anyopaque) void {
+    const latch_obj: *CountDownLatchObj = @ptrCast(@alignCast(wait_ptr));
+    latch_obj.mutex.lock();
+    latch_obj.opened.broadcast();
+    latch_obj.mutex.unlock();
+}
+
+fn nativeSemaphoreBroadcast(wait_ptr: *anyopaque) void {
+    const sem_obj: *SemaphoreObj = @ptrCast(@alignCast(wait_ptr));
+    sem_obj.mutex.lock();
+    sem_obj.available.broadcast();
+    sem_obj.mutex.unlock();
+}
+
+fn allocWasmCountDownLatchSuspension(latch_bits: i64) *anyopaque {
+    const argc: usize = 1;
+    const slots_total: usize = 5 + argc;
+    const size_bytes: usize = @sizeOf(FlixObj) + slots_total * @sizeOf(i64);
+    const mem = gcAllocBytes(size_bytes, &flix_ti_suspension);
+    const slots: [*]i64 = objPayloadSlots(mem);
+
+    slots[0] = WasmCountDownLatchEffSymId;
+    slots[1] = WasmCountDownLatchOpAwait;
+    slots[2] = 0;
+    slots[3] = 0;
+    slots[4] = 1;
+    slots[5] = latch_bits;
+    return mem;
+}
+
+fn isWasmCountDownLatchSuspensionHandle(ctx_rep: *exports_flix_runtime_runtime_ctx_t, susp_handle: i64) bool {
+    const susp_ptr = flix_handle_get(ctx_rep.flix_ctx, susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    return slots[0] == WasmCountDownLatchEffSymId and slots[1] == WasmCountDownLatchOpAwait;
+}
+
+fn allocWasmSemaphoreSuspension(sem_bits: i64) *anyopaque {
+    const argc: usize = 1;
+    const slots_total: usize = 5 + argc;
+    const size_bytes: usize = @sizeOf(FlixObj) + slots_total * @sizeOf(i64);
+    const mem = gcAllocBytes(size_bytes, &flix_ti_suspension);
+    const slots: [*]i64 = objPayloadSlots(mem);
+
+    slots[0] = WasmSemaphoreEffSymId;
+    slots[1] = WasmSemaphoreOpAcquire;
+    slots[2] = 0;
+    slots[3] = 0;
+    slots[4] = 1;
+    slots[5] = sem_bits;
+    return mem;
+}
+
+fn isWasmSemaphoreSuspensionHandle(ctx_rep: *exports_flix_runtime_runtime_ctx_t, susp_handle: i64) bool {
+    const susp_ptr = flix_handle_get(ctx_rep.flix_ctx, susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    return slots[0] == WasmSemaphoreEffSymId and slots[1] == WasmSemaphoreOpAcquire;
+}
+
+fn wasmSemaphoreRegisterWaiter(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, susp_handle: i64) void {
+    const susp_ptr = flix_handle_get(ctx_rep.flix_ctx, susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    if (slots[0] != WasmSemaphoreEffSymId or slots[1] != WasmSemaphoreOpAcquire or slots[4] != 1) return;
+
+    const sem_ptr = ptrFromPayload(slots[5]);
+    const sem_obj: *SemaphoreObj = @ptrCast(@alignCast(sem_ptr));
+    sem_obj.mutex.lock();
+    defer sem_obj.mutex.unlock();
+    semaphoreQueueAppend(&sem_obj.waiters, .{ .task_id = task_id, .susp_handle = susp_handle });
+}
+
+fn wasmSemaphorePopValidWaiter(ctx_rep: *exports_flix_runtime_runtime_ctx_t, sem_obj: *SemaphoreObj) ?SemaphoreWaiter {
+    while (true) {
+        const waiter = semaphoreQueuePop(&sem_obj.waiters, &sem_obj.waiters_head) orelse return null;
+        const task_ptr = ctx_rep.tasks.getPtr(waiter.task_id) orelse continue;
+        switch (task_ptr.state) {
+            .Blocked => |st| {
+                if (st.susp_handle != waiter.susp_handle) continue;
+                return waiter;
+            },
+            else => continue,
+        }
+    }
+}
+
+fn semaphoreRemoveQueuedWaiterLocked(list: *std.ArrayListUnmanaged(SemaphoreWaiter), head: usize, task_id: u64, susp_handle: i64) bool {
+    var i: usize = head;
+    while (i < list.items.len) : (i += 1) {
+        const waiter = list.items[i];
+        if (waiter.task_id == task_id and waiter.susp_handle == susp_handle) {
+            _ = list.swapRemove(i);
+            return true;
+        }
+    }
+    return false;
+}
+
+fn wasmSemaphoreTryWakeOneLocked(ctx_rep: *exports_flix_runtime_runtime_ctx_t, sem_obj: *SemaphoreObj) bool {
+    while (wasmSemaphorePopValidWaiter(ctx_rep, sem_obj)) |waiter| {
+        wasmResumeTaskOk(ctx_rep, waiter, 0);
+        return true;
+    }
+    return false;
+}
+
+fn wasmCancelBlockedSemaphoreTasksForRegion(ctx_rep: *exports_flix_runtime_runtime_ctx_t, target: *FlixRegion) void {
+    var it = ctx_rep.tasks.iterator();
+    while (it.next()) |entry| {
+        const task_id = entry.key_ptr.*;
+        const task_ptr = entry.value_ptr;
+        if (!regionIsSameOrDescendant(task_ptr.region, target)) continue;
+
+        switch (task_ptr.state) {
+            .Blocked => |st| {
+                if (!isWasmSemaphoreSuspensionHandle(ctx_rep, st.susp_handle)) continue;
+                const susp_ptr = flix_handle_get(ctx_rep.flix_ctx, st.susp_handle);
+                const slots: [*]i64 = objPayloadSlots(susp_ptr);
+                const sem_ptr = ptrFromPayload(slots[5]);
+                const sem_obj: *SemaphoreObj = @ptrCast(@alignCast(sem_ptr));
+
+                sem_obj.mutex.lock();
+                defer sem_obj.mutex.unlock();
+
+                if (!semaphoreRemoveQueuedWaiterLocked(&sem_obj.waiters, sem_obj.waiters_head, task_id, st.susp_handle)) continue;
+                const resume_handle = flix_handle_new_i64(ctx_rep.flix_ctx, 0);
+                task_ptr.state = .{ .ReadyResumeOk = .{ .susp_handle = st.susp_handle, .resume_handle = resume_handle } };
+                taskQueuePush(ctx_rep, task_id);
+            },
+            else => {},
+        }
+    }
+}
+
+fn wasmCountDownLatchRegisterWaiter(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, susp_handle: i64) void {
+    const susp_ptr = flix_handle_get(ctx_rep.flix_ctx, susp_handle);
+    const slots: [*]i64 = objPayloadSlots(susp_ptr);
+    if (slots[0] != WasmCountDownLatchEffSymId or slots[1] != WasmCountDownLatchOpAwait or slots[4] != 1) return;
+
+    const latch_ptr = ptrFromPayload(slots[5]);
+    const latch_obj: *CountDownLatchObj = @ptrCast(@alignCast(latch_ptr));
+    latch_obj.mutex.lock();
+    defer latch_obj.mutex.unlock();
+    countDownLatchQueueAppend(&latch_obj.waiters, .{ .task_id = task_id, .susp_handle = susp_handle });
+}
+
+fn wasmCountDownLatchPopValidWaiter(ctx_rep: *exports_flix_runtime_runtime_ctx_t, latch_obj: *CountDownLatchObj) ?CountDownLatchWaiter {
+    while (true) {
+        const waiter = countDownLatchQueuePop(&latch_obj.waiters, &latch_obj.waiters_head) orelse return null;
+        const task_ptr = ctx_rep.tasks.getPtr(waiter.task_id) orelse continue;
+        switch (task_ptr.state) {
+            .Blocked => |st| {
+                if (st.susp_handle != waiter.susp_handle) continue;
+                return waiter;
+            },
+            else => continue,
+        }
+    }
+}
+
+fn countDownLatchRemoveQueuedWaiterLocked(list: *std.ArrayListUnmanaged(CountDownLatchWaiter), head: usize, task_id: u64, susp_handle: i64) bool {
+    var i: usize = head;
+    while (i < list.items.len) : (i += 1) {
+        const waiter = list.items[i];
+        if (waiter.task_id == task_id and waiter.susp_handle == susp_handle) {
+            _ = list.swapRemove(i);
+            return true;
+        }
+    }
+    return false;
+}
+
+fn wasmCountDownLatchWakeAllLocked(ctx_rep: *exports_flix_runtime_runtime_ctx_t, latch_obj: *CountDownLatchObj) void {
+    while (wasmCountDownLatchPopValidWaiter(ctx_rep, latch_obj)) |waiter| {
+        wasmResumeTaskOk(ctx_rep, waiter, 0);
+    }
+}
+
+fn wasmCancelBlockedCountDownLatchTasksForRegion(ctx_rep: *exports_flix_runtime_runtime_ctx_t, target: *FlixRegion) void {
+    var it = ctx_rep.tasks.iterator();
+    while (it.next()) |entry| {
+        const task_id = entry.key_ptr.*;
+        const task_ptr = entry.value_ptr;
+        if (!regionIsSameOrDescendant(task_ptr.region, target)) continue;
+
+        switch (task_ptr.state) {
+            .Blocked => |st| {
+                if (!isWasmCountDownLatchSuspensionHandle(ctx_rep, st.susp_handle)) continue;
+                const susp_ptr = flix_handle_get(ctx_rep.flix_ctx, st.susp_handle);
+                const slots: [*]i64 = objPayloadSlots(susp_ptr);
+                const latch_ptr = ptrFromPayload(slots[5]);
+                const latch_obj: *CountDownLatchObj = @ptrCast(@alignCast(latch_ptr));
+
+                latch_obj.mutex.lock();
+                defer latch_obj.mutex.unlock();
+
+                if (!countDownLatchRemoveQueuedWaiterLocked(&latch_obj.waiters, latch_obj.waiters_head, task_id, st.susp_handle)) continue;
+                const resume_handle = flix_handle_new_i64(ctx_rep.flix_ctx, 0);
+                task_ptr.state = .{ .ReadyResumeOk = .{ .susp_handle = st.susp_handle, .resume_handle = resume_handle } };
+                taskQueuePush(ctx_rep, task_id);
+            },
+            else => {},
+        }
+    }
+}
+
+export fn flix_count_down_latch_new(count0: i32) ?*anyopaque {
+    if (count0 < 0) return null;
+    return countDownLatchInit(@intCast(count0));
+}
+
+export fn flix_count_down_latch_count_down(latch_ptr: *anyopaque) i64 {
+    const latch_obj: *CountDownLatchObj = @ptrCast(@alignCast(latch_ptr));
+    latch_obj.mutex.lock();
+    defer latch_obj.mutex.unlock();
+
+    if (latch_obj.count == 0) return 0;
+    latch_obj.count -= 1;
+    if (latch_obj.count == 0) {
+        if (is_wasm) {
+            const ctx_rep = current_wit_ctx orelse @panic("flix_count_down_latch_count_down: missing wasm WIT context");
+            wasmCountDownLatchWakeAllLocked(ctx_rep, latch_obj);
+        } else {
+            latch_obj.opened.broadcast();
+        }
+    }
+    return 0;
+}
+
+export fn flix_count_down_latch_await(latch_ptr: *anyopaque) i64 {
+    const latch_obj: *CountDownLatchObj = @ptrCast(@alignCast(latch_ptr));
+    const ctx_opt = current_ctx;
+    latch_obj.mutex.lock();
+    defer latch_obj.mutex.unlock();
+
+    while (latch_obj.count > 0) {
+        if (ctx_opt) |ctx| {
+            if (flix_cancel_requested(@ptrCast(ctx))) return 0;
+            ctxSetBlockedWait(ctx, .count_down_latch, latch_ptr);
+            ctx.blocked.store(true, .release);
+        }
+        latch_obj.opened.wait(&latch_obj.mutex);
+        latch_obj.mutex.unlock();
+        if (ctx_opt) |ctx| {
+            ctxSetBlockedWait(ctx, .none, null);
+            pollcheckCooperate(ctx);
+            ctx.blocked.store(false, .release);
+        }
+        latch_obj.mutex.lock();
+        if (ctx_opt) |ctx| {
+            if (flix_cancel_requested(@ptrCast(ctx))) return 0;
+        }
+    }
+    return 0;
+}
+
+export fn flix_count_down_latch_await_resumable(ctx: *anyopaque, latch_ptr: *anyopaque) FlixResult {
+    _ = ctx;
+    if (!is_wasm) {
+        _ = flix_count_down_latch_await(latch_ptr);
+        return FlixResult{ .tag = RESULT_TAG_VALUE, .payload = 0 };
+    }
+
+    const latch_obj: *CountDownLatchObj = @ptrCast(@alignCast(latch_ptr));
+    latch_obj.mutex.lock();
+    defer latch_obj.mutex.unlock();
+
+    if (latch_obj.count == 0) {
+        return FlixResult{ .tag = RESULT_TAG_VALUE, .payload = 0 };
+    }
+
+    const susp_ptr = allocWasmCountDownLatchSuspension(payloadFromPtr(latch_ptr));
+    return FlixResult{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
+}
+
+export fn flix_semaphore_new(permits0: i32) ?*anyopaque {
+    if (permits0 < 0) return null;
+    return semaphoreInit(@intCast(permits0));
+}
+
+export fn flix_semaphore_try_acquire(sem_ptr: *anyopaque) bool {
+    const sem_obj: *SemaphoreObj = @ptrCast(@alignCast(sem_ptr));
+    sem_obj.mutex.lock();
+    defer sem_obj.mutex.unlock();
+    if (sem_obj.permits == 0) return false;
+    sem_obj.permits -= 1;
+    return true;
+}
+
+export fn flix_semaphore_release(sem_ptr: *anyopaque) i64 {
+    const sem_obj: *SemaphoreObj = @ptrCast(@alignCast(sem_ptr));
+    sem_obj.mutex.lock();
+    defer sem_obj.mutex.unlock();
+
+    if (is_wasm) {
+        const ctx_rep = current_wit_ctx orelse @panic("flix_semaphore_release: missing wasm WIT context");
+        if (wasmSemaphoreTryWakeOneLocked(ctx_rep, sem_obj)) {
+            return 0;
+        }
+    }
+
+    sem_obj.permits += 1;
+    sem_obj.available.signal();
+    return 0;
+}
+
+export fn flix_semaphore_acquire(sem_ptr: *anyopaque) i64 {
+    const sem_obj: *SemaphoreObj = @ptrCast(@alignCast(sem_ptr));
+    const ctx_opt = current_ctx;
+    sem_obj.mutex.lock();
+    defer sem_obj.mutex.unlock();
+
+    while (sem_obj.permits == 0) {
+        if (ctx_opt) |ctx| {
+            if (flix_cancel_requested(@ptrCast(ctx))) return 0;
+            ctxSetBlockedWait(ctx, .semaphore, sem_ptr);
+            ctx.blocked.store(true, .release);
+        }
+        sem_obj.available.wait(&sem_obj.mutex);
+        sem_obj.mutex.unlock();
+        if (ctx_opt) |ctx| {
+            ctxSetBlockedWait(ctx, .none, null);
+            pollcheckCooperate(ctx);
+            ctx.blocked.store(false, .release);
+        }
+        sem_obj.mutex.lock();
+        if (ctx_opt) |ctx| {
+            if (flix_cancel_requested(@ptrCast(ctx))) return 0;
+        }
+    }
+
+    sem_obj.permits -= 1;
+    return 0;
+}
+
+export fn flix_semaphore_acquire_resumable(ctx: *anyopaque, sem_ptr: *anyopaque) FlixResult {
+    _ = ctx;
+    if (!is_wasm) {
+        _ = flix_semaphore_acquire(sem_ptr);
+        return FlixResult{ .tag = RESULT_TAG_VALUE, .payload = 0 };
+    }
+
+    const sem_obj: *SemaphoreObj = @ptrCast(@alignCast(sem_ptr));
+    sem_obj.mutex.lock();
+    defer sem_obj.mutex.unlock();
+
+    if (sem_obj.permits > 0) {
+        sem_obj.permits -= 1;
+        return FlixResult{ .tag = RESULT_TAG_VALUE, .payload = 0 };
+    }
+
+    const susp_ptr = allocWasmSemaphoreSuspension(payloadFromPtr(sem_ptr));
+    return FlixResult{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
 }
 
 export fn flix_reentrant_lock_new() *anyopaque {
@@ -4947,12 +5815,8 @@ export fn flix_reentrant_lock_unlock(lock_ptr: *anyopaque) bool {
 
     if (is_wasm) {
         const ctx_rep = current_wit_ctx orelse @panic("flix_reentrant_lock_unlock: missing wasm WIT context");
-        while (wasmLockPopValidWaiter(ctx_rep, lock_obj)) |w| {
-            lock_obj.owner_token = w.task_id;
-            lock_obj.recursion = 1;
-            wasmResumeTaskOk(ctx_rep, w, 0);
-            return true;
-        }
+        wasmLockReleaseLocked(ctx_rep, lock_obj);
+        return true;
     }
 
     lock_obj.owner_token = 0;
@@ -5013,6 +5877,216 @@ export fn flix_reentrant_lock_lock_resumable(ctx: *anyopaque, lock_ptr: *anyopaq
     }
 
     const susp_ptr = allocWasmLockSuspension(payloadFromPtr(lock_ptr));
+    return FlixResult{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
+}
+
+export fn flix_condition_new(lock_ptr: *anyopaque) *anyopaque {
+    return conditionInit(lock_ptr);
+}
+
+export fn flix_condition_signal(condition_ptr: *anyopaque) bool {
+    const cond_obj: *ConditionObj = @ptrCast(@alignCast(condition_ptr));
+    const lock_obj = cond_obj.lock;
+    const owner_token = currentTaskOwnerToken();
+    lock_obj.mutex.lock();
+    defer lock_obj.mutex.unlock();
+
+    if (lock_obj.owner_token != owner_token or lock_obj.recursion == 0) {
+        return false;
+    }
+
+    if (is_wasm) {
+        const ctx_rep = current_wit_ctx orelse @panic("flix_condition_signal: missing wasm WIT context");
+        wasmConditionRequeueOneLocked(ctx_rep, cond_obj, ConditionAwaitOk);
+    } else {
+        nativeConditionSignalOneLocked(cond_obj);
+    }
+    return true;
+}
+
+export fn flix_condition_signal_all(condition_ptr: *anyopaque) bool {
+    const cond_obj: *ConditionObj = @ptrCast(@alignCast(condition_ptr));
+    const lock_obj = cond_obj.lock;
+    const owner_token = currentTaskOwnerToken();
+    lock_obj.mutex.lock();
+    defer lock_obj.mutex.unlock();
+
+    if (lock_obj.owner_token != owner_token or lock_obj.recursion == 0) {
+        return false;
+    }
+
+    if (is_wasm) {
+        const ctx_rep = current_wit_ctx orelse @panic("flix_condition_signal_all: missing wasm WIT context");
+        wasmConditionRequeueAllLocked(ctx_rep, cond_obj, ConditionAwaitOk);
+    } else {
+        nativeConditionSignalAllLocked(cond_obj);
+    }
+    return true;
+}
+
+export fn flix_condition_await(condition_ptr: *anyopaque) i32 {
+    const cond_obj: *ConditionObj = @ptrCast(@alignCast(condition_ptr));
+    const lock_obj = cond_obj.lock;
+    const owner_token = currentTaskOwnerToken();
+    const ctx_opt = current_ctx;
+
+    if (is_wasm) {
+        _ = flix_condition_await_resumable(currentCtxPtr(), condition_ptr);
+        return ConditionAwaitCancelled;
+    }
+
+    lock_obj.mutex.lock();
+    if (lock_obj.owner_token != owner_token or lock_obj.recursion == 0) {
+        lock_obj.mutex.unlock();
+        return ConditionAwaitNotOwner;
+    }
+
+    var waiter: NativeConditionWaiter = .{};
+    cond_obj.native_waiters.append(rt_alloc, &waiter) catch @panic("oom");
+    const saved_recursion = lock_obj.recursion;
+    lock_obj.owner_token = 0;
+    lock_obj.recursion = 0;
+    lock_obj.available.signal();
+    lock_obj.mutex.unlock();
+
+    const canceled = nativeConditionWaiterAwait(&waiter, ctx_opt);
+
+    lock_obj.mutex.lock();
+    conditionRemoveNativeWaiterLocked(cond_obj, &waiter);
+    while (lock_obj.owner_token != 0 and lock_obj.owner_token != owner_token) {
+        if (ctx_opt) |ctx| {
+            ctxSetBlockedWait(ctx, .reentrant_lock, lock_obj);
+            ctx.blocked.store(true, .release);
+        }
+        lock_obj.available.wait(&lock_obj.mutex);
+        lock_obj.mutex.unlock();
+        if (ctx_opt) |ctx| {
+            ctxSetBlockedWait(ctx, .none, null);
+            pollcheckCooperate(ctx);
+            ctx.blocked.store(false, .release);
+        }
+        lock_obj.mutex.lock();
+    }
+    lock_obj.owner_token = owner_token;
+    lock_obj.recursion = saved_recursion;
+    lock_obj.mutex.unlock();
+
+    return if (canceled) ConditionAwaitCancelled else ConditionAwaitOk;
+}
+
+export fn flix_condition_await_resumable(ctx: *anyopaque, condition_ptr: *anyopaque) FlixResult {
+    _ = ctx;
+    if (!is_wasm) {
+        const result = flix_condition_await(condition_ptr);
+        return FlixResult{ .tag = RESULT_TAG_VALUE, .payload = result };
+    }
+
+    const cond_obj: *ConditionObj = @ptrCast(@alignCast(condition_ptr));
+    const lock_obj = cond_obj.lock;
+    const owner_token = currentTaskOwnerToken();
+    lock_obj.mutex.lock();
+    defer lock_obj.mutex.unlock();
+
+    if (lock_obj.owner_token != owner_token or lock_obj.recursion == 0) {
+        return FlixResult{ .tag = RESULT_TAG_VALUE, .payload = ConditionAwaitNotOwner };
+    }
+
+    const saved_recursion = lock_obj.recursion;
+    const ctx_rep = current_wit_ctx orelse @panic("flix_condition_await_resumable: missing wasm WIT context");
+    lock_obj.owner_token = 0;
+    lock_obj.recursion = 0;
+    _ = wasmLockTryWakeNextWaiterLocked(ctx_rep, lock_obj);
+    if (lock_obj.owner_token == 0) {
+        lock_obj.available.signal();
+    }
+
+    const susp_ptr = allocWasmConditionSuspension(payloadFromPtr(condition_ptr), saved_recursion);
+    return FlixResult{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
+}
+
+export fn flix_cyclic_barrier_new(parties0: i32) ?*anyopaque {
+    if (parties0 <= 0) {
+        return null;
+    }
+    const parties: usize = @intCast(parties0);
+    return cyclicBarrierInit(parties);
+}
+
+export fn flix_cyclic_barrier_await(barrier_ptr: *anyopaque) i32 {
+    if (is_wasm) {
+        _ = flix_cyclic_barrier_await_resumable(currentCtxPtr(), barrier_ptr);
+        return BarrierAwaitCancelled;
+    }
+
+    const barrier_obj: *CyclicBarrierObj = @ptrCast(@alignCast(barrier_ptr));
+    const ctx_opt = current_ctx;
+
+    barrier_obj.mutex.lock();
+    const generation0 = barrier_obj.generation;
+    const arrival_index: i32 = @intCast(barrier_obj.parties - barrier_obj.waiting - 1);
+
+    if (barrier_obj.waiting + 1 == barrier_obj.parties) {
+        barrier_obj.waiting = 0;
+        barrier_obj.generation += 1;
+        barrier_obj.tripped.broadcast();
+        barrier_obj.mutex.unlock();
+        return 0;
+    }
+
+    barrier_obj.waiting += 1;
+    while (barrier_obj.generation == generation0) {
+        if (ctx_opt) |ctx| {
+            if (flix_cancel_requested(@ptrCast(ctx))) {
+                nativeCyclicBarrierCancelLocked(barrier_obj, generation0);
+                barrier_obj.mutex.unlock();
+                return BarrierAwaitCancelled;
+            }
+            ctxSetBlockedWait(ctx, .cyclic_barrier, barrier_ptr);
+            ctx.blocked.store(true, .release);
+        }
+
+        barrier_obj.tripped.wait(&barrier_obj.mutex);
+        barrier_obj.mutex.unlock();
+
+        if (ctx_opt) |ctx| {
+            ctxSetBlockedWait(ctx, .none, null);
+            pollcheckCooperate(ctx);
+            ctx.blocked.store(false, .release);
+        }
+
+        barrier_obj.mutex.lock();
+    }
+
+    barrier_obj.mutex.unlock();
+    return arrival_index;
+}
+
+export fn flix_cyclic_barrier_await_resumable(ctx: *anyopaque, barrier_ptr: *anyopaque) FlixResult {
+    _ = ctx;
+    if (!is_wasm) {
+        const result = flix_cyclic_barrier_await(barrier_ptr);
+        return FlixResult{ .tag = RESULT_TAG_VALUE, .payload = result };
+    }
+
+    const barrier_obj: *CyclicBarrierObj = @ptrCast(@alignCast(barrier_ptr));
+    barrier_obj.mutex.lock();
+    defer barrier_obj.mutex.unlock();
+
+    const generation0 = barrier_obj.generation;
+    const arrival_index: i32 = @intCast(barrier_obj.parties - barrier_obj.waiting - 1);
+
+    if (barrier_obj.waiting + 1 == barrier_obj.parties) {
+        barrier_obj.waiting = 0;
+        barrier_obj.generation += 1;
+        const ctx_rep = current_wit_ctx orelse @panic("flix_cyclic_barrier_await_resumable: missing wasm WIT context");
+        while (wasmBarrierPopValidWaiter(ctx_rep, barrier_obj, generation0)) |waiter| {
+            wasmResumeTaskOk(ctx_rep, waiter, waiter.arrival_index);
+        }
+        return FlixResult{ .tag = RESULT_TAG_VALUE, .payload = 0 };
+    }
+
+    barrier_obj.waiting += 1;
+    const susp_ptr = allocWasmBarrierSuspension(payloadFromPtr(barrier_ptr), generation0, arrival_index);
     return FlixResult{ .tag = RESULT_TAG_SUSPENSION, .payload = payloadFromPtr(susp_ptr) };
 }
 
@@ -9510,6 +10584,10 @@ fn cancelBlockedWaitsForRegion(target: *FlixRegion) void {
             .process_wait => NativeProcHttp.processWaitCancel(wait),
             .process_stdio => NativeProcHttp.processStdioWaitCancel(wait),
             .reentrant_lock => nativeReentrantLockSignalAvailable(wait),
+            .condition_wait => nativeConditionWaiterCancel(wait),
+            .cyclic_barrier => nativeCyclicBarrierBroadcast(wait),
+            .count_down_latch => nativeCountDownLatchBroadcast(wait),
+            .semaphore => nativeSemaphoreBroadcast(wait),
             .channel_put => nativeChannelSignalNotFull(wait),
             .channel_get => nativeChannelSignalNotEmpty(wait),
             .channel_select => nativeChannelSelectWaiterSignal(@ptrCast(@alignCast(wait))),
@@ -9525,6 +10603,10 @@ fn requestRegionCancellation(region: *FlixRegion) void {
             if (current_wit_ctx) |ctx_rep| {
                 wasmCancelBlockedChannelTasksForRegion(ctx_rep, region);
                 wasmCancelBlockedLockTasksForRegion(ctx_rep, region);
+                wasmCancelBlockedConditionTasksForRegion(ctx_rep, region);
+                wasmCancelBlockedBarrierTasksForRegion(ctx_rep, region);
+                wasmCancelBlockedCountDownLatchTasksForRegion(ctx_rep, region);
+                wasmCancelBlockedSemaphoreTasksForRegion(ctx_rep, region);
             }
         } else {
             cancelBlockedWaitsForRegion(region);
@@ -10562,6 +11644,26 @@ fn taskHandleSuspension(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u
         return null;
     }
 
+    if (isWasmConditionSuspensionHandle(ctx_rep, susp_handle)) {
+        wasmConditionRegisterWaiter(ctx_rep, task_id, susp_handle);
+        return null;
+    }
+
+    if (isWasmBarrierSuspensionHandle(ctx_rep, susp_handle)) {
+        wasmBarrierRegisterWaiter(ctx_rep, task_id, susp_handle);
+        return null;
+    }
+
+    if (isWasmCountDownLatchSuspensionHandle(ctx_rep, susp_handle)) {
+        wasmCountDownLatchRegisterWaiter(ctx_rep, task_id, susp_handle);
+        return null;
+    }
+
+    if (isWasmSemaphoreSuspensionHandle(ctx_rep, susp_handle)) {
+        wasmSemaphoreRegisterWaiter(ctx_rep, task_id, susp_handle);
+        return null;
+    }
+
     const susp_ptr = flix_handle_get(ctx_rep.flix_ctx, susp_handle);
     const slots: [*]i64 = objPayloadSlots(susp_ptr);
     if (slots[0] == WasmChanEffSymId) {
@@ -10582,6 +11684,10 @@ fn withTaskRegion(task: *Task, f: fn () void) void {
     task.region = current_region;
 }
 
+fn freshTaskPtr(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64) *Task {
+    return ctx_rep.tasks.getPtr(task_id) orelse @panic("runTaskOnce: current task disappeared");
+}
+
 fn runTaskOnce(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, t: *Task) ?exports_flix_runtime_runtime_own_suspension_t {
     witSetCurrentCtx(ctx_rep);
     const saved_owner_token = current_wasm_task_owner_token;
@@ -10591,7 +11697,9 @@ fn runTaskOnce(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, t: *T
     const saved_region = current_region;
     setCurrentRegion(t.region);
     defer {
-        t.region = current_region;
+        if (ctx_rep.tasks.getPtr(task_id)) |fresh| {
+            fresh.region = current_region;
+        }
         setCurrentRegion(saved_region);
     }
 
@@ -10609,19 +11717,20 @@ fn runTaskOnce(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, t: *T
                     }
 
                     const r = flix_wasm_invoke_def(ctx_rep.flix_ctx, def_id, arg_bits.ptr, @intCast(argc));
+                    const fresh = freshTaskPtr(ctx_rep, task_id);
                     switch (r.tag) {
                         RESULT_TAG_VALUE => {
-                            taskMarkCompleted(ctx_rep, t, 0, r.payload);
+                            taskMarkCompleted(ctx_rep, fresh, 0, r.payload);
                             return null;
                         },
                         RESULT_TAG_EXCEPTION => {
-                            taskMarkCompleted(ctx_rep, t, 1, r.payload);
+                            taskMarkCompleted(ctx_rep, fresh, 1, r.payload);
                             return null;
                         },
                         RESULT_TAG_SUSPENSION => {
                             // Task owns this suspension handle.
-                            taskReleaseArgs(ctx_rep.flix_ctx, t);
-                            t.state = .{ .Blocked = .{ .susp_handle = r.payload } };
+                            taskReleaseArgs(ctx_rep.flix_ctx, fresh);
+                            fresh.state = .{ .Blocked = .{ .susp_handle = r.payload } };
                             return taskHandleSuspension(ctx_rep, task_id, r.payload);
                         },
                         else => @panic("unexpected result tag from flix_wasm_invoke_def"),
@@ -10639,22 +11748,23 @@ fn runTaskOnce(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, t: *T
                         r0 = invokeThunk(ctx_rep.flix_ctx, tptr, RESULT_TAG_VALUE, 0);
                     }
 
+                    const fresh = freshTaskPtr(ctx_rep, task_id);
                     switch (r0.tag) {
                         RESULT_TAG_VALUE => {
                             const h = flix_handle_new_i64(ctx_rep.flix_ctx, r0.payload);
-                            taskMarkCompleted(ctx_rep, t, 0, h);
+                            taskMarkCompleted(ctx_rep, fresh, 0, h);
                             return null;
                         },
                         RESULT_TAG_EXCEPTION => {
                             const exn_ptr = ptrFromPayload(r0.payload);
                             const h = flix_handle_new(ctx_rep.flix_ctx, exn_ptr);
-                            taskMarkCompleted(ctx_rep, t, 1, h);
+                            taskMarkCompleted(ctx_rep, fresh, 1, h);
                             return null;
                         },
                         RESULT_TAG_SUSPENSION => {
                             const susp_ptr = ptrFromPayload(r0.payload);
                             const h = flix_handle_new(ctx_rep.flix_ctx, susp_ptr);
-                            t.state = .{ .Blocked = .{ .susp_handle = h } };
+                            fresh.state = .{ .Blocked = .{ .susp_handle = h } };
                             return taskHandleSuspension(ctx_rep, task_id, h);
                         },
                         else => @panic("unexpected result tag from thunk invocation"),
@@ -10672,17 +11782,18 @@ fn runTaskOnce(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, t: *T
             flix_handle_release(ctx_rep.flix_ctx, st.susp_handle);
             flix_handle_release(ctx_rep.flix_ctx, st.resume_handle);
 
+            const fresh = freshTaskPtr(ctx_rep, task_id);
             switch (r.tag) {
                 RESULT_TAG_VALUE => {
-                    taskMarkCompleted(ctx_rep, t, 0, r.payload);
+                    taskMarkCompleted(ctx_rep, fresh, 0, r.payload);
                     return null;
                 },
                 RESULT_TAG_EXCEPTION => {
-                    taskMarkCompleted(ctx_rep, t, 1, r.payload);
+                    taskMarkCompleted(ctx_rep, fresh, 1, r.payload);
                     return null;
                 },
                 RESULT_TAG_SUSPENSION => {
-                    t.state = .{ .Blocked = .{ .susp_handle = r.payload } };
+                    fresh.state = .{ .Blocked = .{ .susp_handle = r.payload } };
                     return taskHandleSuspension(ctx_rep, task_id, r.payload);
                 },
                 else => @panic("unexpected result tag from flix_wasm_resume_ok_def"),
@@ -10698,17 +11809,18 @@ fn runTaskOnce(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, t: *T
             flix_handle_release(ctx_rep.flix_ctx, st.susp_handle);
             flix_handle_release(ctx_rep.flix_ctx, st.exn_handle);
 
+            const fresh = freshTaskPtr(ctx_rep, task_id);
             switch (r.tag) {
                 RESULT_TAG_VALUE => {
-                    taskMarkCompleted(ctx_rep, t, 0, r.payload);
+                    taskMarkCompleted(ctx_rep, fresh, 0, r.payload);
                     return null;
                 },
                 RESULT_TAG_EXCEPTION => {
-                    taskMarkCompleted(ctx_rep, t, 1, r.payload);
+                    taskMarkCompleted(ctx_rep, fresh, 1, r.payload);
                     return null;
                 },
                 RESULT_TAG_SUSPENSION => {
-                    t.state = .{ .Blocked = .{ .susp_handle = r.payload } };
+                    fresh.state = .{ .Blocked = .{ .susp_handle = r.payload } };
                     return taskHandleSuspension(ctx_rep, task_id, r.payload);
                 },
                 else => @panic("unexpected result tag from flix_wasm_resume_throw_def"),
@@ -10726,14 +11838,27 @@ fn resumeTaskWithHandle(ctx_rep: *exports_flix_runtime_runtime_ctx_t, susp: expo
     const task_id = srep.task_id;
     const susp_handle = srep.susp_handle;
 
-    const task_ptr = ctx_rep.tasks.getPtr(task_id) orelse @panic("resume on unknown task-id");
+    const task_ptr = ctx_rep.tasks.getPtr(task_id) orelse {
+        // Host-side async completions can legitimately race with cancellation or a prior resume.
+        // Once the task is no longer waiting on this suspension, the late completion must be dropped.
+        flix_handle_release(ctx_rep.flix_ctx, resume_handle);
+        exports_flix_runtime_runtime_suspension_drop_own(susp);
+        return;
+    };
 
-    // Ensure task is blocked (best-effort sanity).
     switch (task_ptr.state) {
         .Blocked => |st| {
-            if (st.susp_handle != susp_handle) @panic("resume suspension mismatch");
+            if (st.susp_handle != susp_handle) {
+                flix_handle_release(ctx_rep.flix_ctx, resume_handle);
+                exports_flix_runtime_runtime_suspension_drop_own(susp);
+                return;
+            }
         },
-        else => @panic("resume on non-blocked task"),
+        else => {
+            flix_handle_release(ctx_rep.flix_ctx, resume_handle);
+            exports_flix_runtime_runtime_suspension_drop_own(susp);
+            return;
+        },
     }
 
     // Move to ready state and enqueue.

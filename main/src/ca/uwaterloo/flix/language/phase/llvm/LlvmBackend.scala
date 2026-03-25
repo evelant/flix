@@ -277,6 +277,23 @@ object LlvmBackend {
         Decl.DeclareFun(Type.I1, "flix_reentrant_lock_try_lock", List(Type.Ptr)),
         Decl.DeclareFun(Type.I1, "flix_reentrant_lock_unlock", List(Type.Ptr)),
         Decl.DeclareFun(flixResultType, "flix_reentrant_lock_lock_resumable", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_condition_new", List(Type.Ptr)),
+        Decl.DeclareFun(Type.I32, "flix_condition_await", List(Type.Ptr)),
+        Decl.DeclareFun(Type.I1, "flix_condition_signal", List(Type.Ptr)),
+        Decl.DeclareFun(Type.I1, "flix_condition_signal_all", List(Type.Ptr)),
+        Decl.DeclareFun(flixResultType, "flix_condition_await_resumable", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_cyclic_barrier_new", List(Type.I32)),
+        Decl.DeclareFun(Type.I32, "flix_cyclic_barrier_await", List(Type.Ptr)),
+        Decl.DeclareFun(flixResultType, "flix_cyclic_barrier_await_resumable", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_count_down_latch_new", List(Type.I32)),
+        Decl.DeclareFun(Type.I64, "flix_count_down_latch_await", List(Type.Ptr)),
+        Decl.DeclareFun(Type.I64, "flix_count_down_latch_count_down", List(Type.Ptr)),
+        Decl.DeclareFun(flixResultType, "flix_count_down_latch_await_resumable", List(Type.Ptr, Type.Ptr)),
+        Decl.DeclareFun(Type.Ptr, "flix_semaphore_new", List(Type.I32)),
+        Decl.DeclareFun(Type.I64, "flix_semaphore_acquire", List(Type.Ptr)),
+        Decl.DeclareFun(Type.I1, "flix_semaphore_try_acquire", List(Type.Ptr)),
+        Decl.DeclareFun(Type.I64, "flix_semaphore_release", List(Type.Ptr)),
+        Decl.DeclareFun(flixResultType, "flix_semaphore_acquire_resumable", List(Type.Ptr, Type.Ptr)),
         Decl.DeclareFun(Type.I64, "flix_spawn", List(Type.Ptr, Type.Ptr, Type.Ptr)),
         Decl.DeclareFun(Type.Ptr, "flix_region_enter", List(Type.Ptr)),
         // Note: Passing `FlixResult` by-value is not ABI-stable across Zig/Clang on wasm, so we pass
@@ -5606,6 +5623,34 @@ object LlvmBackend {
                     fb.current.emitAssign(callTmp, Op.Call(flixResultType, "flix_reentrant_lock_lock_resumable", List(ctxPtr, lockPtr)))
                     emitCallAndHandleSuspension(callTmp, pcPointId, tpe, ctxPtr, fb, framePtr, resumeTag, resumePayload, pcBlocks, exnHandlerOpt)
 
+                  case AtomicOp.ConditionAwait =>
+                    val condition0 = args.headOption.getOrElse(Value.Undef(Type.Ptr))
+                    val conditionPtr = castValue(condition0, Type.Ptr, fb)
+                    val callTmp = freshTmp(flixResultType)
+                    fb.current.emitAssign(callTmp, Op.Call(flixResultType, "flix_condition_await_resumable", List(ctxPtr, conditionPtr)))
+                    emitCallAndHandleSuspension(callTmp, pcPointId, tpe, ctxPtr, fb, framePtr, resumeTag, resumePayload, pcBlocks, exnHandlerOpt)
+
+                  case AtomicOp.CyclicBarrierAwait =>
+                    val barrier0 = args.headOption.getOrElse(Value.Undef(Type.Ptr))
+                    val barrierPtr = castValue(barrier0, Type.Ptr, fb)
+                    val callTmp = freshTmp(flixResultType)
+                    fb.current.emitAssign(callTmp, Op.Call(flixResultType, "flix_cyclic_barrier_await_resumable", List(ctxPtr, barrierPtr)))
+                    emitCallAndHandleSuspension(callTmp, pcPointId, tpe, ctxPtr, fb, framePtr, resumeTag, resumePayload, pcBlocks, exnHandlerOpt)
+
+                  case AtomicOp.CountDownLatchAwait =>
+                    val latch0 = args.headOption.getOrElse(Value.Undef(Type.Ptr))
+                    val latchPtr = castValue(latch0, Type.Ptr, fb)
+                    val callTmp = freshTmp(flixResultType)
+                    fb.current.emitAssign(callTmp, Op.Call(flixResultType, "flix_count_down_latch_await_resumable", List(ctxPtr, latchPtr)))
+                    emitCallAndHandleSuspension(callTmp, pcPointId, tpe, ctxPtr, fb, framePtr, resumeTag, resumePayload, pcBlocks, exnHandlerOpt)
+
+                  case AtomicOp.SemaphoreAcquire =>
+                    val sem0 = args.headOption.getOrElse(Value.Undef(Type.Ptr))
+                    val semPtr = castValue(sem0, Type.Ptr, fb)
+                    val callTmp = freshTmp(flixResultType)
+                    fb.current.emitAssign(callTmp, Op.Call(flixResultType, "flix_semaphore_acquire_resumable", List(ctxPtr, semPtr)))
+                    emitCallAndHandleSuspension(callTmp, pcPointId, tpe, ctxPtr, fb, framePtr, resumeTag, resumePayload, pcBlocks, exnHandlerOpt)
+
                   case _ =>
                     emitApplyAtomic(op, argTpes, args, tpe, ctxPtr, fb, exnHandlerOpt)
                 }
@@ -5650,6 +5695,34 @@ object LlvmBackend {
                     val lockPtr = castValue(lock0, Type.Ptr, fb)
                     val callTmp = freshTmp(flixResultType)
                     fb.current.emitAssign(callTmp, Op.Call(flixResultType, "flix_reentrant_lock_lock_resumable", List(ctxPtr, lockPtr)))
+                    emitCallAndHandleSuspension(callTmp, pcPointId, tpe, ctxPtr, fb, framePtr, resumeTag, resumePayload, pcBlocks, exnHandlerOpt)
+
+                  case AtomicOp.ConditionAwait =>
+                    val condition0 = args.headOption.getOrElse(Value.Undef(Type.Ptr))
+                    val conditionPtr = castValue(condition0, Type.Ptr, fb)
+                    val callTmp = freshTmp(flixResultType)
+                    fb.current.emitAssign(callTmp, Op.Call(flixResultType, "flix_condition_await_resumable", List(ctxPtr, conditionPtr)))
+                    emitCallAndHandleSuspension(callTmp, pcPointId, tpe, ctxPtr, fb, framePtr, resumeTag, resumePayload, pcBlocks, exnHandlerOpt)
+
+                  case AtomicOp.CyclicBarrierAwait =>
+                    val barrier0 = args.headOption.getOrElse(Value.Undef(Type.Ptr))
+                    val barrierPtr = castValue(barrier0, Type.Ptr, fb)
+                    val callTmp = freshTmp(flixResultType)
+                    fb.current.emitAssign(callTmp, Op.Call(flixResultType, "flix_cyclic_barrier_await_resumable", List(ctxPtr, barrierPtr)))
+                    emitCallAndHandleSuspension(callTmp, pcPointId, tpe, ctxPtr, fb, framePtr, resumeTag, resumePayload, pcBlocks, exnHandlerOpt)
+
+                  case AtomicOp.CountDownLatchAwait =>
+                    val latch0 = args.headOption.getOrElse(Value.Undef(Type.Ptr))
+                    val latchPtr = castValue(latch0, Type.Ptr, fb)
+                    val callTmp = freshTmp(flixResultType)
+                    fb.current.emitAssign(callTmp, Op.Call(flixResultType, "flix_count_down_latch_await_resumable", List(ctxPtr, latchPtr)))
+                    emitCallAndHandleSuspension(callTmp, pcPointId, tpe, ctxPtr, fb, framePtr, resumeTag, resumePayload, pcBlocks, exnHandlerOpt)
+
+                  case AtomicOp.SemaphoreAcquire =>
+                    val sem0 = args.headOption.getOrElse(Value.Undef(Type.Ptr))
+                    val semPtr = castValue(sem0, Type.Ptr, fb)
+                    val callTmp = freshTmp(flixResultType)
+                    fb.current.emitAssign(callTmp, Op.Call(flixResultType, "flix_semaphore_acquire_resumable", List(ctxPtr, semPtr)))
                     emitCallAndHandleSuspension(callTmp, pcPointId, tpe, ctxPtr, fb, framePtr, resumeTag, resumePayload, pcBlocks, exnHandlerOpt)
 
                   case _ =>
@@ -8181,6 +8254,97 @@ object LlvmBackend {
         val released = freshTmp(Type.I1)
         fb.current.emitAssign(released, Op.Call(Type.I1, "flix_reentrant_lock_unlock", List(lockPtr)))
         released
+
+      case AtomicOp.ConditionNew =>
+        val lock0 = args.headOption.getOrElse(Value.Undef(Type.Ptr))
+        val lockPtr = castValue(lock0, Type.Ptr, fb)
+        val conditionPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(conditionPtr, Op.Call(Type.Ptr, "flix_condition_new", List(lockPtr)))
+        conditionPtr
+
+      case AtomicOp.ConditionAwait =>
+        val condition0 = args.headOption.getOrElse(Value.Undef(Type.Ptr))
+        val conditionPtr = castValue(condition0, Type.Ptr, fb)
+        val result = freshTmp(Type.I32)
+        fb.current.emitAssign(result, Op.Call(Type.I32, "flix_condition_await", List(conditionPtr)))
+        result
+
+      case AtomicOp.ConditionSignal =>
+        val condition0 = args.headOption.getOrElse(Value.Undef(Type.Ptr))
+        val conditionPtr = castValue(condition0, Type.Ptr, fb)
+        val signaled = freshTmp(Type.I1)
+        fb.current.emitAssign(signaled, Op.Call(Type.I1, "flix_condition_signal", List(conditionPtr)))
+        signaled
+
+      case AtomicOp.ConditionSignalAll =>
+        val condition0 = args.headOption.getOrElse(Value.Undef(Type.Ptr))
+        val conditionPtr = castValue(condition0, Type.Ptr, fb)
+        val signaled = freshTmp(Type.I1)
+        fb.current.emitAssign(signaled, Op.Call(Type.I1, "flix_condition_signal_all", List(conditionPtr)))
+        signaled
+
+      case AtomicOp.CyclicBarrierNew =>
+        val parties0 = args.headOption.getOrElse(Value.Undef(Type.I32))
+        val parties = castValue(parties0, Type.I32, fb)
+        val barrierPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(barrierPtr, Op.Call(Type.Ptr, "flix_cyclic_barrier_new", List(parties)))
+        barrierPtr
+
+      case AtomicOp.CyclicBarrierAwait =>
+        val barrier0 = args.headOption.getOrElse(Value.Undef(Type.Ptr))
+        val barrierPtr = castValue(barrier0, Type.Ptr, fb)
+        val result = freshTmp(Type.I32)
+        fb.current.emitAssign(result, Op.Call(Type.I32, "flix_cyclic_barrier_await", List(barrierPtr)))
+        result
+
+      case AtomicOp.CountDownLatchNew =>
+        val count0 = args.headOption.getOrElse(Value.Undef(Type.I32))
+        val count = castValue(count0, Type.I32, fb)
+        val latchPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(latchPtr, Op.Call(Type.Ptr, "flix_count_down_latch_new", List(count)))
+        latchPtr
+
+      case AtomicOp.CountDownLatchAwait =>
+        val latch0 = args.headOption.getOrElse(Value.Undef(Type.Ptr))
+        val latchPtr = castValue(latch0, Type.Ptr, fb)
+        val result = freshTmp(Type.I64)
+        fb.current.emitAssign(result, Op.Call(Type.I64, "flix_count_down_latch_await", List(latchPtr)))
+        Value.IntConst(0L, Type.I64)
+
+      case AtomicOp.CountDownLatchCountDown =>
+        val latch0 = args.headOption.getOrElse(Value.Undef(Type.Ptr))
+        val latchPtr = castValue(latch0, Type.Ptr, fb)
+        val result = freshTmp(Type.I64)
+        fb.current.emitAssign(result, Op.Call(Type.I64, "flix_count_down_latch_count_down", List(latchPtr)))
+        Value.IntConst(0L, Type.I64)
+
+      case AtomicOp.SemaphoreNew =>
+        val permits0 = args.headOption.getOrElse(Value.Undef(Type.I32))
+        val permits = castValue(permits0, Type.I32, fb)
+        val semPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(semPtr, Op.Call(Type.Ptr, "flix_semaphore_new", List(permits)))
+        semPtr
+
+      case AtomicOp.SemaphoreAcquire =>
+        val sem0 = args.headOption.getOrElse(Value.Undef(Type.Ptr))
+        val semPtr = castValue(sem0, Type.Ptr, fb)
+        val result = freshTmp(Type.I64)
+        fb.current.emitAssign(result, Op.Call(Type.I64, "flix_semaphore_acquire", List(semPtr)))
+        Value.IntConst(0L, Type.I64)
+
+      case AtomicOp.SemaphoreTryAcquire =>
+        val sem0 = args.headOption.getOrElse(Value.Undef(Type.Ptr))
+        val semPtr = castValue(sem0, Type.Ptr, fb)
+        val acquired = freshTmp(Type.I1)
+        fb.current.emitAssign(acquired, Op.Call(Type.I1, "flix_semaphore_try_acquire", List(semPtr)))
+        acquired
+
+      case AtomicOp.SemaphoreRelease =>
+        val sem0 = args.headOption.getOrElse(Value.Undef(Type.Ptr))
+        val semPtr = castValue(sem0, Type.Ptr, fb)
+        val result = freshTmp(Type.I64)
+        fb.current.emitAssign(result, Op.Call(Type.I64, "flix_semaphore_release", List(semPtr)))
+        Value.IntConst(0L, Type.I64)
 
       case AtomicOp.InvokeMethod(method) if method.getDeclaringClass.getName == "java.lang.String" && method.getName == "equals" =>
         // String.equals(Object): in Flix this is used to implement string equality.

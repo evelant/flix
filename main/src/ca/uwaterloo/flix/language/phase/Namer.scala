@@ -311,6 +311,10 @@ object Namer {
     case "StringBuilderHandle" => true
     case "RegexMatcher" => true
     case "ReentrantLockHandle" => true
+    case "ConditionHandle" => true
+    case "CyclicBarrierHandle" => true
+    case "CountDownLatchHandle" => true
+    case "SemaphoreHandle" => true
     case _ => false
   }
 
@@ -997,6 +1001,58 @@ object Namer {
     case DesugaredAst.Expr.UnlockReentrantLock(exp, loc) =>
       val e = visitExp(exp)
       NamedAst.Expr.UnlockReentrantLock(e, loc)
+
+    case DesugaredAst.Expr.NewCondition(exp, loc) =>
+      val e = visitExp(exp)
+      NamedAst.Expr.NewCondition(e, loc)
+
+    case DesugaredAst.Expr.AwaitCondition(exp, loc) =>
+      val e = visitExp(exp)
+      NamedAst.Expr.AwaitCondition(e, loc)
+
+    case DesugaredAst.Expr.SignalCondition(exp, loc) =>
+      val e = visitExp(exp)
+      NamedAst.Expr.SignalCondition(e, loc)
+
+    case DesugaredAst.Expr.SignalAllCondition(exp, loc) =>
+      val e = visitExp(exp)
+      NamedAst.Expr.SignalAllCondition(e, loc)
+
+    case DesugaredAst.Expr.NewCyclicBarrier(exp, loc) =>
+      val e = visitExp(exp)
+      NamedAst.Expr.NewCyclicBarrier(e, loc)
+
+    case DesugaredAst.Expr.AwaitCyclicBarrier(exp, loc) =>
+      val e = visitExp(exp)
+      NamedAst.Expr.AwaitCyclicBarrier(e, loc)
+
+    case DesugaredAst.Expr.NewCountDownLatch(exp, loc) =>
+      val e = visitExp(exp)
+      NamedAst.Expr.NewCountDownLatch(e, loc)
+
+    case DesugaredAst.Expr.AwaitCountDownLatch(exp, loc) =>
+      val e = visitExp(exp)
+      NamedAst.Expr.AwaitCountDownLatch(e, loc)
+
+    case DesugaredAst.Expr.CountDownLatchCountDown(exp, loc) =>
+      val e = visitExp(exp)
+      NamedAst.Expr.CountDownLatchCountDown(e, loc)
+
+    case DesugaredAst.Expr.NewSemaphore(exp, loc) =>
+      val e = visitExp(exp)
+      NamedAst.Expr.NewSemaphore(e, loc)
+
+    case DesugaredAst.Expr.AcquireSemaphore(exp, loc) =>
+      val e = visitExp(exp)
+      NamedAst.Expr.AcquireSemaphore(e, loc)
+
+    case DesugaredAst.Expr.TryAcquireSemaphore(exp, loc) =>
+      val e = visitExp(exp)
+      NamedAst.Expr.TryAcquireSemaphore(e, loc)
+
+    case DesugaredAst.Expr.ReleaseSemaphore(exp, loc) =>
+      val e = visitExp(exp)
+      NamedAst.Expr.ReleaseSemaphore(e, loc)
 
     case DesugaredAst.Expr.SelectChannel(rules, exp, loc) =>
       val rs = rules.map(visitSelectChannelRule)

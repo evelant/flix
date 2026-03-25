@@ -1254,6 +1254,58 @@ object Resolver {
       val e = resolveExp(exp, scp0)
       ResolvedAst.Expr.UnlockReentrantLock(e, loc)
 
+    case NamedAst.Expr.NewCondition(exp, loc) =>
+      val e = resolveExp(exp, scp0)
+      ResolvedAst.Expr.NewCondition(e, loc)
+
+    case NamedAst.Expr.AwaitCondition(exp, loc) =>
+      val e = resolveExp(exp, scp0)
+      ResolvedAst.Expr.AwaitCondition(e, loc)
+
+    case NamedAst.Expr.SignalCondition(exp, loc) =>
+      val e = resolveExp(exp, scp0)
+      ResolvedAst.Expr.SignalCondition(e, loc)
+
+    case NamedAst.Expr.SignalAllCondition(exp, loc) =>
+      val e = resolveExp(exp, scp0)
+      ResolvedAst.Expr.SignalAllCondition(e, loc)
+
+    case NamedAst.Expr.NewCyclicBarrier(exp, loc) =>
+      val e = resolveExp(exp, scp0)
+      ResolvedAst.Expr.NewCyclicBarrier(e, loc)
+
+    case NamedAst.Expr.AwaitCyclicBarrier(exp, loc) =>
+      val e = resolveExp(exp, scp0)
+      ResolvedAst.Expr.AwaitCyclicBarrier(e, loc)
+
+    case NamedAst.Expr.NewCountDownLatch(exp, loc) =>
+      val e = resolveExp(exp, scp0)
+      ResolvedAst.Expr.NewCountDownLatch(e, loc)
+
+    case NamedAst.Expr.AwaitCountDownLatch(exp, loc) =>
+      val e = resolveExp(exp, scp0)
+      ResolvedAst.Expr.AwaitCountDownLatch(e, loc)
+
+    case NamedAst.Expr.CountDownLatchCountDown(exp, loc) =>
+      val e = resolveExp(exp, scp0)
+      ResolvedAst.Expr.CountDownLatchCountDown(e, loc)
+
+    case NamedAst.Expr.NewSemaphore(exp, loc) =>
+      val e = resolveExp(exp, scp0)
+      ResolvedAst.Expr.NewSemaphore(e, loc)
+
+    case NamedAst.Expr.AcquireSemaphore(exp, loc) =>
+      val e = resolveExp(exp, scp0)
+      ResolvedAst.Expr.AcquireSemaphore(e, loc)
+
+    case NamedAst.Expr.TryAcquireSemaphore(exp, loc) =>
+      val e = resolveExp(exp, scp0)
+      ResolvedAst.Expr.TryAcquireSemaphore(e, loc)
+
+    case NamedAst.Expr.ReleaseSemaphore(exp, loc) =>
+      val e = resolveExp(exp, scp0)
+      ResolvedAst.Expr.ReleaseSemaphore(e, loc)
+
     case NamedAst.Expr.SelectChannel(rules, default, loc) =>
       val rs = rules.map {
         case NamedAst.SelectChannelRule(sym, chan, body, ruleLoc) =>
@@ -2288,6 +2340,10 @@ object Resolver {
         case "StringBuilderHandle" => UnkindedType.Cst(TypeConstructor.StringBuilderHandle, loc)
         case "RegexMatcher" => UnkindedType.Cst(TypeConstructor.RegexMatcher, loc)
         case "ReentrantLockHandle" => UnkindedType.Cst(TypeConstructor.ReentrantLockHandle, loc)
+        case "ConditionHandle" => UnkindedType.Cst(TypeConstructor.ConditionHandle, loc)
+        case "CyclicBarrierHandle" => UnkindedType.Cst(TypeConstructor.CyclicBarrierHandle, loc)
+        case "CountDownLatchHandle" => UnkindedType.Cst(TypeConstructor.CountDownLatchHandle, loc)
+        case "SemaphoreHandle" => UnkindedType.Cst(TypeConstructor.SemaphoreHandle, loc)
         case "Sender" => UnkindedType.Cst(TypeConstructor.Sender, loc)
         case "Receiver" => UnkindedType.Cst(TypeConstructor.Receiver, loc)
         case "Lazy" => UnkindedType.Cst(TypeConstructor.Lazy, loc)

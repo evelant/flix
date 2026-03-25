@@ -212,6 +212,19 @@ object Eraser {
         case AtomicOp.ReentrantLockLock => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
         case AtomicOp.ReentrantLockTryLock => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
         case AtomicOp.ReentrantLockUnlock => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
+        case AtomicOp.ConditionNew => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
+        case AtomicOp.ConditionAwait => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
+        case AtomicOp.ConditionSignal => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
+        case AtomicOp.ConditionSignalAll => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
+        case AtomicOp.CyclicBarrierNew => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
+        case AtomicOp.CyclicBarrierAwait => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
+        case AtomicOp.CountDownLatchNew => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
+        case AtomicOp.CountDownLatchAwait => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
+        case AtomicOp.CountDownLatchCountDown => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
+        case AtomicOp.SemaphoreNew => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
+        case AtomicOp.SemaphoreAcquire => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
+        case AtomicOp.SemaphoreTryAcquire => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
+        case AtomicOp.SemaphoreRelease => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
         case AtomicOp.Lazy => ErasedAst.Expr.ApplyAtomic(op, es, t, purity, loc)
         case AtomicOp.Force =>
           castExp(ErasedAst.Expr.ApplyAtomic(op, es, erase(tpe), purity, loc), t, purity, loc)
@@ -322,6 +335,10 @@ object Eraser {
       case RegexMatcher => RegexMatcher
       case ChannelHandle => ChannelHandle
       case ReentrantLockHandle => ReentrantLockHandle
+      case ConditionHandle => ConditionHandle
+      case CyclicBarrierHandle => CyclicBarrierHandle
+      case CountDownLatchHandle => CountDownLatchHandle
+      case SemaphoreHandle => SemaphoreHandle
       case Region => Region
       case Null => Null
       case Array(tpe) => SimpleType.mkArray(visitType(tpe))

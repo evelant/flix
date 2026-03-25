@@ -664,6 +664,32 @@ object SemanticTokensProvider {
 
     case Expr.UnlockReentrantLock(exp, _, _, _) => visitExp(exp)
 
+    case Expr.NewCondition(exp, _, _, _) => visitExp(exp)
+
+    case Expr.AwaitCondition(exp, _, _, _) => visitExp(exp)
+
+    case Expr.SignalCondition(exp, _, _, _) => visitExp(exp)
+
+    case Expr.SignalAllCondition(exp, _, _, _) => visitExp(exp)
+
+    case Expr.NewCyclicBarrier(exp, _, _, _) => visitExp(exp)
+
+    case Expr.AwaitCyclicBarrier(exp, _, _, _) => visitExp(exp)
+
+    case Expr.NewCountDownLatch(exp, _, _, _) => visitExp(exp)
+
+    case Expr.AwaitCountDownLatch(exp, _, _, _) => visitExp(exp)
+
+    case Expr.CountDownLatchCountDown(exp, _, _, _) => visitExp(exp)
+
+    case Expr.NewSemaphore(exp, _, _, _) => visitExp(exp)
+
+    case Expr.AcquireSemaphore(exp, _, _, _) => visitExp(exp)
+
+    case Expr.TryAcquireSemaphore(exp, _, _, _) => visitExp(exp)
+
+    case Expr.ReleaseSemaphore(exp, _, _, _) => visitExp(exp)
+
     case Expr.SelectChannel(rules, default, _, _, _) =>
       val rs = rules.foldLeft(Iterator.empty[SemanticToken]) {
         case (acc, SelectChannelRule(Binder(sym, _), chan, exp, _)) =>
@@ -926,6 +952,10 @@ object SemanticTokensProvider {
     case TypeConstructor.RegionWithoutRegion => false
     case TypeConstructor.ChannelHandle => false
     case TypeConstructor.ReentrantLockHandle => false
+    case TypeConstructor.ConditionHandle => false
+    case TypeConstructor.CyclicBarrierHandle => false
+    case TypeConstructor.CountDownLatchHandle => false
+    case TypeConstructor.SemaphoreHandle => false
   }
 
   /**

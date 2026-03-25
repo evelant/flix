@@ -483,6 +483,71 @@ object Dependencies {
       visitType(tpe)
       visitType(eff)
 
+    case Expr.NewCondition(exp, tpe, eff, _) =>
+      visitExp(exp)
+      visitType(tpe)
+      visitType(eff)
+
+    case Expr.AwaitCondition(exp, tpe, eff, _) =>
+      visitExp(exp)
+      visitType(tpe)
+      visitType(eff)
+
+    case Expr.NewCyclicBarrier(exp, tpe, eff, _) =>
+      visitExp(exp)
+      visitType(tpe)
+      visitType(eff)
+
+    case Expr.AwaitCyclicBarrier(exp, tpe, eff, _) =>
+      visitExp(exp)
+      visitType(tpe)
+      visitType(eff)
+
+    case Expr.NewCountDownLatch(exp, tpe, eff, _) =>
+      visitExp(exp)
+      visitType(tpe)
+      visitType(eff)
+
+    case Expr.AwaitCountDownLatch(exp, tpe, eff, _) =>
+      visitExp(exp)
+      visitType(tpe)
+      visitType(eff)
+
+    case Expr.CountDownLatchCountDown(exp, tpe, eff, _) =>
+      visitExp(exp)
+      visitType(tpe)
+      visitType(eff)
+
+    case Expr.NewSemaphore(exp, tpe, eff, _) =>
+      visitExp(exp)
+      visitType(tpe)
+      visitType(eff)
+
+    case Expr.AcquireSemaphore(exp, tpe, eff, _) =>
+      visitExp(exp)
+      visitType(tpe)
+      visitType(eff)
+
+    case Expr.TryAcquireSemaphore(exp, tpe, eff, _) =>
+      visitExp(exp)
+      visitType(tpe)
+      visitType(eff)
+
+    case Expr.ReleaseSemaphore(exp, tpe, eff, _) =>
+      visitExp(exp)
+      visitType(tpe)
+      visitType(eff)
+
+    case Expr.SignalCondition(exp, tpe, eff, _) =>
+      visitExp(exp)
+      visitType(tpe)
+      visitType(eff)
+
+    case Expr.SignalAllCondition(exp, tpe, eff, _) =>
+      visitExp(exp)
+      visitType(tpe)
+      visitType(eff)
+
     case Expr.SelectChannel(rules, default, tpe, eff, _) =>
       rules.foreach(visitSelectChannelRule)
       default.toList.foreach(visitExp)
