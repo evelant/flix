@@ -12,7 +12,7 @@ def expectOk(res: Result[a, b]): b with ToString[a] = match res {
 
 def main(): Unit \ IO =
     run {
-        let ph = ProcessWithResult.exec("zig", "version" :: Nil) |> expectOk;
+        let ph = ProcessWithResult.exec("java", "--version" :: Nil) |> expectOk;
 
         region rc {
             let out = Process.StdOut.StdOut(ph);
@@ -23,10 +23,10 @@ def main(): Unit \ IO =
                     bug!("process-spawn: expected stdout")
                 else ();
 
-            // `zig version` should begin with an ASCII digit.
+            // `java --version` should begin with an ASCII letter.
             let b0 = Array.get(0, buf);
             let _ =
-                if (b0 < 48i8 or b0 > 57i8)
+                if ((b0 < 65i8 or b0 > 90i8) and (b0 < 97i8 or b0 > 122i8))
                     bug!("process-spawn: unexpected stdout first byte: " + Int8.toString(b0))
                 else ();
 
@@ -43,4 +43,3 @@ def main(): Unit \ IO =
         println("process-spawn: ok");
         ()
     } with ProcessWithResult.runWithIO
-

@@ -163,7 +163,7 @@ class TestBootstrap extends AnyFunSuite {
   }
 
   test("test-native") {
-    assume(hasCmd(List("zig", "version")), "zig not available")
+    assume(ca.uwaterloo.flix.util.ZigToolchain.hasUsableCommand, "zig not available")
 
     val p = Files.createTempDirectory(ProjectPrefix)
     Bootstrap.init(p)(System.out)
@@ -176,7 +176,7 @@ class TestBootstrap extends AnyFunSuite {
   }
 
   test("test-wasm-node") {
-    assume(hasCmd(List("zig", "version")), "zig not available")
+    assume(ca.uwaterloo.flix.util.ZigToolchain.hasUsableCommand, "zig not available")
     assume(hasCmd(List("wasm-tools", "--version")), "wasm-tools not available")
     assume(hasCmd(List("jco", "--version")), "jco not available")
     assume(hasCmd(List("node", "--version")), "node not available")

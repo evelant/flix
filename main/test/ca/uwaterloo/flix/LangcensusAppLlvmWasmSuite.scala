@@ -187,7 +187,7 @@ class LangcensusAppLlvmWasmSuite extends AnyFunSuite {
     s.replaceAll("\u001B\\[[0-9;]*m", "")
 
   private def hasZig: Boolean =
-    hasCmd(List("zig", "version"))
+    ca.uwaterloo.flix.util.ZigToolchain.hasUsableCommand
 
   private def hasWasmTools: Boolean =
     hasCmd(List("wasm-tools", "--version"))

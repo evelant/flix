@@ -307,7 +307,7 @@ class TestMain extends AnyFunSuite {
     val options = Options.Default.copy(target = CompilationTarget.LlvmWasm, stdlibProfile = StdlibProfile.Portable)
 
     val result = Main.validateCommandPreflight(cmdOpts, options, hasCmd = {
-      case List("zig", "version") => true
+      case cmd if ca.uwaterloo.flix.util.ZigToolchain.probeCommands.contains(cmd) => true
       case List("wasm-tools", "--version") => true
       case List("jco", "--version") => true
       case _ => false
@@ -342,7 +342,7 @@ class TestMain extends AnyFunSuite {
     val options = Options.Default.copy(target = CompilationTarget.LlvmWasm, stdlibProfile = StdlibProfile.Portable)
 
     val result = Main.validateCommandPreflight(cmdOpts, options, runner = Some(RunnerKind.Node), hasCmd = {
-      case List("zig", "version") => true
+      case cmd if ca.uwaterloo.flix.util.ZigToolchain.probeCommands.contains(cmd) => true
       case List("wasm-tools", "--version") => true
       case List("jco", "--version") => true
       case _ => false
@@ -357,7 +357,7 @@ class TestMain extends AnyFunSuite {
     val options = Options.Default.copy(target = CompilationTarget.LlvmWasm, stdlibProfile = StdlibProfile.Portable)
 
     val result = Main.validateCommandPreflight(cmdOpts, options, runner = Some(RunnerKind.Wasmtime), hasCmd = {
-      case List("zig", "version") => true
+      case cmd if ca.uwaterloo.flix.util.ZigToolchain.probeCommands.contains(cmd) => true
       case List("wasm-tools", "--version") => true
       case List("jco", "--version") => true
       case _ => false

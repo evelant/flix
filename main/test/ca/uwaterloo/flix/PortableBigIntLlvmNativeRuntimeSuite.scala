@@ -103,7 +103,7 @@ class PortableBigIntLlvmNativeRuntimeSuite extends AnyFunSuite {
     System.getProperty("os.name").toLowerCase.contains("win")
 
   private def hasZig: Boolean =
-    hasCmd(List("zig", "version"))
+    ca.uwaterloo.flix.util.ZigToolchain.hasUsableCommand
 
   private def hasCmd(cmd: List[String]): Boolean = {
     try {

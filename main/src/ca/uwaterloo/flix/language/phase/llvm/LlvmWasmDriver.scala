@@ -19,7 +19,7 @@ package ca.uwaterloo.flix.language.phase.llvm
 import ca.uwaterloo.flix.api.Flix
 import ca.uwaterloo.flix.language.ast.SourceLocation
 import ca.uwaterloo.flix.language.phase.WasmImportInterface
-import ca.uwaterloo.flix.util.{ArtifactNames, Build, InternalCompilerException}
+import ca.uwaterloo.flix.util.{ArtifactNames, Build, InternalCompilerException, ZigToolchain}
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{FileSystem, FileSystemNotFoundException, FileSystems, Files, Path, Paths, StandardCopyOption}
@@ -37,6 +37,13 @@ import scala.jdk.CollectionConverters.*
 object LlvmWasmDriver {
 
   private case class WitBuildInputs(bindingsDir: Path, glueC: Path)
+
+  private def zigCommand: List[String] = ZigToolchain.usableCommand.getOrElse {
+    throw InternalCompilerException(
+      "LLVM-wasm toolchain requires a usable Zig command. Set FLIX_ZIG_CMD if Zig is managed through a wrapper such as anyzig.",
+      SourceLocation.Unknown
+    )
+  }
 
   case class Artifacts(coreWasm: Path,
                        componentWasm: Path,
@@ -260,8 +267,8 @@ object LlvmWasmDriver {
 
   private def compileRuntime(runtimeZig: Path, wasmDir: Path, optFlag: String): Path = {
     val out = wasmDir.resolve("flix_rt_llvm.wasm.o")
-    val cmd = List(
-      "zig", "cc",
+    val cmd = zigCommand ::: List(
+      "cc",
       "-target", "wasm32-freestanding",
       "-c",
       "-Wno-override-module",
@@ -281,8 +288,8 @@ object LlvmWasmDriver {
 
   private def compileModule(modulePath: Path, wasmDir: Path, optFlag: String): Path = {
     val out = wasmDir.resolve("module.wasm.o")
-    val cmd = List(
-      "zig", "cc",
+    val cmd = zigCommand ::: List(
+      "cc",
       "-target", "wasm32-freestanding",
       "-c",
       "-Wno-override-module",
@@ -307,8 +314,8 @@ object LlvmWasmDriver {
     * This avoids introducing a WASI dependency as long as we do not link wasi-libc.
     */
   private def compileWitGlue(witGlueC: Path, out: Path, wasmDir: Path, optFlag: String): Path = {
-    val cmd = List(
-      "zig", "cc",
+    val cmd = zigCommand ::: List(
+      "cc",
       "-target", "wasm32-wasi",
       "-c",
       optFlag,
@@ -326,8 +333,8 @@ object LlvmWasmDriver {
   }
 
   private def linkCore(outWasm: Path, wasmDir: Path, optFlag: String, objs: List[Path]): Unit = {
-    val cmd = List(
-      "zig", "cc",
+    val cmd = zigCommand ::: List(
+      "cc",
       "-target", "wasm32-freestanding",
       "-Wl,--no-entry",
       // Canonical ABI requires `cabi_realloc` to be exported by the core module.
@@ -396,8 +403,8 @@ object LlvmWasmDriver {
                                      shimC: Path,
                                      componentTypeObj: Path,
                                      includeDir: Path): Unit = {
-    val cmd = List(
-      "zig", "cc",
+    val cmd = zigCommand ::: List(
+      "cc",
       "-target", "wasm32-freestanding",
       "-Wl,--no-entry",
       "-I",

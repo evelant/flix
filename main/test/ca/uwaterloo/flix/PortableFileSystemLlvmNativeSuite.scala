@@ -444,15 +444,7 @@ class PortableFileSystemLlvmNativeSuite extends AnyFunSuite {
   private def escapePath(path: Path): String =
     path.toAbsolutePath.normalize().toString.replace("\\", "\\\\")
 
-  private def hasZig: Boolean = {
-    try {
-      val p = new ProcessBuilder("zig", "version").redirectErrorStream(true).start()
-      p.waitFor(2, TimeUnit.SECONDS) && p.exitValue() == 0
-    } catch {
-      case _: IOException => false
-      case _: InterruptedException => false
-    }
-  }
+  private def hasZig: Boolean = ca.uwaterloo.flix.util.ZigToolchain.hasUsableCommand
 
   private def hasMkFifo: Boolean = {
     try {

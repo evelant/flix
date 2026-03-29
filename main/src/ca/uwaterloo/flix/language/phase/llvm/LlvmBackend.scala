@@ -302,7 +302,6 @@ object LlvmBackend {
         Decl.DeclareFun(Type.Ptr, "flix_region_malloc", List(Type.Ptr, Type.Ptr, Type.I64)),
         Decl.DeclareFun(Type.Ptr, "flix_region_alloc", List(Type.Ptr, Type.Ptr, Type.Ptr)),
         Decl.DeclareFun(Type.Void, "flix_region_remember_slot", List(Type.Ptr, Type.Ptr, Type.Ptr)),
-        Decl.DeclareFun(Type.Void, "flix_region_remember_ptr_array", List(Type.Ptr, Type.Ptr, Type.Ptr, Type.I64)),
         Decl.DeclareFun(Type.Void, "flix_store_ptr", List(Type.Ptr, Type.Ptr, Type.I64)),
         Decl.DeclareFun(Type.I64, "flix_print", List(Type.Ptr)),
         Decl.DeclareFun(Type.I64, "flix_eprint", List(Type.Ptr)),
@@ -2684,13 +2683,35 @@ object LlvmBackend {
       val ctxPtr = Value.Local("ctx", Type.Ptr)
       val selfPtr = Value.Local("self", Type.Ptr)
       val arg0Payload = Value.Local("arg0", Type.I64)
-      val arg0 = unboxFromI64(arg0Payload, defn.fparams.head.tpe, fb)
+      var rootsToPop = 0L
 
       val capturedArgs = defn.cparams.zipWithIndex.map {
         case (cp, i) =>
           val payload = loadObjI64Slot(selfPtr, Value.IntConst(i.toLong, Type.I64), fb)
-          unboxFromI64(payload, cp.tpe, fb)
+          val value = unboxFromI64(payload, cp.tpe, fb)
+          if (isGcRootType(cp.tpe)) {
+            val slotPtr = freshTmp(Type.Ptr)
+            fb.current.emitAssign(slotPtr, Op.Alloca(llvmTypeOf(cp.tpe)))
+            fb.current.emitStore(value, slotPtr)
+            fb.current.emitCallVoid(rootPushNameOf(llvmTypeOf(cp.tpe)), List(ctxPtr, slotPtr))
+            rootsToPop += 1
+          }
+          value
       }
+
+      val arg0 = {
+        val value = unboxFromI64(arg0Payload, defn.fparams.head.tpe, fb)
+        if (isGcRootType(defn.fparams.head.tpe)) {
+          val slotPtr = freshTmp(Type.Ptr)
+          fb.current.emitAssign(slotPtr, Op.Alloca(llvmTypeOf(defn.fparams.head.tpe)))
+          fb.current.emitStore(value, slotPtr)
+          fb.current.emitCallVoid(rootPushNameOf(llvmTypeOf(defn.fparams.head.tpe)), List(ctxPtr, slotPtr))
+          rootsToPop += 1
+        }
+        value
+      }
+
+      fb.rootsToPop = rootsToPop
 
       val callTmp = freshTmp(flixResultType)
       fb.current.emitAssign(callTmp, Op.Call(flixResultType, defName, ctxPtr :: (capturedArgs :+ arg0)))
@@ -2716,13 +2737,24 @@ object LlvmBackend {
 
       val ctxPtr = Value.Local("ctx", Type.Ptr)
       val selfPtr = Value.Local("self", Type.Ptr)
+      var rootsToPop = 0L
 
       val allParams = defn.cparams ::: defn.fparams
       val args = allParams.zipWithIndex.map {
         case (p, i) =>
           val payload = loadObjI64Slot(selfPtr, Value.IntConst(i.toLong, Type.I64), fb)
-          unboxFromI64(payload, p.tpe, fb)
+          val value = unboxFromI64(payload, p.tpe, fb)
+          if (isGcRootType(p.tpe)) {
+            val slotPtr = freshTmp(Type.Ptr)
+            fb.current.emitAssign(slotPtr, Op.Alloca(llvmTypeOf(p.tpe)))
+            fb.current.emitStore(value, slotPtr)
+            fb.current.emitCallVoid(rootPushNameOf(llvmTypeOf(p.tpe)), List(ctxPtr, slotPtr))
+            rootsToPop += 1
+          }
+          value
       }
+
+      fb.rootsToPop = rootsToPop
 
       val callTmp = freshTmp(flixResultType)
       fb.current.emitAssign(callTmp, Op.Call(flixResultType, defName, ctxPtr :: args))
@@ -2747,6 +2779,7 @@ object LlvmBackend {
 
       val ctxPtr = Value.Local("ctx", Type.Ptr)
       val selfPtr = Value.Local("self", Type.Ptr)
+      var rootsToPop = 0L
 
       // Captured layout:
       //   payload[0] = closure pointer bits (i64)
@@ -2755,8 +2788,23 @@ object LlvmBackend {
 
       val cloPtr = freshTmp(Type.Ptr)
       fb.current.emitAssign(cloPtr, Op.Cast("inttoptr", Type.Ptr, cloBits))
+      val cloRootSlot = freshTmp(Type.Ptr)
+      fb.current.emitAssign(cloRootSlot, Op.Alloca(Type.Ptr))
+      fb.current.emitStore(cloPtr, cloRootSlot)
+      fb.current.emitCallVoid(rootPushNameOf(Type.Ptr), List(ctxPtr, cloRootSlot))
+      rootsToPop += 1
 
       val argBits = loadObjI64Slot(selfPtr, Value.IntConst(1L, Type.I64), fb)
+      if (isGcRootType(argTpe)) {
+        val argValue = unboxFromI64(argBits, argTpe, fb)
+        val argRootSlot = freshTmp(Type.Ptr)
+        fb.current.emitAssign(argRootSlot, Op.Alloca(llvmTypeOf(argTpe)))
+        fb.current.emitStore(argValue, argRootSlot)
+        fb.current.emitCallVoid(rootPushNameOf(llvmTypeOf(argTpe)), List(ctxPtr, argRootSlot))
+        rootsToPop += 1
+      }
+
+      fb.rootsToPop = rootsToPop
 
       val callTmp = freshTmp(flixResultType)
       fb.current.emitAssign(callTmp, Op.Call(flixResultType, "flix_invoke_thunk", List(ctxPtr, cloPtr, Value.IntConst(ResultTagValue, Type.I64), argBits)))
@@ -4683,12 +4731,6 @@ object LlvmBackend {
 
     private def emitStorePtrLike(ctxPtr: Value, slotPtr: Value, payload: Value, fb: FunBuilder): Unit = {
       fb.current.emitCallVoid("flix_store_ptr", List(ctxPtr, slotPtr, payload))
-    }
-
-    private def emitRememberPtrArray(ctxPtr: Value, rcPtr: Value, arrPtr: Value, lenI64: Value, fb: FunBuilder): Unit = {
-      val basePtr = freshTmp(Type.Ptr)
-      fb.current.emitAssign(basePtr, Op.Gep(Type.I8, arrPtr, Value.IntConst(16L, Type.I64)))
-      fb.current.emitCallVoid("flix_region_remember_ptr_array", List(ctxPtr, rcPtr, basePtr, lenI64))
     }
 
     private def emitExpr(exp0: Expr,
@@ -6984,6 +7026,14 @@ object LlvmBackend {
       val kTi = Value.Global(LlvmNames.kTypeInfoName(opDef.tpe), Type.Ptr)
       fb.current.emitAssign(kPtr, Op.Call(Type.Ptr, "flix_alloc", List(ctxPtr, kTi)))
 
+      // Keep the continuation closure alive across the handler rule call. The callee allocates its
+      // own frame before storing parameters, so a raw `kPtr` argument is not an honest GC root.
+      val kRootSlot = freshTmp(Type.Ptr)
+      fb.current.emitAssign(kRootSlot, Op.Alloca(Type.Ptr))
+      fb.current.emitStore(kPtr, kRootSlot)
+      fb.current.emitCallVoid(rootPushNameOf(Type.Ptr), List(ctxPtr, kRootSlot))
+      fb.rootsToPop = 1L
+
       val resBits = freshTmp(Type.I64)
       fb.current.emitAssign(resBits, Op.Cast("ptrtoint", Type.I64, resumptionPtr))
       storeObjI64Slot(kPtr, Value.IntConst(0L, Type.I64), resBits, fb)
@@ -7750,10 +7800,6 @@ object LlvmBackend {
           }
         }
 
-        if (isPtrArray) {
-          emitRememberPtrArray(ctxPtr, rcPtr, arrPtr, Value.IntConst(len, Type.I64), fb)
-        }
-
         arrPtr
 
       case AtomicOp.ArrayNew =>
@@ -7869,9 +7915,6 @@ object LlvmBackend {
 
         val endBlock = fb.newBlock(endLabel)
         fb.setCurrent(endBlock)
-        if (isPtrArray) {
-          emitRememberPtrArray(ctxPtr, rcPtr, arrPtr, lenI64, fb)
-        }
         fb.current.setTerminator(Terminator.Br(contLabel))
 
         val contBlock = fb.newBlock(contLabel)

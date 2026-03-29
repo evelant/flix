@@ -156,7 +156,7 @@ class PortableTextEncodingLlvmWasmRuntimeSuite extends AnyFunSuite {
   }
 
   private def hasZig: Boolean =
-    hasCmd(List("zig", "version"))
+    ca.uwaterloo.flix.util.ZigToolchain.hasUsableCommand
 
   private def hasWasmTools: Boolean =
     hasCmd(List("wasm-tools", "--version"))

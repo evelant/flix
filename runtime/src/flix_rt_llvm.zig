@@ -659,14 +659,16 @@ fn getTupleTypeInfo(arity: usize, ptr_mask: u64) *const FlixTypeInfo {
     return ti;
 }
 
-fn allocFlixTupleFromPayloads(payloads: []const i64, ptr_mask: u64) *anyopaque {
-    const arity: usize = payloads.len;
+fn allocFlixTupleUninit(arity: usize, ptr_mask: u64) *anyopaque {
     const ti = getTupleTypeInfo(arity, ptr_mask);
     if (ti.size_bytes == 0) @panic("allocFlixTupleFromPayloads: invalid tuple typeinfo size");
     const size: usize = @intCast(ti.size_bytes);
+    return gcAllocBytes(size, ti);
+}
 
-    const mem = gcAllocBytes(size, ti);
-
+fn allocFlixTupleFromPayloads(payloads: []const i64, ptr_mask: u64) *anyopaque {
+    const arity: usize = payloads.len;
+    const mem = allocFlixTupleUninit(arity, ptr_mask);
     const base: [*]u8 = @ptrCast(mem);
     const slots_ptr: [*]i64 = @ptrCast(@alignCast(base + @sizeOf(FlixObj)));
     var i: usize = 0;
@@ -845,6 +847,7 @@ const FlixRootEntry = struct {
 
 const GcMarker = struct {
     worklist: std.ArrayListUnmanaged(*anyopaque),
+    region_seen: std.AutoHashMapUnmanaged(usize, u8),
 };
 
 const BlockedNativeWaitKind = enum(u32) {
@@ -936,11 +939,38 @@ const HandshakeCallbackId = enum(u8) {
     Park = 2,
 };
 
+const GcDebugStatsSnapshot = struct {
+    stw_requests: u64,
+    stw_releases: u64,
+    soft_requests: u64,
+    pollcheck_cooperations: u64,
+    ctx_free_handshake_cooperations: u64,
+    scan_roots_cooperations: u64,
+    ctx_registrations: u64,
+    ctx_deregistrations: u64,
+    last_stw_epoch: u64,
+    last_stw_acks: u32,
+    last_soft_epoch: u64,
+    last_soft_acks: u32,
+};
+
 var g_handshake_request_epoch: RtAtomic(u64) = .init(0);
 var g_handshake_release_epoch: RtAtomic(u64) = .init(0);
 var g_handshake_ack_count: RtAtomic(u32) = .init(0);
 var g_handshake_cb_id: RtAtomic(u8) = .init(@intFromEnum(HandshakeCallbackId.Nop));
 var g_handshake_stw: RtAtomic(bool) = .init(false);
+var g_gc_debug_stw_requests: RtAtomic(u64) = .init(0);
+var g_gc_debug_stw_releases: RtAtomic(u64) = .init(0);
+var g_gc_debug_soft_requests: RtAtomic(u64) = .init(0);
+var g_gc_debug_pollcheck_cooperations: RtAtomic(u64) = .init(0);
+var g_gc_debug_ctx_free_handshake_cooperations: RtAtomic(u64) = .init(0);
+var g_gc_debug_scan_roots_cooperations: RtAtomic(u64) = .init(0);
+var g_gc_debug_ctx_registrations: RtAtomic(u64) = .init(0);
+var g_gc_debug_ctx_deregistrations: RtAtomic(u64) = .init(0);
+var g_gc_debug_last_stw_epoch: RtAtomic(u64) = .init(0);
+var g_gc_debug_last_stw_acks: RtAtomic(u32) = .init(0);
+var g_gc_debug_last_soft_epoch: RtAtomic(u64) = .init(0);
+var g_gc_debug_last_soft_acks: RtAtomic(u32) = .init(0);
 
 // Pending spawn roots: closure pointers passed to new OS threads before the thread has a chance to
 // register a `FlixCtx` and publish its explicit roots. These pointers live on a foreign stack and
@@ -991,6 +1021,7 @@ fn registerCtx(ctx: *FlixCtx) void {
     g_ctx_registry_mutex.lock();
     defer g_ctx_registry_mutex.unlock();
     g_ctx_registry.put(@intFromPtr(ctx), 0) catch @panic("oom");
+    _ = g_gc_debug_ctx_registrations.fetchAdd(1, .acq_rel);
 }
 
 fn deregisterCtx(ctx: *FlixCtx) void {
@@ -998,6 +1029,46 @@ fn deregisterCtx(ctx: *FlixCtx) void {
     g_ctx_registry_mutex.lock();
     defer g_ctx_registry_mutex.unlock();
     _ = g_ctx_registry.remove(@intFromPtr(ctx));
+    _ = g_gc_debug_ctx_deregistrations.fetchAdd(1, .acq_rel);
+}
+
+fn ctxRegistryContains(addr: usize) bool {
+    if (!g_ctx_registry_initialized) return false;
+    g_ctx_registry_mutex.lock();
+    defer g_ctx_registry_mutex.unlock();
+    return g_ctx_registry.contains(addr);
+}
+
+fn gcDebugStatsReset() void {
+    g_gc_debug_stw_requests.store(0, .release);
+    g_gc_debug_stw_releases.store(0, .release);
+    g_gc_debug_soft_requests.store(0, .release);
+    g_gc_debug_pollcheck_cooperations.store(0, .release);
+    g_gc_debug_ctx_free_handshake_cooperations.store(0, .release);
+    g_gc_debug_scan_roots_cooperations.store(0, .release);
+    g_gc_debug_ctx_registrations.store(0, .release);
+    g_gc_debug_ctx_deregistrations.store(0, .release);
+    g_gc_debug_last_stw_epoch.store(0, .release);
+    g_gc_debug_last_stw_acks.store(0, .release);
+    g_gc_debug_last_soft_epoch.store(0, .release);
+    g_gc_debug_last_soft_acks.store(0, .release);
+}
+
+fn gcDebugStatsSnapshot() GcDebugStatsSnapshot {
+    return .{
+        .stw_requests = g_gc_debug_stw_requests.load(.acquire),
+        .stw_releases = g_gc_debug_stw_releases.load(.acquire),
+        .soft_requests = g_gc_debug_soft_requests.load(.acquire),
+        .pollcheck_cooperations = g_gc_debug_pollcheck_cooperations.load(.acquire),
+        .ctx_free_handshake_cooperations = g_gc_debug_ctx_free_handshake_cooperations.load(.acquire),
+        .scan_roots_cooperations = g_gc_debug_scan_roots_cooperations.load(.acquire),
+        .ctx_registrations = g_gc_debug_ctx_registrations.load(.acquire),
+        .ctx_deregistrations = g_gc_debug_ctx_deregistrations.load(.acquire),
+        .last_stw_epoch = g_gc_debug_last_stw_epoch.load(.acquire),
+        .last_stw_acks = g_gc_debug_last_stw_acks.load(.acquire),
+        .last_soft_epoch = g_gc_debug_last_soft_epoch.load(.acquire),
+        .last_soft_acks = g_gc_debug_last_soft_acks.load(.acquire),
+    };
 }
 
 fn gcMarkerMarkPtr(marker: *GcMarker, ptr: *anyopaque) void {
@@ -1005,6 +1076,12 @@ fn gcMarkerMarkPtr(marker: *GcMarker, ptr: *anyopaque) void {
     if (g_gc_objects.getPtr(addr)) |meta| {
         if (!meta.marked) {
             meta.marked = true;
+            marker.worklist.append(rt_alloc, ptr) catch @panic("oom");
+        }
+    } else if (regionObjectIsRegistered(ptr)) {
+        const gop = marker.region_seen.getOrPut(rt_alloc, addr) catch @panic("oom");
+        if (!gop.found_existing) {
+            gop.value_ptr.* = 0;
             marker.worklist.append(rt_alloc, ptr) catch @panic("oom");
         }
     }
@@ -1016,6 +1093,16 @@ fn gcMarkerMarkPayload(marker: *GcMarker, payload: i64) void {
 }
 
 fn gcMarkerTraceObject(ctx: *FlixCtx, marker: *GcMarker, obj_ptr: *anyopaque) void {
+    if (isPtrArrayObject(obj_ptr)) {
+        const len: usize = flixArrayLen(obj_ptr);
+        const slots: [*]i64 = flixArraySlots(obj_ptr);
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            gcMarkerMarkPayload(marker, slots[i]);
+        }
+        return;
+    }
+
     const obj: *FlixObj = @ptrCast(@alignCast(obj_ptr));
     const ti = obj.typeinfo;
 
@@ -1087,12 +1174,6 @@ fn gcMarkAllRoots(marker: *GcMarker) void {
             for (region.remembered_slots.items) |slot_ptr| {
                 gcMarkerMarkPayload(marker, slot_ptr.*);
             }
-            for (region.remembered_ptr_arrays.items) |arr| {
-                var i: usize = 0;
-                while (i < arr.count) : (i += 1) {
-                    gcMarkerMarkPayload(marker, arr.base[i]);
-                }
-            }
         }
         g_region_registry_mutex.unlock();
     }
@@ -1149,9 +1230,11 @@ fn gcMarkAllRoots(marker: *GcMarker) void {
 fn gcMarkSweep(ctx: *FlixCtx) void {
     if (!g_gc_initialized) return;
 
-    var marker: GcMarker = .{ .worklist = .{} };
+    var marker: GcMarker = .{ .worklist = .{}, .region_seen = .{} };
     defer marker.worklist.deinit(rt_alloc);
+    defer marker.region_seen.deinit(rt_alloc);
     marker.worklist.ensureTotalCapacity(rt_alloc, 4096) catch @panic("oom");
+    marker.region_seen.ensureTotalCapacity(rt_alloc, 1024) catch @panic("oom");
 
     ctx.gc_marker = &marker;
     defer ctx.gc_marker = null;
@@ -1191,35 +1274,70 @@ fn handshakeRequestStw(cb: HandshakeCallbackId) u64 {
     g_handshake_stw.store(true, .release);
     g_handshake_ack_count.store(0, .release);
     const epoch = g_handshake_request_epoch.fetchAdd(1, .acq_rel) + 1;
+    _ = g_gc_debug_stw_requests.fetchAdd(1, .acq_rel);
     // Ensure that a thread that sees this epoch will park until we release it.
     g_handshake_release_epoch.store(epoch - 1, .release);
     return epoch;
 }
 
-fn handshakeWaitStw(epoch: u64, self: *FlixCtx) void {
-    // Wait for every non-blocked context to observe the epoch and park at its pollcheck.
+fn handshakeRequestSoft(cb: HandshakeCallbackId) u64 {
+    g_handshake_cb_id.store(@intFromEnum(cb), .release);
+    g_handshake_stw.store(false, .release);
+    g_handshake_ack_count.store(0, .release);
+    const epoch = g_handshake_request_epoch.fetchAdd(1, .acq_rel) + 1;
+    _ = g_gc_debug_soft_requests.fetchAdd(1, .acq_rel);
+    g_handshake_release_epoch.store(epoch, .release);
+    return epoch;
+}
+
+fn handshakeWaitEpoch(epoch: u64, self: ?*FlixCtx, comptime is_stw: bool) void {
+    // Wait for every non-blocked target context to complete the callback for this epoch.
     while (true) {
-        var all_stopped = true;
+        var target_count: u32 = 0;
+        var all_seen = true;
         if (g_ctx_registry_initialized) {
             g_ctx_registry_mutex.lock();
             var it = g_ctx_registry.iterator();
             while (it.next()) |e| {
                 const ctx_ptr: *FlixCtx = @ptrFromInt(e.key_ptr.*);
-                if (ctx_ptr == self) continue;
+                if (self) |s| {
+                    if (ctx_ptr == s) continue;
+                }
                 if (ctx_ptr.blocked.load(.acquire)) continue;
+                target_count += 1;
                 if (ctx_ptr.seen_epoch.load(.acquire) < epoch) {
-                    all_stopped = false;
+                    all_seen = false;
                     break;
                 }
             }
             g_ctx_registry_mutex.unlock();
         }
-        if (all_stopped) return;
+        const acks = g_handshake_ack_count.load(.acquire);
+        if (all_seen and acks >= target_count) {
+            if (is_stw) {
+                g_gc_debug_last_stw_epoch.store(epoch, .release);
+                g_gc_debug_last_stw_acks.store(acks, .release);
+            } else {
+                g_gc_debug_last_soft_epoch.store(epoch, .release);
+                g_gc_debug_last_soft_acks.store(acks, .release);
+            }
+            return;
+        }
         std.atomic.spinLoopHint();
     }
 }
 
+fn handshakeWaitStw(epoch: u64, self: *FlixCtx) void {
+    handshakeWaitEpoch(epoch, self, true);
+}
+
+fn handshakeWaitSoft(epoch: u64, self: ?*FlixCtx) void {
+    handshakeWaitEpoch(epoch, self, false);
+    g_handshake_cb_id.store(@intFromEnum(HandshakeCallbackId.Nop), .release);
+}
+
 fn handshakeReleaseStw(epoch: u64) void {
+    _ = g_gc_debug_stw_releases.fetchAdd(1, .acq_rel);
     g_handshake_release_epoch.store(epoch, .release);
     g_handshake_stw.store(false, .release);
     g_handshake_cb_id.store(@intFromEnum(HandshakeCallbackId.Nop), .release);
@@ -1232,15 +1350,17 @@ fn gcCollectStw(ctx: *FlixCtx) void {
     // Mark the collector as having cooperated with this epoch.
     ctx.seen_epoch.store(epoch, .release);
 
+    dbgGc("gc: stw request epoch={} bytes={} threshold={}\n", .{ epoch, g_gc_bytes, g_gc_threshold_bytes });
+
     handshakeWaitStw(epoch, ctx);
     defer handshakeReleaseStw(epoch);
 
     // World is stopped; collect.
-    dbgGc("gc: stw start bytes={} threshold={}\n", .{ g_gc_bytes, g_gc_threshold_bytes });
+    dbgGc("gc: stw parked epoch={} acks={}\n", .{ epoch, g_handshake_ack_count.load(.acquire) });
     g_gc_mutex.lock();
     defer g_gc_mutex.unlock();
     gcMarkSweep(ctx);
-    dbgGc("gc: stw done bytes={} threshold={}\n", .{ g_gc_bytes, g_gc_threshold_bytes });
+    dbgGc("gc: stw done epoch={} bytes={} threshold={}\n", .{ epoch, g_gc_bytes, g_gc_threshold_bytes });
 }
 
 fn gcPollcheckMaybeCollect(ctx: *FlixCtx) void {
@@ -1270,25 +1390,16 @@ fn pollcheckCooperate(ctx: *FlixCtx) void {
     switch (cb) {
         .Nop => {},
         .ScanRoots => {
-            // Scan the thread's explicit roots (shadow stack). GC integration will enqueue these
-            // roots into the marker; for bring-up this is a no-op scan over registered slots.
-            for (ctx.roots.items) |e| {
-                switch (e.kind) {
-                    .ValueI64 => {
-                        const slot: *i64 = @ptrCast(@alignCast(e.slot_ptr));
-                        _ = slot.*;
-                    },
-                    .Ptr => {
-                        const slot: *?*anyopaque = @ptrCast(@alignCast(e.slot_ptr));
-                        _ = slot.*;
-                    },
-                }
+            _ = g_gc_debug_scan_roots_cooperations.fetchAdd(1, .acq_rel);
+            if (ctx.gc_marker) |marker| {
+                gcMarkCtxRoots(marker, ctx);
             }
         },
         .Park => {},
     }
 
     _ = g_handshake_ack_count.fetchAdd(1, .acq_rel);
+    _ = g_gc_debug_pollcheck_cooperations.fetchAdd(1, .acq_rel);
 
     if (g_handshake_stw.load(.acquire)) {
         while (g_handshake_release_epoch.load(.acquire) < req) {
@@ -1355,6 +1466,13 @@ export fn flix_ctx_free(ctx_ptr0: ?*anyopaque) void {
     const ctx_ptr = ctx_ptr0 orelse return;
     dbg("ctx_free: {x} start\n", .{@intFromPtr(ctx_ptr)});
     // If a handshake is in-flight, cooperate once before deregistering.
+    const ctx_before: *FlixCtx = requireCtx(ctx_ptr);
+    const req_before = g_handshake_request_epoch.load(.acquire);
+    const stw_before = g_handshake_stw.load(.acquire);
+    const seen_before = ctx_before.seen_epoch.load(.acquire);
+    if (stw_before and req_before > seen_before) {
+        _ = g_gc_debug_ctx_free_handshake_cooperations.fetchAdd(1, .acq_rel);
+    }
     flix_gc_pollcheck(ctx_ptr);
     const ctx: *FlixCtx = requireCtx(ctx_ptr);
     deregisterCtx(ctx);
@@ -3634,9 +3752,6 @@ fn allocFlixArrayFromPtrPayloadsInRegion(ctx: *anyopaque, region_ptr0: ?*anyopaq
         flix_store_ptr(ctx, @ptrCast(&slots_ptr[i]), payloadFromPtr(ptrs[i]));
     }
 
-    if (len > 0) {
-        flix_region_remember_ptr_array(ctx, region_ptr0, @ptrCast(slots_ptr), @intCast(len));
-    }
     return mem;
 }
 
@@ -6273,7 +6388,6 @@ export fn flix_env_get_args(ctx: *anyopaque, region_ptr0: ?*anyopaque) *anyopaqu
             flix_store_ptr(ctx, @ptrCast(&slots_ptr[i]), payloadFromPtr(s_ptr));
         }
 
-        flix_region_remember_ptr_array(ctx, region_ptr0, @ptrCast(&slots_ptr[0]), @intCast(n));
         return mem;
     }
 
@@ -6300,7 +6414,6 @@ export fn flix_env_get_args(ctx: *anyopaque, region_ptr0: ?*anyopaque) *anyopaqu
         flix_store_ptr(ctx, @ptrCast(&slots_ptr[i]), payloadFromPtr(s_ptr));
     }
 
-    flix_region_remember_ptr_array(ctx, region_ptr0, @ptrCast(&slots_ptr[0]), @intCast(n));
     return mem;
 }
 
@@ -6341,7 +6454,6 @@ export fn flix_env_get_env_pairs(ctx: *anyopaque, region_ptr0: ?*anyopaque) *any
             idx += 2;
         }
 
-        flix_region_remember_ptr_array(ctx, region_ptr0, @ptrCast(&slots_ptr[0]), @intCast(len));
         return mem;
     }
 }
@@ -9224,11 +9336,17 @@ fn invokeThunk(ctx: *anyopaque, thunk: *anyopaque, arg_tag: i64, arg_payload: i6
 // ----------------------------------------------------------------------------
 
 export fn flix_frames_push(frame: *anyopaque, prefix: ?*anyopaque) *anyopaque {
-    const payloads = [_]i64{
-        payloadFromPtr(frame),
-        payloadFromNullablePtrOrZero(prefix),
-    };
-    return allocFlixTupleFromPayloads(payloads[0..], 0b11);
+    var frame_root: ?*anyopaque = frame;
+    var prefix_root = prefix;
+    flix_gc_push_root_ptr(currentCtxPtr(), @ptrCast(&frame_root));
+    flix_gc_push_root_ptr(currentCtxPtr(), @ptrCast(&prefix_root));
+    defer flix_gc_pop_roots(currentCtxPtr(), 2);
+
+    const mem = allocFlixTupleUninit(2, 0b11);
+    const slots = objPayloadSlots(mem);
+    slots[0] = payloadFromPtr(frame_root.?);
+    slots[1] = payloadFromNullablePtrOrZero(prefix_root);
+    return mem;
 }
 
 export fn flix_frames_reverse_onto(prefix: ?*anyopaque, onto: ?*anyopaque) ?*anyopaque {
@@ -9239,10 +9357,13 @@ export fn flix_frames_reverse_onto(prefix: ?*anyopaque, onto: ?*anyopaque) ?*any
     defer flix_gc_pop_roots(currentCtxPtr(), 2);
     while (p) |node| {
         const slots: [*]i64 = objPayloadSlots(node);
-        const head_ptr = ptrFromPayload(slots[0]);
-        const tail_ptr = nullablePtrFromPayload(slots[1]);
-        acc = flix_frames_push(head_ptr, acc);
+        var head_ptr: ?*anyopaque = ptrFromPayload(slots[0]);
+        var tail_ptr = nullablePtrFromPayload(slots[1]);
+        flix_gc_push_root_ptr(currentCtxPtr(), @ptrCast(&head_ptr));
+        flix_gc_push_root_ptr(currentCtxPtr(), @ptrCast(&tail_ptr));
+        acc = flix_frames_push(head_ptr.?, acc);
         p = tail_ptr;
+        flix_gc_pop_roots(currentCtxPtr(), 2);
     }
     return acc;
 }
@@ -9252,7 +9373,7 @@ export fn flix_frame_copy(frame: *anyopaque) *anyopaque {
     flix_gc_push_root_ptr(currentCtxPtr(), @ptrCast(&frame_root));
     defer flix_gc_pop_roots(currentCtxPtr(), 1);
 
-    const obj: *FlixObj = @ptrCast(@alignCast(frame));
+    const obj: *FlixObj = @ptrCast(@alignCast(frame_root.?));
     const ti = obj.typeinfo;
     if (ti.size_bytes == 0) @panic("invalid frame size");
     const size: usize = @intCast(ti.size_bytes);
@@ -9278,14 +9399,14 @@ fn allocResumptionCons(eff_sym: i64, handler: *anyopaque, frames: ?*anyopaque, t
     flix_gc_push_root_ptr(currentCtxPtr(), @ptrCast(&tail_root));
     defer flix_gc_pop_roots(currentCtxPtr(), 3);
 
-    const payloads = [_]i64{
-        eff_sym,
-        payloadFromPtr(handler),
-        payloadFromNullablePtrOrZero(frames),
-        payloadFromNullablePtrOrZero(tail),
-    };
+    const mem = allocFlixTupleUninit(4, 0b1110);
+    const slots = objPayloadSlots(mem);
     // eff_sym is immediate; other three slots are pointers.
-    return allocFlixTupleFromPayloads(payloads[0..], 0b1110);
+    slots[0] = eff_sym;
+    slots[1] = payloadFromPtr(handler_root.?);
+    slots[2] = payloadFromNullablePtrOrZero(frames_root);
+    slots[3] = payloadFromNullablePtrOrZero(tail_root);
+    return mem;
 }
 
 fn allocSuspensionLike(src_susp: *anyopaque, prefix: ?*anyopaque, resumption: ?*anyopaque) *anyopaque {
@@ -9297,7 +9418,7 @@ fn allocSuspensionLike(src_susp: *anyopaque, prefix: ?*anyopaque, resumption: ?*
     flix_gc_push_root_ptr(currentCtxPtr(), @ptrCast(&resumption_root));
     defer flix_gc_pop_roots(currentCtxPtr(), 3);
 
-    const src: [*]i64 = objPayloadSlots(src_susp);
+    const src: [*]i64 = objPayloadSlots(susp_root.?);
     const eff_sym: i64 = src[0];
     const op_index: i64 = src[1];
     const arg_count_i64: i64 = src[4];
@@ -9306,19 +9427,20 @@ fn allocSuspensionLike(src_susp: *anyopaque, prefix: ?*anyopaque, resumption: ?*
 
     const slots_total: usize = 5 + arg_count;
     const size_bytes: usize = @sizeOf(FlixObj) + slots_total * @sizeOf(i64);
-    const src_obj: *FlixObj = @ptrCast(@alignCast(src_susp));
+    const src_obj: *FlixObj = @ptrCast(@alignCast(susp_root.?));
     const mem = gcAllocBytes(size_bytes, src_obj.typeinfo);
+    const src_after: [*]i64 = objPayloadSlots(susp_root.?);
     const dst: [*]i64 = objPayloadSlots(mem);
 
     dst[0] = eff_sym;
     dst[1] = op_index;
-    dst[2] = payloadFromNullablePtrOrZero(prefix);
-    dst[3] = payloadFromNullablePtrOrZero(resumption);
+    dst[2] = payloadFromNullablePtrOrZero(prefix_root);
+    dst[3] = payloadFromNullablePtrOrZero(resumption_root);
     dst[4] = arg_count_i64;
 
     var i: usize = 0;
     while (i < arg_count) : (i += 1) {
-        dst[5 + i] = src[5 + i];
+        dst[5 + i] = src_after[5 + i];
     }
 
     return mem;
@@ -9339,10 +9461,13 @@ fn suspensionAttachFramesPrefix(susp: *anyopaque, frames0: ?*anyopaque) void {
     defer flix_gc_pop_roots(currentCtxPtr(), 1);
     while (frames) |node| {
         const slots: [*]i64 = objPayloadSlots(node);
-        const head_frame = ptrFromPayload(slots[0]);
-        const tail = nullablePtrFromPayload(slots[1]);
-        prefix_ptr = flix_frames_push(head_frame, prefix_ptr);
+        var head_frame: ?*anyopaque = ptrFromPayload(slots[0]);
+        var tail = nullablePtrFromPayload(slots[1]);
+        flix_gc_push_root_ptr(currentCtxPtr(), @ptrCast(&head_frame));
+        flix_gc_push_root_ptr(currentCtxPtr(), @ptrCast(&tail));
+        prefix_ptr = flix_frames_push(head_frame.?, prefix_ptr);
         frames = tail;
+        flix_gc_pop_roots(currentCtxPtr(), 2);
     }
     susp_slots[2] = payloadFromNullablePtrOrZero(prefix_ptr);
 }
@@ -9447,11 +9572,13 @@ fn installHandlerResult(ctx: *anyopaque, eff_sym: i64, handler: *anyopaque, fram
                 var tail_frames = nullablePtrFromPayload(slots[1]);
                 flix_gc_push_root_ptr(ctx, @ptrCast(&head_frame_slot));
                 flix_gc_push_root_ptr(ctx, @ptrCast(&tail_frames));
+                defer flix_gc_pop_roots(ctx, 2);
                 frames = tail_frames;
 
                 r = applyFrameSnapshot(ctx, head_frame_slot.?, r);
-                flix_gc_pop_roots(ctx, 2);
-                // Unwind thunks produced by the frame.
+                // Keep the remaining frame chain rooted while unwinding any thunk produced by
+                // this frame application. Otherwise a GC during thunk evaluation can reclaim the
+                // tail of the continuation chain before the next loop iteration consumes it.
                 while (r.tag == RESULT_TAG_THUNK) {
                     var thunk_slot: ?*anyopaque = ptrFromPayload(r.payload);
                     flix_gc_push_root_ptr(ctx, @ptrCast(&thunk_slot));
@@ -9536,6 +9663,748 @@ export fn flix_resumption_rewind(ctx: *anyopaque, resumption0: ?*anyopaque, v: i
 
     const tail_result = flix_resumption_rewind(ctx, tail_ptr, v);
     return installHandlerResult(ctx, eff_sym, handler_ptr, frames_ptr, tail_result);
+}
+
+const InstallHandlerThunkRootingTestState = struct {
+    tail_frames_addr: usize = 0,
+    tail_frame_addr: usize = 0,
+    head_invoked: bool = false,
+    thunk_invoked: bool = false,
+    tail_invoked: bool = false,
+};
+
+var g_install_handler_thunk_rooting_test_state: InstallHandlerThunkRootingTestState = .{};
+
+fn testInstallHandlerHeadFrameInvoke(ctx: *anyopaque, self: *anyopaque, arg_tag: i64, arg_payload: i64) callconv(.c) FlixResult {
+    _ = ctx;
+    _ = self;
+    _ = arg_tag;
+    _ = arg_payload;
+    g_install_handler_thunk_rooting_test_state.head_invoked = true;
+
+    const thunk = gcAllocBytes(@sizeOf(FlixObj), &test_install_handler_thunk_rooting_thunk_ti);
+    return .{ .tag = RESULT_TAG_THUNK, .payload = payloadFromPtr(thunk) };
+}
+
+fn testInstallHandlerThunkInvoke(ctx: *anyopaque, self: *anyopaque, arg_tag: i64, arg_payload: i64) callconv(.c) FlixResult {
+    _ = self;
+    _ = arg_tag;
+    _ = arg_payload;
+    g_install_handler_thunk_rooting_test_state.thunk_invoked = true;
+
+    gcCollectStw(requireCtx(ctx));
+
+    std.debug.assert(g_gc_objects.getPtr(g_install_handler_thunk_rooting_test_state.tail_frames_addr) != null);
+    std.debug.assert(g_gc_objects.getPtr(g_install_handler_thunk_rooting_test_state.tail_frame_addr) != null);
+
+    return .{ .tag = RESULT_TAG_VALUE, .payload = 111 };
+}
+
+fn testInstallHandlerTailFrameInvoke(ctx: *anyopaque, self: *anyopaque, arg_tag: i64, arg_payload: i64) callconv(.c) FlixResult {
+    _ = ctx;
+    _ = self;
+    g_install_handler_thunk_rooting_test_state.tail_invoked = true;
+    std.debug.assert(arg_tag == RESULT_TAG_VALUE);
+    std.debug.assert(arg_payload == 111);
+    return .{ .tag = RESULT_TAG_VALUE, .payload = 222 };
+}
+
+const test_install_handler_thunk_rooting_head_ti = FlixTypeInfo{
+    .type_id = 0x7fff1001,
+    .size_bytes = @sizeOf(FlixObj),
+    .ptr_count = 0,
+    .ptr_offs = null,
+    .trace = null,
+    .invoke = testInstallHandlerHeadFrameInvoke,
+    .apply = null,
+    .copy = null,
+};
+
+const test_install_handler_thunk_rooting_tail_ti = FlixTypeInfo{
+    .type_id = 0x7fff1002,
+    .size_bytes = @sizeOf(FlixObj),
+    .ptr_count = 0,
+    .ptr_offs = null,
+    .trace = null,
+    .invoke = testInstallHandlerTailFrameInvoke,
+    .apply = null,
+    .copy = null,
+};
+
+const test_install_handler_thunk_rooting_thunk_ti = FlixTypeInfo{
+    .type_id = 0x7fff1003,
+    .size_bytes = @sizeOf(FlixObj),
+    .ptr_count = 0,
+    .ptr_offs = null,
+    .trace = null,
+    .invoke = testInstallHandlerThunkInvoke,
+    .apply = null,
+    .copy = null,
+};
+
+test "install handler keeps tail frames rooted while unwinding returned thunk" {
+    const ctx_ptr = flix_ctx_new();
+    defer flix_ctx_free(ctx_ptr);
+
+    g_install_handler_thunk_rooting_test_state = .{};
+
+    const head_frame = gcAllocBytes(@sizeOf(FlixObj), &test_install_handler_thunk_rooting_head_ti);
+    const tail_frame = gcAllocBytes(@sizeOf(FlixObj), &test_install_handler_thunk_rooting_tail_ti);
+    const tail_frames = flix_frames_push(tail_frame, null);
+    const frames = flix_frames_push(head_frame, tail_frames);
+
+    g_install_handler_thunk_rooting_test_state.tail_frames_addr = @intFromPtr(tail_frames);
+    g_install_handler_thunk_rooting_test_state.tail_frame_addr = @intFromPtr(tail_frame);
+
+    const out = installHandlerResult(ctx_ptr, 999, head_frame, frames, .{ .tag = RESULT_TAG_VALUE, .payload = 0 });
+
+    try std.testing.expectEqual(@as(i64, RESULT_TAG_VALUE), out.tag);
+    try std.testing.expectEqual(@as(i64, 222), out.payload);
+    try std.testing.expect(g_install_handler_thunk_rooting_test_state.head_invoked);
+    try std.testing.expect(g_install_handler_thunk_rooting_test_state.thunk_invoked);
+    try std.testing.expect(g_install_handler_thunk_rooting_test_state.tail_invoked);
+}
+
+const RegionExitJoinRootingTestState = struct {
+    ctx: *anyopaque,
+    region: *FlixRegion,
+    body_outer_addr: usize,
+    body_inner_addr: usize,
+    body_arr_addr: usize,
+    body_str1_addr: usize,
+    body_str2_addr: usize,
+    child_outer_addr: usize,
+    child_inner_addr: usize,
+    child_arr_addr: usize,
+    child_str1_addr: usize,
+    child_str2_addr: usize,
+    gc_ran: RtAtomic(bool),
+};
+
+fn testRegionExitJoinRootingWorker(state: *RegionExitJoinRootingTestState) void {
+    while (true) {
+        state.region.mutex.lock();
+        const closing = state.region.state == .Closing;
+        state.region.mutex.unlock();
+        if (closing) break;
+        if (builtin.single_threaded) break;
+        std.Thread.sleep(100_000);
+    }
+
+    var i: usize = 0;
+    while (i < 256) : (i += 1) {
+        _ = allocFlixStringFromAscii("region-exit-join-rooting-churn");
+    }
+
+    gcCollectStw(requireCtx(state.ctx));
+
+    std.debug.assert(g_gc_objects.getPtr(state.body_outer_addr) != null);
+    std.debug.assert(g_gc_objects.getPtr(state.body_inner_addr) != null);
+    std.debug.assert(g_gc_objects.getPtr(state.body_arr_addr) != null);
+    std.debug.assert(g_gc_objects.getPtr(state.body_str1_addr) != null);
+    std.debug.assert(g_gc_objects.getPtr(state.body_str2_addr) != null);
+    std.debug.assert(g_gc_objects.getPtr(state.child_outer_addr) != null);
+    std.debug.assert(g_gc_objects.getPtr(state.child_inner_addr) != null);
+    std.debug.assert(g_gc_objects.getPtr(state.child_arr_addr) != null);
+    std.debug.assert(g_gc_objects.getPtr(state.child_str1_addr) != null);
+    std.debug.assert(g_gc_objects.getPtr(state.child_str2_addr) != null);
+
+    state.gc_ran.store(true, .release);
+}
+
+const RememberedSetAggregate = struct {
+    outer: *anyopaque,
+    inner: *anyopaque,
+    arr: *anyopaque,
+    str1: *anyopaque,
+    str2: *anyopaque,
+};
+
+fn makeRememberedSetAggregate(ctx: *anyopaque, str1_bytes: []const u8, str2_bytes: []const u8) RememberedSetAggregate {
+    var str1: ?*anyopaque = allocFlixStringFromAscii(str1_bytes);
+    var str2: ?*anyopaque = allocFlixStringFromAscii(str2_bytes);
+    flix_gc_push_root_ptr(ctx, @ptrCast(&str1));
+    flix_gc_push_root_ptr(ctx, @ptrCast(&str2));
+
+    var arr: ?*anyopaque = allocFlixArrayFromPtrPayloads(&[_]*anyopaque{ str1.?, str2.? });
+    flix_gc_push_root_ptr(ctx, @ptrCast(&arr));
+
+    var inner: ?*anyopaque = allocFlixTupleFromPayloads(&[_]i64{
+        payloadFromPtr(arr.?),
+        payloadFromPtr(str1.?),
+    }, 0b11);
+    flix_gc_push_root_ptr(ctx, @ptrCast(&inner));
+
+    var outer: ?*anyopaque = allocFlixTupleFromPayloads(&[_]i64{
+        payloadFromPtr(inner.?),
+        payloadFromPtr(str2.?),
+    }, 0b11);
+    flix_gc_push_root_ptr(ctx, @ptrCast(&outer));
+
+    const out = RememberedSetAggregate{
+        .outer = outer.?,
+        .inner = inner.?,
+        .arr = arr.?,
+        .str1 = str1.?,
+        .str2 = str2.?,
+    };
+
+    flix_gc_pop_roots(ctx, 5);
+    return out;
+}
+
+fn expectRememberedSetAggregateLive(agg: RememberedSetAggregate) !void {
+    try std.testing.expect(g_gc_objects.getPtr(@intFromPtr(agg.outer)) != null);
+    try std.testing.expect(g_gc_objects.getPtr(@intFromPtr(agg.inner)) != null);
+    try std.testing.expect(g_gc_objects.getPtr(@intFromPtr(agg.arr)) != null);
+    try std.testing.expect(g_gc_objects.getPtr(@intFromPtr(agg.str1)) != null);
+    try std.testing.expect(g_gc_objects.getPtr(@intFromPtr(agg.str2)) != null);
+}
+
+fn expectRememberedSetAggregateDead(agg: RememberedSetAggregate) !void {
+    try std.testing.expect(g_gc_objects.getPtr(@intFromPtr(agg.outer)) == null);
+    try std.testing.expect(g_gc_objects.getPtr(@intFromPtr(agg.inner)) == null);
+    try std.testing.expect(g_gc_objects.getPtr(@intFromPtr(agg.arr)) == null);
+    try std.testing.expect(g_gc_objects.getPtr(@intFromPtr(agg.str1)) == null);
+    try std.testing.expect(g_gc_objects.getPtr(@intFromPtr(agg.str2)) == null);
+}
+
+fn allocUnrememberedRegionPtrArray(ctx: *anyopaque, region_ptr0: ?*anyopaque, values: []const *anyopaque) *anyopaque {
+    const size_bytes_i64: i64 = @intCast(@sizeOf(FlixArrayHeader) + values.len * @sizeOf(i64));
+    const mem = flix_region_alloc_flex(ctx, region_ptr0, &flix_ti_array_ptr, size_bytes_i64);
+    const header: *FlixArrayHeader = @ptrCast(@alignCast(mem));
+    header.len = @intCast(values.len);
+    header.elem_size = @intCast(@sizeOf(i64));
+    const slots = flixArraySlots(mem);
+    for (values, 0..) |value, i| {
+        flix_store_ptr(ctx, @ptrCast(&slots[i]), payloadFromPtr(value));
+    }
+    return mem;
+}
+
+fn allocUnrememberedRegionTuple(ctx: *anyopaque, region_ptr0: ?*anyopaque, payloads: []const i64, ptr_mask: u64) *anyopaque {
+    const mem = flix_region_alloc(ctx, region_ptr0, getTupleTypeInfo(payloads.len, ptr_mask));
+    const base: [*]u8 = @ptrCast(mem);
+    const slots_ptr: [*]i64 = @ptrCast(@alignCast(base + @sizeOf(FlixObj)));
+
+    var i: usize = 0;
+    while (i < payloads.len) : (i += 1) {
+        if ((ptr_mask & (@as(u64, 1) << @intCast(i))) != 0) {
+            flix_store_ptr(ctx, @ptrCast(&slots_ptr[i]), payloads[i]);
+        } else {
+            slots_ptr[i] = payloads[i];
+        }
+    }
+    return mem;
+}
+
+fn waitUntilAtomicEq(comptime T: type, atom: *RtAtomic(T), expected: T, timeout_ms: u64) !void {
+    const start = std.time.nanoTimestamp();
+    const timeout_ns: i128 = @as(i128, timeout_ms) * @as(i128, std.time.ns_per_ms);
+    while (atom.load(.acquire) != expected) {
+        if (std.time.nanoTimestamp() - start > timeout_ns) return error.Timeout;
+        std.atomic.spinLoopHint();
+        std.Thread.sleep(1 * std.time.ns_per_ms);
+    }
+}
+
+fn waitUntilAtomicAtLeast(comptime T: type, atom: *RtAtomic(T), expected: T, timeout_ms: u64) !void {
+    const start = std.time.nanoTimestamp();
+    const timeout_ns: i128 = @as(i128, timeout_ms) * @as(i128, std.time.ns_per_ms);
+    while (atom.load(.acquire) < expected) {
+        if (std.time.nanoTimestamp() - start > timeout_ns) return error.Timeout;
+        std.atomic.spinLoopHint();
+        std.Thread.sleep(1 * std.time.ns_per_ms);
+    }
+}
+
+
+test "region exit keeps body outcome and child exception aggregates rooted while joining" {
+    if (is_wasm) return error.SkipZigTest;
+
+    const ctx_ptr = flix_ctx_new();
+    defer flix_ctx_free(ctx_ptr);
+
+    const region_ptr = flix_region_enter(ctx_ptr);
+    const region: *FlixRegion = @ptrCast(@alignCast(region_ptr));
+
+    const body_str1 = allocFlixStringFromAscii("body-one");
+    const body_str2 = allocFlixStringFromAscii("body-two");
+    const body_arr = allocFlixArrayFromPtrPayloads(&[_]*anyopaque{ body_str1, body_str2 });
+    const body_inner = allocFlixTupleFromPayloads(&[_]i64{
+        payloadFromPtr(body_arr),
+        payloadFromPtr(body_str1),
+    }, 0b11);
+    const body_outer = allocFlixTupleFromPayloads(&[_]i64{
+        payloadFromPtr(body_inner),
+        payloadFromPtr(body_str2),
+    }, 0b11);
+
+    const child_str1 = allocFlixStringFromAscii("child-one");
+    const child_str2 = allocFlixStringFromAscii("child-two");
+    const child_arr = allocFlixArrayFromPtrPayloads(&[_]*anyopaque{ child_str1, child_str2 });
+    const child_inner = allocFlixTupleFromPayloads(&[_]i64{
+        payloadFromPtr(child_arr),
+        payloadFromPtr(child_str1),
+    }, 0b11);
+    const child_outer = allocFlixTupleFromPayloads(&[_]i64{
+        payloadFromPtr(child_inner),
+        payloadFromPtr(child_str2),
+    }, 0b11);
+
+    region.mutex.lock();
+    region.child_exn = child_outer;
+    region.mutex.unlock();
+
+    var state = RegionExitJoinRootingTestState{
+        .ctx = ctx_ptr,
+        .region = region,
+        .body_outer_addr = @intFromPtr(body_outer),
+        .body_inner_addr = @intFromPtr(body_inner),
+        .body_arr_addr = @intFromPtr(body_arr),
+        .body_str1_addr = @intFromPtr(body_str1),
+        .body_str2_addr = @intFromPtr(body_str2),
+        .child_outer_addr = @intFromPtr(child_outer),
+        .child_inner_addr = @intFromPtr(child_inner),
+        .child_arr_addr = @intFromPtr(child_arr),
+        .child_str1_addr = @intFromPtr(child_str1),
+        .child_str2_addr = @intFromPtr(child_str2),
+        .gc_ran = RtAtomic(bool).init(false),
+    };
+
+    const child = std.Thread.spawn(.{}, testRegionExitJoinRootingWorker, .{&state}) catch @panic("failed to spawn region-exit rooting test worker");
+
+    region.mutex.lock();
+    region.children.append(rt_alloc, child) catch @panic("oom");
+    region.mutex.unlock();
+
+    const out = flix_region_exit(ctx_ptr, region_ptr, RESULT_TAG_VALUE, payloadFromPtr(body_outer));
+
+    try std.testing.expectEqual(@as(i64, RESULT_TAG_EXCEPTION), out.tag);
+    try std.testing.expectEqual(@as(i64, payloadFromPtr(child_outer)), out.payload);
+    try std.testing.expect(state.gc_ran.load(.acquire));
+}
+
+test "remembered slot traces region array replacement without ptr-array registration" {
+    const ctx_ptr = flix_ctx_new();
+    defer flix_ctx_free(ctx_ptr);
+
+    const region_ptr = flix_region_enter(ctx_ptr);
+    defer _ = flix_region_exit(ctx_ptr, region_ptr, RESULT_TAG_VALUE, 0);
+
+    const slot_mem = flix_region_malloc(ctx_ptr, region_ptr, @sizeOf(i64));
+    const slot: *i64 = @ptrCast(@alignCast(slot_mem));
+    slot.* = 0;
+    flix_region_remember_slot(ctx_ptr, region_ptr, slot_mem);
+
+    const old_agg = makeRememberedSetAggregate(ctx_ptr, "old-left", "old-right");
+    const old_arr = allocUnrememberedRegionPtrArray(ctx_ptr, region_ptr, &[_]*anyopaque{old_agg.outer});
+    flix_store_ptr(ctx_ptr, slot_mem, payloadFromPtr(old_arr));
+
+    const new_agg = makeRememberedSetAggregate(ctx_ptr, "new-left", "new-right");
+    const new_arr = allocUnrememberedRegionPtrArray(ctx_ptr, region_ptr, &[_]*anyopaque{new_agg.outer});
+    flix_store_ptr(ctx_ptr, slot_mem, payloadFromPtr(new_arr));
+
+    gcCollectStw(requireCtx(ctx_ptr));
+
+    try std.testing.expectEqual(payloadFromPtr(new_arr), slot.*);
+
+    try expectRememberedSetAggregateLive(new_agg);
+    try expectRememberedSetAggregateDead(old_agg);
+}
+
+test "shared aggregate stays live until last remembered region owner is overwritten" {
+    const ctx_ptr = flix_ctx_new();
+    defer flix_ctx_free(ctx_ptr);
+
+    const region_ptr = flix_region_enter(ctx_ptr);
+    defer _ = flix_region_exit(ctx_ptr, region_ptr, RESULT_TAG_VALUE, 0);
+
+    const slot1_mem = flix_region_malloc(ctx_ptr, region_ptr, @sizeOf(i64));
+    const slot2_mem = flix_region_malloc(ctx_ptr, region_ptr, @sizeOf(i64));
+    const slot1: *i64 = @ptrCast(@alignCast(slot1_mem));
+    const slot2: *i64 = @ptrCast(@alignCast(slot2_mem));
+    slot1.* = 0;
+    slot2.* = 0;
+    flix_region_remember_slot(ctx_ptr, region_ptr, slot1_mem);
+    flix_region_remember_slot(ctx_ptr, region_ptr, slot2_mem);
+
+    const shared_agg = makeRememberedSetAggregate(ctx_ptr, "shared-left", "shared-right");
+    const owner1_old_agg = makeRememberedSetAggregate(ctx_ptr, "owner1-old-left", "owner1-old-right");
+    const owner2_old_agg = makeRememberedSetAggregate(ctx_ptr, "owner2-old-left", "owner2-old-right");
+
+    const owner1_old = allocUnrememberedRegionPtrArray(ctx_ptr, region_ptr, &[_]*anyopaque{
+        shared_agg.outer,
+        owner1_old_agg.outer,
+    });
+    const owner2_old = allocUnrememberedRegionPtrArray(ctx_ptr, region_ptr, &[_]*anyopaque{
+        shared_agg.outer,
+        owner2_old_agg.outer,
+    });
+    flix_store_ptr(ctx_ptr, slot1_mem, payloadFromPtr(owner1_old));
+    flix_store_ptr(ctx_ptr, slot2_mem, payloadFromPtr(owner2_old));
+
+    gcCollectStw(requireCtx(ctx_ptr));
+    try std.testing.expectEqual(payloadFromPtr(owner1_old), slot1.*);
+    try std.testing.expectEqual(payloadFromPtr(owner2_old), slot2.*);
+    try expectRememberedSetAggregateLive(shared_agg);
+    try expectRememberedSetAggregateLive(owner1_old_agg);
+    try expectRememberedSetAggregateLive(owner2_old_agg);
+
+    const owner1_new_agg = makeRememberedSetAggregate(ctx_ptr, "owner1-new-left", "owner1-new-right");
+    const owner1_new = allocUnrememberedRegionPtrArray(ctx_ptr, region_ptr, &[_]*anyopaque{
+        owner1_new_agg.outer,
+    });
+    flix_store_ptr(ctx_ptr, slot1_mem, payloadFromPtr(owner1_new));
+
+    gcCollectStw(requireCtx(ctx_ptr));
+    try std.testing.expectEqual(payloadFromPtr(owner1_new), slot1.*);
+    try std.testing.expectEqual(payloadFromPtr(owner2_old), slot2.*);
+    try expectRememberedSetAggregateLive(shared_agg);
+    try expectRememberedSetAggregateDead(owner1_old_agg);
+    try expectRememberedSetAggregateLive(owner2_old_agg);
+    try expectRememberedSetAggregateLive(owner1_new_agg);
+
+    const owner2_new_agg = makeRememberedSetAggregate(ctx_ptr, "owner2-new-left", "owner2-new-right");
+    const owner2_new = allocUnrememberedRegionPtrArray(ctx_ptr, region_ptr, &[_]*anyopaque{
+        owner2_new_agg.outer,
+    });
+    flix_store_ptr(ctx_ptr, slot2_mem, payloadFromPtr(owner2_new));
+
+    gcCollectStw(requireCtx(ctx_ptr));
+    try std.testing.expectEqual(payloadFromPtr(owner1_new), slot1.*);
+    try std.testing.expectEqual(payloadFromPtr(owner2_new), slot2.*);
+    try expectRememberedSetAggregateDead(shared_agg);
+    try expectRememberedSetAggregateDead(owner2_old_agg);
+    try expectRememberedSetAggregateLive(owner1_new_agg);
+    try expectRememberedSetAggregateLive(owner2_new_agg);
+}
+
+test "shared nested region cycle stays live until last remembered owner is overwritten" {
+    const ctx_ptr = flix_ctx_new();
+    defer flix_ctx_free(ctx_ptr);
+
+    const region_ptr = flix_region_enter(ctx_ptr);
+    defer _ = flix_region_exit(ctx_ptr, region_ptr, RESULT_TAG_VALUE, 0);
+
+    const slot1_mem = flix_region_malloc(ctx_ptr, region_ptr, @sizeOf(i64));
+    const slot2_mem = flix_region_malloc(ctx_ptr, region_ptr, @sizeOf(i64));
+    const slot1: *i64 = @ptrCast(@alignCast(slot1_mem));
+    const slot2: *i64 = @ptrCast(@alignCast(slot2_mem));
+    slot1.* = 0;
+    slot2.* = 0;
+    flix_region_remember_slot(ctx_ptr, region_ptr, slot1_mem);
+    flix_region_remember_slot(ctx_ptr, region_ptr, slot2_mem);
+
+    const shared_leaf = makeRememberedSetAggregate(ctx_ptr, "shared-cycle-left", "shared-cycle-right");
+    const owner1_old_agg = makeRememberedSetAggregate(ctx_ptr, "owner1-cycle-old-left", "owner1-cycle-old-right");
+    const owner2_old_agg = makeRememberedSetAggregate(ctx_ptr, "owner2-cycle-old-left", "owner2-cycle-old-right");
+
+    const shared_cycle_a = allocUnrememberedRegionPtrArray(ctx_ptr, region_ptr, &[_]*anyopaque{
+        shared_leaf.outer,
+        shared_leaf.outer,
+    });
+    const shared_cycle_b = allocUnrememberedRegionPtrArray(ctx_ptr, region_ptr, &[_]*anyopaque{
+        shared_leaf.outer,
+    });
+    const shared_cycle_a_slots = flixArraySlots(shared_cycle_a);
+    const shared_cycle_b_slots = flixArraySlots(shared_cycle_b);
+    flix_store_ptr(ctx_ptr, @ptrCast(&shared_cycle_a_slots[1]), payloadFromPtr(shared_cycle_b));
+    flix_store_ptr(ctx_ptr, @ptrCast(&shared_cycle_b_slots[0]), payloadFromPtr(shared_cycle_a));
+
+    const owner1_old = allocUnrememberedRegionPtrArray(ctx_ptr, region_ptr, &[_]*anyopaque{
+        shared_cycle_a,
+        owner1_old_agg.outer,
+    });
+    const owner2_old = allocUnrememberedRegionPtrArray(ctx_ptr, region_ptr, &[_]*anyopaque{
+        shared_cycle_a,
+        owner2_old_agg.outer,
+    });
+    flix_store_ptr(ctx_ptr, slot1_mem, payloadFromPtr(owner1_old));
+    flix_store_ptr(ctx_ptr, slot2_mem, payloadFromPtr(owner2_old));
+
+    gcCollectStw(requireCtx(ctx_ptr));
+    try std.testing.expectEqual(payloadFromPtr(owner1_old), slot1.*);
+    try std.testing.expectEqual(payloadFromPtr(owner2_old), slot2.*);
+    try expectRememberedSetAggregateLive(shared_leaf);
+    try expectRememberedSetAggregateLive(owner1_old_agg);
+    try expectRememberedSetAggregateLive(owner2_old_agg);
+
+    const owner1_new_leaf = makeRememberedSetAggregate(ctx_ptr, "owner1-cycle-new-left", "owner1-cycle-new-right");
+    const owner1_new_mid = allocUnrememberedRegionPtrArray(ctx_ptr, region_ptr, &[_]*anyopaque{
+        owner1_new_leaf.outer,
+    });
+    const owner1_new = allocUnrememberedRegionPtrArray(ctx_ptr, region_ptr, &[_]*anyopaque{
+        owner1_new_mid,
+    });
+    flix_store_ptr(ctx_ptr, slot1_mem, payloadFromPtr(owner1_new));
+
+    gcCollectStw(requireCtx(ctx_ptr));
+    try std.testing.expectEqual(payloadFromPtr(owner1_new), slot1.*);
+    try std.testing.expectEqual(payloadFromPtr(owner2_old), slot2.*);
+    try expectRememberedSetAggregateLive(shared_leaf);
+    try expectRememberedSetAggregateDead(owner1_old_agg);
+    try expectRememberedSetAggregateLive(owner2_old_agg);
+    try expectRememberedSetAggregateLive(owner1_new_leaf);
+
+    const owner2_new_leaf = makeRememberedSetAggregate(ctx_ptr, "owner2-cycle-new-left", "owner2-cycle-new-right");
+    const owner2_new_mid = allocUnrememberedRegionPtrArray(ctx_ptr, region_ptr, &[_]*anyopaque{
+        owner2_new_leaf.outer,
+    });
+    const owner2_new = allocUnrememberedRegionPtrArray(ctx_ptr, region_ptr, &[_]*anyopaque{
+        owner2_new_mid,
+    });
+    flix_store_ptr(ctx_ptr, slot2_mem, payloadFromPtr(owner2_new));
+
+    gcCollectStw(requireCtx(ctx_ptr));
+    try std.testing.expectEqual(payloadFromPtr(owner1_new), slot1.*);
+    try std.testing.expectEqual(payloadFromPtr(owner2_new), slot2.*);
+    try expectRememberedSetAggregateDead(shared_leaf);
+    try expectRememberedSetAggregateDead(owner2_old_agg);
+    try expectRememberedSetAggregateLive(owner1_new_leaf);
+    try expectRememberedSetAggregateLive(owner2_new_leaf);
+}
+
+test "shared nested region tuple owners keep heap aggregate live until last owner is overwritten" {
+    const ctx_ptr = flix_ctx_new();
+    defer flix_ctx_free(ctx_ptr);
+
+    const region_ptr = flix_region_enter(ctx_ptr);
+    defer _ = flix_region_exit(ctx_ptr, region_ptr, RESULT_TAG_VALUE, 0);
+
+    const slot1_mem = flix_region_malloc(ctx_ptr, region_ptr, @sizeOf(i64));
+    const slot2_mem = flix_region_malloc(ctx_ptr, region_ptr, @sizeOf(i64));
+    const slot1: *i64 = @ptrCast(@alignCast(slot1_mem));
+    const slot2: *i64 = @ptrCast(@alignCast(slot2_mem));
+    slot1.* = 0;
+    slot2.* = 0;
+    flix_region_remember_slot(ctx_ptr, region_ptr, slot1_mem);
+    flix_region_remember_slot(ctx_ptr, region_ptr, slot2_mem);
+
+    const shared_leaf = makeRememberedSetAggregate(ctx_ptr, "shared-tuple-left", "shared-tuple-right");
+    const owner1_old_agg = makeRememberedSetAggregate(ctx_ptr, "owner1-tuple-old-left", "owner1-tuple-old-right");
+    const owner2_old_agg = makeRememberedSetAggregate(ctx_ptr, "owner2-tuple-old-left", "owner2-tuple-old-right");
+
+    const shared_arr = allocUnrememberedRegionPtrArray(ctx_ptr, region_ptr, &[_]*anyopaque{
+        shared_leaf.outer,
+    });
+    const shared_node = allocUnrememberedRegionTuple(ctx_ptr, region_ptr, &[_]i64{
+        payloadFromPtr(shared_arr),
+        payloadFromPtr(shared_leaf.outer),
+    }, 0b11);
+
+    const owner1_old = allocUnrememberedRegionTuple(ctx_ptr, region_ptr, &[_]i64{
+        payloadFromPtr(shared_node),
+        payloadFromPtr(owner1_old_agg.outer),
+    }, 0b11);
+    const owner2_old = allocUnrememberedRegionTuple(ctx_ptr, region_ptr, &[_]i64{
+        payloadFromPtr(shared_node),
+        payloadFromPtr(owner2_old_agg.outer),
+    }, 0b11);
+    flix_store_ptr(ctx_ptr, slot1_mem, payloadFromPtr(owner1_old));
+    flix_store_ptr(ctx_ptr, slot2_mem, payloadFromPtr(owner2_old));
+
+    gcCollectStw(requireCtx(ctx_ptr));
+    try std.testing.expectEqual(payloadFromPtr(owner1_old), slot1.*);
+    try std.testing.expectEqual(payloadFromPtr(owner2_old), slot2.*);
+    try expectRememberedSetAggregateLive(shared_leaf);
+    try expectRememberedSetAggregateLive(owner1_old_agg);
+    try expectRememberedSetAggregateLive(owner2_old_agg);
+
+    const owner1_new_leaf = makeRememberedSetAggregate(ctx_ptr, "owner1-tuple-new-left", "owner1-tuple-new-right");
+    const owner1_new_arr = allocUnrememberedRegionPtrArray(ctx_ptr, region_ptr, &[_]*anyopaque{
+        owner1_new_leaf.outer,
+    });
+    const owner1_new_mid = allocUnrememberedRegionTuple(ctx_ptr, region_ptr, &[_]i64{
+        payloadFromPtr(owner1_new_arr),
+        payloadFromPtr(owner1_new_leaf.outer),
+    }, 0b11);
+    const owner1_new = allocUnrememberedRegionTuple(ctx_ptr, region_ptr, &[_]i64{
+        payloadFromPtr(owner1_new_mid),
+    }, 0b1);
+    flix_store_ptr(ctx_ptr, slot1_mem, payloadFromPtr(owner1_new));
+
+    gcCollectStw(requireCtx(ctx_ptr));
+    try std.testing.expectEqual(payloadFromPtr(owner1_new), slot1.*);
+    try std.testing.expectEqual(payloadFromPtr(owner2_old), slot2.*);
+    try expectRememberedSetAggregateLive(shared_leaf);
+    try expectRememberedSetAggregateDead(owner1_old_agg);
+    try expectRememberedSetAggregateLive(owner2_old_agg);
+    try expectRememberedSetAggregateLive(owner1_new_leaf);
+
+    const owner2_new_leaf = makeRememberedSetAggregate(ctx_ptr, "owner2-tuple-new-left", "owner2-tuple-new-right");
+    const owner2_new_arr = allocUnrememberedRegionPtrArray(ctx_ptr, region_ptr, &[_]*anyopaque{
+        owner2_new_leaf.outer,
+    });
+    const owner2_new_mid = allocUnrememberedRegionTuple(ctx_ptr, region_ptr, &[_]i64{
+        payloadFromPtr(owner2_new_arr),
+        payloadFromPtr(owner2_new_leaf.outer),
+    }, 0b11);
+    const owner2_new = allocUnrememberedRegionTuple(ctx_ptr, region_ptr, &[_]i64{
+        payloadFromPtr(owner2_new_mid),
+    }, 0b1);
+    flix_store_ptr(ctx_ptr, slot2_mem, payloadFromPtr(owner2_new));
+
+    gcCollectStw(requireCtx(ctx_ptr));
+    try std.testing.expectEqual(payloadFromPtr(owner1_new), slot1.*);
+    try std.testing.expectEqual(payloadFromPtr(owner2_new), slot2.*);
+    try expectRememberedSetAggregateDead(shared_leaf);
+    try expectRememberedSetAggregateDead(owner2_old_agg);
+    try expectRememberedSetAggregateLive(owner1_new_leaf);
+    try expectRememberedSetAggregateLive(owner2_new_leaf);
+}
+
+const HandshakeCtxFreeTestState = struct {
+    ready: RtAtomic(bool) = .init(false),
+    done: RtAtomic(bool) = .init(false),
+    ctx_addr: RtAtomic(usize) = .init(0),
+    start_epoch: u64 = 0,
+};
+
+const SoftHandshakeScanRootsTestState = struct {
+    ready: RtAtomic(bool) = .init(false),
+    scan_enabled: RtAtomic(bool) = .init(false),
+    stop_requested: RtAtomic(bool) = .init(false),
+    done: RtAtomic(bool) = .init(false),
+    iterations: RtAtomic(u64) = .init(0),
+    ctx_addr: RtAtomic(usize) = .init(0),
+    root_addr: RtAtomic(usize) = .init(0),
+    start_epoch: u64 = 0,
+};
+
+fn testCtxFreeDuringHandshakeWorker(state: *HandshakeCtxFreeTestState) void {
+    const ctx_ptr = flix_ctx_new();
+    state.ctx_addr.store(@intFromPtr(ctx_ptr), .release);
+    state.ready.store(true, .release);
+
+    while (g_handshake_request_epoch.load(.acquire) <= state.start_epoch) {
+        std.atomic.spinLoopHint();
+        std.Thread.sleep(1 * std.time.ns_per_ms);
+    }
+
+    flix_ctx_free(ctx_ptr);
+    state.done.store(true, .release);
+}
+
+fn testSoftHandshakeScanRootsWorker(state: *SoftHandshakeScanRootsTestState) void {
+    const ctx_ptr = flix_ctx_new();
+    var root_ptr: ?*anyopaque = allocFlixStringFromAscii("soft-scan-root");
+    flix_gc_push_root_ptr(ctx_ptr, @ptrCast(&root_ptr));
+
+    state.ctx_addr.store(@intFromPtr(ctx_ptr), .release);
+    state.root_addr.store(@intFromPtr(root_ptr.?), .release);
+    state.ready.store(true, .release);
+
+    while (!state.scan_enabled.load(.acquire)) {
+        std.atomic.spinLoopHint();
+        std.Thread.sleep(1 * std.time.ns_per_ms);
+    }
+
+    while (!state.stop_requested.load(.acquire)) {
+        _ = state.iterations.fetchAdd(1, .acq_rel);
+        flix_gc_pollcheck(ctx_ptr);
+    }
+
+    flix_gc_pop_roots(ctx_ptr, 1);
+    flix_ctx_free(ctx_ptr);
+    state.done.store(true, .release);
+}
+
+test "ctx_free cooperates before deregistering during in-flight stw handshake" {
+    if (is_wasm) return error.SkipZigTest;
+
+    gcDebugStatsReset();
+
+    const self_ctx_ptr = flix_ctx_new();
+    defer flix_ctx_free(self_ctx_ptr);
+    const self_ctx = requireCtx(self_ctx_ptr);
+
+    var state = HandshakeCtxFreeTestState{
+        .start_epoch = g_handshake_request_epoch.load(.acquire),
+    };
+    const worker = try std.Thread.spawn(.{}, testCtxFreeDuringHandshakeWorker, .{&state});
+    defer worker.join();
+
+    try waitUntilAtomicEq(bool, &state.ready, true, 500);
+    const worker_ctx_addr = state.ctx_addr.load(.acquire);
+    try std.testing.expect(worker_ctx_addr != 0);
+
+    const epoch = handshakeRequestStw(.Park);
+    self_ctx.seen_epoch.store(epoch, .release);
+    handshakeWaitStw(epoch, self_ctx);
+
+    var stats = gcDebugStatsSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), stats.stw_requests);
+    try std.testing.expectEqual(epoch, stats.last_stw_epoch);
+    try std.testing.expectEqual(@as(u32, 1), stats.last_stw_acks);
+    try std.testing.expectEqual(@as(u64, 1), stats.pollcheck_cooperations);
+    try std.testing.expectEqual(@as(u64, 1), stats.ctx_free_handshake_cooperations);
+    try std.testing.expect(stats.ctx_registrations >= 2);
+    try std.testing.expectEqual(@as(u64, 0), stats.ctx_deregistrations);
+    try std.testing.expect(!state.done.load(.acquire));
+
+    handshakeReleaseStw(epoch);
+    try waitUntilAtomicEq(bool, &state.done, true, 500);
+
+    stats = gcDebugStatsSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), stats.stw_releases);
+    try std.testing.expect(stats.ctx_deregistrations >= 1);
+    try std.testing.expect(!ctxRegistryContains(worker_ctx_addr));
+}
+
+test "soft handshake scan-roots marks worker root and does not park progress" {
+    if (is_wasm) return error.SkipZigTest;
+
+    gcDebugStatsReset();
+
+    var state = SoftHandshakeScanRootsTestState{
+        .start_epoch = g_handshake_request_epoch.load(.acquire),
+    };
+    const worker = try std.Thread.spawn(.{}, testSoftHandshakeScanRootsWorker, .{&state});
+    defer worker.join();
+
+    try waitUntilAtomicEq(bool, &state.ready, true, 500);
+
+    const worker_ctx_addr = state.ctx_addr.load(.acquire);
+    const root_addr = state.root_addr.load(.acquire);
+    try std.testing.expect(worker_ctx_addr != 0);
+    try std.testing.expect(root_addr != 0);
+
+    const worker_ctx: *FlixCtx = @ptrFromInt(worker_ctx_addr);
+    const root_meta = g_gc_objects.getPtr(root_addr) orelse @panic("missing worker root object");
+    try std.testing.expect(!root_meta.marked);
+
+    var marker: GcMarker = .{ .worklist = .{}, .region_seen = .{} };
+    defer marker.worklist.deinit(rt_alloc);
+    defer marker.region_seen.deinit(rt_alloc);
+    marker.worklist.ensureTotalCapacity(rt_alloc, 64) catch @panic("oom");
+    marker.region_seen.ensureTotalCapacity(rt_alloc, 64) catch @panic("oom");
+
+    worker_ctx.gc_marker = &marker;
+    defer worker_ctx.gc_marker = null;
+    state.scan_enabled.store(true, .release);
+
+    const before_iters = state.iterations.load(.acquire);
+    const epoch = handshakeRequestSoft(.ScanRoots);
+    handshakeWaitSoft(epoch, null);
+
+    var stats = gcDebugStatsSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), stats.soft_requests);
+    try std.testing.expectEqual(epoch, stats.last_soft_epoch);
+    try std.testing.expectEqual(@as(u32, 1), stats.last_soft_acks);
+    try std.testing.expectEqual(@as(u64, 1), stats.scan_roots_cooperations);
+    try std.testing.expectEqual(@as(u64, 1), stats.pollcheck_cooperations);
+    try std.testing.expect(root_meta.marked);
+    try std.testing.expect(marker.worklist.items.len >= 1);
+
+    try waitUntilAtomicAtLeast(u64, &state.iterations, before_iters + 10, 500);
+
+    state.stop_requested.store(true, .release);
+    try waitUntilAtomicEq(bool, &state.done, true, 500);
+
+    stats = gcDebugStatsSnapshot();
+    try std.testing.expect(stats.ctx_deregistrations >= 1);
+    root_meta.marked = false;
 }
 
 fn timerSleepMillisFromSuspension(susp_ptr: *anyopaque) u64 {
@@ -10501,11 +11370,6 @@ const FlixRegionState = enum(u8) {
     Closed = 2,
 };
 
-const RememberedPtrArray = struct {
-    base: [*]i64,
-    count: usize,
-};
-
 const FlixRegion = struct {
     parent: ?*FlixRegion,
     state: FlixRegionState,
@@ -10519,7 +11383,7 @@ const FlixRegion = struct {
     exit_body_tag: i64,
     exit_body_payload: i64,
     remembered_slots: std.ArrayListUnmanaged(*i64),
-    remembered_ptr_arrays: std.ArrayListUnmanaged(RememberedPtrArray),
+    region_objects: std.ArrayListUnmanaged(usize),
 };
 
 threadlocal var current_region: ?*FlixRegion = null;
@@ -10528,6 +11392,13 @@ threadlocal var current_region: ?*FlixRegion = null;
 var g_region_registry_initialized: bool = false;
 var g_region_registry_mutex: RtMutex = .{};
 var g_region_registry: std.AutoHashMap(usize, u8) = undefined;
+
+// Region-allocated runtime objects (`flix_obj_t` headers backed by region arenas).
+// These are not GC-heap objects, but rooted slots and shadow-stack pointers may point at them.
+// The collector must be able to recognize and recursively trace them to find region -> heap edges.
+var g_region_object_registry_initialized: bool = false;
+var g_region_object_registry_mutex: RtMutex = .{};
+var g_region_object_registry: std.AutoHashMap(usize, u8) = undefined;
 
 fn ensureRegionRegistryInitialized() void {
     if (g_region_registry_initialized) return;
@@ -10550,6 +11421,47 @@ fn deregisterRegion(region: *FlixRegion) void {
     g_region_registry_mutex.lock();
     defer g_region_registry_mutex.unlock();
     _ = g_region_registry.remove(@intFromPtr(region));
+}
+
+fn ensureRegionObjectRegistryInitialized() void {
+    if (g_region_object_registry_initialized) return;
+    g_region_object_registry_mutex.lock();
+    defer g_region_object_registry_mutex.unlock();
+    if (g_region_object_registry_initialized) return;
+    g_region_object_registry = std.AutoHashMap(usize, u8).init(rt_alloc);
+    g_region_object_registry_initialized = true;
+}
+
+fn registerRegionObject(region: *FlixRegion, obj: *anyopaque) void {
+    ensureRegionObjectRegistryInitialized();
+    const addr: usize = @intFromPtr(obj);
+
+    region.mutex.lock();
+    defer region.mutex.unlock();
+    if (region.state == .Closed) @panic("registerRegionObject: region is closed");
+    region.region_objects.append(rt_alloc, addr) catch @panic("oom");
+
+    g_region_object_registry_mutex.lock();
+    defer g_region_object_registry_mutex.unlock();
+    g_region_object_registry.put(addr, 0) catch @panic("oom");
+}
+
+fn deregisterRegionObjects(region: *FlixRegion) void {
+    if (g_region_object_registry_initialized) {
+        g_region_object_registry_mutex.lock();
+        defer g_region_object_registry_mutex.unlock();
+        for (region.region_objects.items) |addr| {
+            _ = g_region_object_registry.remove(addr);
+        }
+    }
+    region.region_objects.deinit(rt_alloc);
+}
+
+fn regionObjectIsRegistered(ptr: *anyopaque) bool {
+    if (!g_region_object_registry_initialized) return false;
+    g_region_object_registry_mutex.lock();
+    defer g_region_object_registry_mutex.unlock();
+    return g_region_object_registry.contains(@intFromPtr(ptr));
 }
 
 fn regionIsSameOrDescendant(region: ?*FlixRegion, target: *FlixRegion) bool {
@@ -10632,7 +11544,7 @@ export fn flix_region_enter(ctx: *anyopaque) *anyopaque {
         .exit_body_tag = 0,
         .exit_body_payload = 0,
         .remembered_slots = .{},
-        .remembered_ptr_arrays = .{},
+        .region_objects = .{},
     };
 
     setCurrentRegion(region);
@@ -10748,7 +11660,7 @@ export fn flix_region_exit(ctx: *anyopaque, region_ptr0: ?*anyopaque, body_tag: 
 
         // Region remembered-set metadata.
         region.remembered_slots.deinit(rt_alloc);
-        region.remembered_ptr_arrays.deinit(rt_alloc);
+        deregisterRegionObjects(region);
 
         region.arena.deinit();
         deregisterRegion(region);
@@ -10811,7 +11723,7 @@ export fn flix_region_exit(ctx: *anyopaque, region_ptr0: ?*anyopaque, body_tag: 
 
         // Region remembered-set metadata.
         region.remembered_slots.deinit(rt_alloc);
-        region.remembered_ptr_arrays.deinit(rt_alloc);
+        deregisterRegionObjects(region);
 
         region.arena.deinit();
         deregisterRegion(region);
@@ -10851,6 +11763,9 @@ export fn flix_region_alloc(ctx: *anyopaque, region_ptr0: ?*anyopaque, ti: *cons
     const obj: *FlixObj = @ptrCast(@alignCast(mem));
     obj.typeinfo = ti;
     if (@hasField(FlixObj, "_pad")) obj._pad = 0;
+    if (region_ptr0) |region_ptr| {
+        registerRegionObject(@ptrCast(@alignCast(region_ptr)), mem);
+    }
     return mem;
 }
 
@@ -10863,6 +11778,9 @@ export fn flix_region_alloc_flex(ctx: *anyopaque, region_ptr0: ?*anyopaque, ti: 
     const obj: *FlixObj = @ptrCast(@alignCast(mem));
     obj.typeinfo = ti;
     if (@hasField(FlixObj, "_pad")) obj._pad = 0;
+    if (region_ptr0) |region_ptr| {
+        registerRegionObject(@ptrCast(@alignCast(region_ptr)), mem);
+    }
     return mem;
 }
 
@@ -10880,25 +11798,6 @@ export fn flix_region_remember_slot(ctx: *anyopaque, region_ptr0: ?*anyopaque, s
 
     const slot: *i64 = @ptrCast(@alignCast(slot_ptr));
     region.remembered_slots.append(rt_alloc, slot) catch @panic("oom");
-}
-
-export fn flix_region_remember_ptr_array(ctx: *anyopaque, region_ptr0: ?*anyopaque, base_ptr: *anyopaque, count_i64: i64) void {
-    _ = ctx;
-    const region_ptr = region_ptr0 orelse return;
-    const region: *FlixRegion = @ptrCast(@alignCast(region_ptr));
-
-    if (count_i64 < 0) @panic("flix_region_remember_ptr_array: negative count");
-    const count: usize = @intCast(count_i64);
-
-    region.mutex.lock();
-    defer region.mutex.unlock();
-
-    if (region.state == .Closed) {
-        @panic("flix_region_remember_ptr_array: region is closed");
-    }
-
-    const base_slots: [*]i64 = @ptrCast(@alignCast(base_ptr));
-    region.remembered_ptr_arrays.append(rt_alloc, .{ .base = base_slots, .count = count }) catch @panic("oom");
 }
 
 export fn flix_store_ptr(ctx: *anyopaque, slot_ptr: *anyopaque, value: i64) void {
@@ -11684,8 +12583,11 @@ fn withTaskRegion(task: *Task, f: fn () void) void {
     task.region = current_region;
 }
 
-fn freshTaskPtr(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64) *Task {
-    return ctx_rep.tasks.getPtr(task_id) orelse @panic("runTaskOnce: current task disappeared");
+fn liveTaskPtr(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, fallback: *Task) *Task {
+    // `runtime.invoke` runs a task inline and only inserts it into `ctx_rep.tasks` if it suspends.
+    // After guest reentry we must re-fetch table-backed tasks to survive map rehashing, but inline
+    // invoke still needs a stable local fallback for the non-suspending path.
+    return ctx_rep.tasks.getPtr(task_id) orelse fallback;
 }
 
 fn runTaskOnce(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, t: *Task) ?exports_flix_runtime_runtime_own_suspension_t {
@@ -11697,9 +12599,7 @@ fn runTaskOnce(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, t: *T
     const saved_region = current_region;
     setCurrentRegion(t.region);
     defer {
-        if (ctx_rep.tasks.getPtr(task_id)) |fresh| {
-            fresh.region = current_region;
-        }
+        liveTaskPtr(ctx_rep, task_id, t).region = current_region;
         setCurrentRegion(saved_region);
     }
 
@@ -11717,7 +12617,7 @@ fn runTaskOnce(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, t: *T
                     }
 
                     const r = flix_wasm_invoke_def(ctx_rep.flix_ctx, def_id, arg_bits.ptr, @intCast(argc));
-                    const fresh = freshTaskPtr(ctx_rep, task_id);
+                    const fresh = liveTaskPtr(ctx_rep, task_id, t);
                     switch (r.tag) {
                         RESULT_TAG_VALUE => {
                             taskMarkCompleted(ctx_rep, fresh, 0, r.payload);
@@ -11748,7 +12648,7 @@ fn runTaskOnce(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, t: *T
                         r0 = invokeThunk(ctx_rep.flix_ctx, tptr, RESULT_TAG_VALUE, 0);
                     }
 
-                    const fresh = freshTaskPtr(ctx_rep, task_id);
+                    const fresh = liveTaskPtr(ctx_rep, task_id, t);
                     switch (r0.tag) {
                         RESULT_TAG_VALUE => {
                             const h = flix_handle_new_i64(ctx_rep.flix_ctx, r0.payload);
@@ -11782,7 +12682,7 @@ fn runTaskOnce(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, t: *T
             flix_handle_release(ctx_rep.flix_ctx, st.susp_handle);
             flix_handle_release(ctx_rep.flix_ctx, st.resume_handle);
 
-            const fresh = freshTaskPtr(ctx_rep, task_id);
+            const fresh = liveTaskPtr(ctx_rep, task_id, t);
             switch (r.tag) {
                 RESULT_TAG_VALUE => {
                     taskMarkCompleted(ctx_rep, fresh, 0, r.payload);
@@ -11809,7 +12709,7 @@ fn runTaskOnce(ctx_rep: *exports_flix_runtime_runtime_ctx_t, task_id: u64, t: *T
             flix_handle_release(ctx_rep.flix_ctx, st.susp_handle);
             flix_handle_release(ctx_rep.flix_ctx, st.exn_handle);
 
-            const fresh = freshTaskPtr(ctx_rep, task_id);
+            const fresh = liveTaskPtr(ctx_rep, task_id, t);
             switch (r.tag) {
                 RESULT_TAG_VALUE => {
                     taskMarkCompleted(ctx_rep, fresh, 0, r.payload);
@@ -11978,6 +12878,11 @@ fn objectSlotIsPtr(obj_ptr: *anyopaque, slot_idx: usize) bool {
     return std.mem.indexOfScalar(u32, ptr_offs[0..count], off) != null;
 }
 
+fn isPtrArrayObject(obj_ptr: *anyopaque) bool {
+    const obj: *FlixObj = @ptrCast(@alignCast(obj_ptr));
+    return obj.typeinfo == &flix_ti_array_ptr;
+}
+
 fn makeHandleForObjectSlot(ctx_ptr: *anyopaque, obj_ptr: *anyopaque, slot_idx: usize) i64 {
     const payload = objPayloadSlots(obj_ptr)[slot_idx];
     return if (objectSlotIsPtr(obj_ptr, slot_idx))
@@ -11988,8 +12893,7 @@ fn makeHandleForObjectSlot(ctx_ptr: *anyopaque, obj_ptr: *anyopaque, slot_idx: u
 
 fn arrayElementsArePtrs(arr_ptr: *anyopaque) bool {
     if (flixArrayElemSize(arr_ptr) != @sizeOf(i64)) @panic("expected slot array");
-    const obj: *FlixObj = @ptrCast(@alignCast(arr_ptr));
-    return obj.typeinfo == &flix_ti_array_ptr;
+    return isPtrArrayObject(arr_ptr);
 }
 
 fn makeHandleForArrayElement(ctx_ptr: *anyopaque, arr_ptr: *anyopaque, idx: usize) i64 {

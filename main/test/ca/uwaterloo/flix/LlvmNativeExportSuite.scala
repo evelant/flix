@@ -479,8 +479,7 @@ class LlvmNativeExportSuite extends AnyFunSuite {
 
       Files.writeString(cFile, cProgram, StandardCharsets.UTF_8)
 
-      val compileCmd = List(
-        "zig",
+      val compileCmd = zigCmd ::: List(
         "cc",
         "-I",
         sdkIncludeDir.toString,
@@ -687,8 +686,7 @@ class LlvmNativeExportSuite extends AnyFunSuite {
 
         Files.writeString(dynCFile, dynProgram, StandardCharsets.UTF_8)
 
-        val dynCompileCmd = List(
-          "zig",
+        val dynCompileCmd = zigCmd ::: List(
           "cc",
           "-I",
           sdkIncludeDir.toString,
@@ -716,15 +714,10 @@ class LlvmNativeExportSuite extends AnyFunSuite {
     }
   }
 
-  private def hasZig: Boolean = {
-    try {
-      val p = new ProcessBuilder("zig", "version").redirectErrorStream(true).start()
-      p.waitFor(2, TimeUnit.SECONDS) && p.exitValue() == 0
-    } catch {
-      case _: IOException => false
-      case _: InterruptedException => false
-    }
-  }
+  private def hasZig: Boolean = ca.uwaterloo.flix.util.ZigToolchain.hasUsableCommand
+
+  private def zigCmd: List[String] =
+    ca.uwaterloo.flix.util.ZigToolchain.usableCommand.getOrElse(fail("usable zig command not found"))
 
   private def exec(cmd: List[String], cwd: Path): (Int, String) = {
     val pb = new ProcessBuilder(cmd.asJava)

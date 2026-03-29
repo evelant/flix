@@ -1446,7 +1446,11 @@ object Main {
                                           options: Options,
                                           runner: Option[RunnerKind],
                                           hasCmd: List[String] => Boolean): Option[String] = {
-    val missing = requiredTools(command, options, runner).filterNot(t => hasCmd(t.probe))
+    def toolAvailable(t: ToolRequirement): Boolean =
+      if (t.name == "zig") ca.uwaterloo.flix.util.ZigToolchain.probeCommands.exists(hasCmd)
+      else hasCmd(t.probe)
+
+    val missing = requiredTools(command, options, runner).filterNot(toolAvailable)
     if (missing.isEmpty) None
     else {
       val tools = missing.map(_.name).mkString(", ")
@@ -1463,23 +1467,23 @@ object Main {
 
   private def requiredTools(command: Command, options: Options, runner: Option[RunnerKind]): List[ToolRequirement] = (command, options.target, runner) match {
     case (Command.Build | Command.Run | Command.Test, CompilationTarget.LlvmNative, _) =>
-      List(ToolRequirement("zig", List("zig", "version")))
+      List(ToolRequirement("zig", Nil))
     case (Command.Build, CompilationTarget.LlvmWasm, _) =>
       List(
-        ToolRequirement("zig", List("zig", "version")),
+        ToolRequirement("zig", Nil),
         ToolRequirement("wasm-tools", List("wasm-tools", "--version")),
         ToolRequirement("jco", List("jco", "--version"))
       )
     case (Command.Run | Command.Test, CompilationTarget.LlvmWasm, Some(RunnerKind.Wasmtime)) =>
       List(
-        ToolRequirement("zig", List("zig", "version")),
+        ToolRequirement("zig", Nil),
         ToolRequirement("wasm-tools", List("wasm-tools", "--version")),
         ToolRequirement("jco", List("jco", "--version")),
         ToolRequirement("cargo +stable", List("cargo", "+stable", "--version"))
       )
     case (Command.Run | Command.Test, CompilationTarget.LlvmWasm, _) =>
       List(
-        ToolRequirement("zig", List("zig", "version")),
+        ToolRequirement("zig", Nil),
         ToolRequirement("wasm-tools", List("wasm-tools", "--version")),
         ToolRequirement("jco", List("jco", "--version")),
         ToolRequirement("node", List("node", "--version"))

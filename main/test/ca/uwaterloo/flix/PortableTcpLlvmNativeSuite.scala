@@ -632,15 +632,7 @@ class PortableTcpLlvmNativeSuite extends AnyFunSuite {
     (exit, output)
   }
 
-  private def hasZig: Boolean = {
-    try {
-      val p = new ProcessBuilder("zig", "version").redirectErrorStream(true).start()
-      p.waitFor(2, TimeUnit.SECONDS) && p.exitValue() == 0
-    } catch {
-      case _: IOException => false
-      case _: InterruptedException => false
-    }
-  }
+  private def hasZig: Boolean = ca.uwaterloo.flix.util.ZigToolchain.hasUsableCommand
 
   private def executablePath(outDir: Path): Path = {
     ca.uwaterloo.flix.language.phase.llvm.LlvmNativeDriver.executablePath(outDir)

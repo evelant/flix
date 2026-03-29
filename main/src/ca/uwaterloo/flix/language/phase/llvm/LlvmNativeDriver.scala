@@ -18,7 +18,7 @@ package ca.uwaterloo.flix.language.phase.llvm
 
 import ca.uwaterloo.flix.api.Flix
 import ca.uwaterloo.flix.language.ast.SourceLocation
-import ca.uwaterloo.flix.util.{ArtifactNames, Build, InternalCompilerException}
+import ca.uwaterloo.flix.util.{ArtifactNames, Build, InternalCompilerException, ZigToolchain}
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{FileSystem, FileSystemNotFoundException, FileSystems, Files, Path, Paths, StandardCopyOption}
@@ -42,6 +42,13 @@ object LlvmNativeDriver {
 
   private val BundledRuntimeSourceDir: String = "/runtime/src"
   private val BundledLibxevSourceDir: String = "/vendor/libxev/src"
+
+  private def zigCommand: List[String] = ZigToolchain.usableCommand.getOrElse {
+    throw InternalCompilerException(
+      "LLVM-native toolchain requires a usable Zig command. Set FLIX_ZIG_CMD if Zig is managed through a wrapper such as anyzig.",
+      SourceLocation.Unknown
+    )
+  }
 
   /**
     * Compiles `modulePath` (a `.ll` file) into a native executable in `outputPath/llvm/`.
@@ -98,8 +105,7 @@ object LlvmNativeDriver {
     val moduleObj = compileModule(modulePath, outDir, optFlag)
 
     val libPath = staticLibraryPath(flix.options.outputPath, flix.options.artifactName)
-    val arCmd = List(
-      "zig",
+    val arCmd = zigCommand ::: List(
       "ar",
       "rcs",
       libPath.toString,
@@ -236,7 +242,7 @@ object LlvmNativeDriver {
     def compileOne(source: Path, objectName: String): Path = {
       val runtimeObj = outDir.resolve(objectName)
       val compileRuntimeCmd =
-        List("zig", "cc", "-c", "-Wno-override-module") :::
+        zigCommand ::: List("cc", "-c", "-Wno-override-module") :::
           zigSafetyFlags :::
           picFlags :::
           List(optFlag, source.toString, "-o", runtimeObj.toString)
@@ -258,7 +264,7 @@ object LlvmNativeDriver {
   private def compileModule(modulePath: Path, outDir: Path, optFlag: String): Path = {
     val moduleObj = outDir.resolve("module.o")
     val compileModuleCmd =
-      List("zig", "cc", "-c", "-Wno-override-module") :::
+      zigCommand ::: List("cc", "-c", "-Wno-override-module") :::
         zigSafetyFlags :::
         picFlags :::
         List(optFlag, modulePath.toString, "-o", moduleObj.toString)
@@ -313,7 +319,7 @@ object LlvmNativeDriver {
   private def linkerCommand(optFlag: String, linkModeFlag: Option[String] = None): List[String] = {
     val base =
       if (isMac) List("cc")
-      else List("zig", "cc", "-Wno-override-module") ::: zigSafetyFlags ::: List(optFlag)
+      else zigCommand ::: List("cc", "-Wno-override-module") ::: zigSafetyFlags ::: List(optFlag)
 
     base ::: linkModeFlag.toList
   }

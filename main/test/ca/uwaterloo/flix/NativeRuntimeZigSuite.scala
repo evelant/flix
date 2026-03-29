@@ -16,9 +16,9 @@
 
 package ca.uwaterloo.flix
 
+import ca.uwaterloo.flix.util.ZigToolchain
 import org.scalatest.funsuite.AnyFunSuite
 
-import java.io.IOException
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
 import java.util.concurrent.TimeUnit
@@ -27,7 +27,9 @@ import scala.jdk.CollectionConverters.*
 class NativeRuntimeZigSuite extends AnyFunSuite {
 
   test("native-runtime-zig-tests") {
-    assume(hasZig, "zig not found on PATH (skipping native runtime Zig tests)")
+    val zigCmd = ZigToolchain.usableCommand.getOrElse {
+      cancel("zig test is not usable on this host (skipping native runtime Zig tests)")
+    }
 
     val stageRoot = Files.createTempDirectory("flix-native-runtime-zig-")
     try {
@@ -36,17 +38,16 @@ class NativeRuntimeZigSuite extends AnyFunSuite {
       copyTree(Paths.get("runtime/src"), runtimeDir)
       copyTree(Paths.get("vendor/libxev/src"), libxevDir)
 
-      runZigTest(runtimeDir.resolve("async_wait_v0.zig"), stageRoot)
-      runZigTest(runtimeDir.resolve("fs_async_v0.zig"), stageRoot)
-      runZigTest(runtimeDir.resolve("http_request_std_wire_v0.zig"), stageRoot)
-      runZigTest(runtimeDir.resolve("rt_xev.zig"), stageRoot)
+      runZigTest(runtimeDir.resolve("continuation_roots_v0.zig"), stageRoot, zigCmd)
+      runZigTest(runtimeDir.resolve("handshake_v0.zig"), stageRoot, zigCmd)
+      runZigTest(runtimeDir.resolve("rt_xev.zig"), stageRoot, zigCmd)
     } finally {
       deleteRecursive(stageRoot)
     }
   }
 
-  private def runZigTest(source: Path, cwd: Path): Unit = {
-    val cmd = List("zig", "test", source.toString)
+  private def runZigTest(source: Path, cwd: Path, zigCmd: List[String]): Unit = {
+    val cmd = zigCmd ++ List("test", source.toString)
     val pb = new ProcessBuilder(cmd.asJava)
     pb.directory(cwd.toFile)
     pb.redirectErrorStream(true)
@@ -78,16 +79,6 @@ class NativeRuntimeZigSuite extends AnyFunSuite {
       }
     } finally {
       stream.close()
-    }
-  }
-
-  private def hasZig: Boolean = {
-    try {
-      val p = new ProcessBuilder("zig", "version").redirectErrorStream(true).start()
-      p.waitFor(2, TimeUnit.SECONDS) && p.exitValue() == 0
-    } catch {
-      case _: IOException => false
-      case _: InterruptedException => false
     }
   }
 

@@ -151,6 +151,7 @@ export function makeNodeTcpHandlers(options = {}) {
       socketId,
       socket: sock,
       ended: false,
+      closed: false,
       error: null,
       buffers: [],
       reads: [],
@@ -185,7 +186,13 @@ export function makeNodeTcpHandlers(options = {}) {
     });
 
     sock.on("close", () => {
-      sockets.delete(socketId);
+      state.closed = true;
+      if (!state.ended && state.error == null) {
+        state.ended = true;
+        while (state.reads.length > 0) {
+          flushOneRead();
+        }
+      }
     });
 
     sockets.set(socketId, state);
@@ -289,6 +296,8 @@ export function makeNodeTcpHandlers(options = {}) {
       sock.end();
       sock.destroy();
     });
+
+    sockets.delete(socketId);
   }
 
   function registerServer(server) {
