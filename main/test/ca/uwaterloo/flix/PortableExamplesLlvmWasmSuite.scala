@@ -297,9 +297,6 @@ class PortableExamplesLlvmWasmSuite extends AnyFunSuite {
   private def normalizeNewlines(s: String): String =
     s.replace("\r\n", "\n")
 
-  private def hasZig: Boolean =
-    ca.uwaterloo.flix.util.ZigToolchain.hasUsableCommand
-
   private def hasWasmTools: Boolean =
     hasCmd(List("wasm-tools", "--version"))
 

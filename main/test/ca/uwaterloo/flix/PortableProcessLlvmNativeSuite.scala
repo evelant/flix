@@ -337,8 +337,6 @@ class PortableProcessLlvmNativeSuite extends AnyFunSuite {
     (exit, output)
   }
 
-  private def hasZig: Boolean = ca.uwaterloo.flix.util.ZigToolchain.hasUsableCommand
-
   private def executablePath(outDir: Path): Path = {
     ca.uwaterloo.flix.language.phase.llvm.LlvmNativeDriver.executablePath(outDir)
   }

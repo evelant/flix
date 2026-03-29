@@ -96,9 +96,6 @@ class PortableTextEncodingLlvmNativeRuntimeSuite extends AnyFunSuite {
   private def isWindows: Boolean =
     System.getProperty("os.name").toLowerCase.contains("win")
 
-  private def hasZig: Boolean =
-    ca.uwaterloo.flix.util.ZigToolchain.hasUsableCommand
-
   private def hasCmd(cmd: List[String]): Boolean = {
     try {
       val p = new ProcessBuilder(cmd.asJava).redirectErrorStream(true).start()

@@ -714,8 +714,6 @@ class LlvmNativeExportSuite extends AnyFunSuite {
     }
   }
 
-  private def hasZig: Boolean = ca.uwaterloo.flix.util.ZigToolchain.hasUsableCommand
-
   private def zigCmd: List[String] =
     ca.uwaterloo.flix.util.ZigToolchain.usableCommand.getOrElse(fail("usable zig command not found"))
 

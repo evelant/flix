@@ -399,9 +399,6 @@ class PortableStdlibLlvmBrowserRuntimeSuite extends AnyFunSuite {
     "/" + rel.iterator().asScala.mkString("/").replace('\\', '/')
   }
 
-  private def hasZig: Boolean =
-    ca.uwaterloo.flix.util.ZigToolchain.hasUsableCommand
-
   private def hasWasmTools: Boolean =
     hasCmd(List("wasm-tools", "--version"))
 

@@ -19,7 +19,7 @@ package ca.uwaterloo.flix
 import ca.uwaterloo.flix.api.Flix
 import ca.uwaterloo.flix.language.CompilationMessage
 import ca.uwaterloo.flix.language.ast.shared.SecurityContext
-import ca.uwaterloo.flix.util.{CompilationTarget, FileOps, Options, StdlibProfile, ZigToolchain}
+import ca.uwaterloo.flix.util.{CompilationTarget, FileOps, Options, StdlibProfile}
 import org.scalatest.funsuite.AnyFunSuite
 
 import java.nio.charset.StandardCharsets
@@ -1514,8 +1514,6 @@ class PortableStdlibLlvmNativeRuntimeSuite extends AnyFunSuite {
     val exit = p.exitValue()
     (exit, output)
   }
-
-  private def hasZig: Boolean = ZigToolchain.hasUsableCommand
 
   private def executablePath(outDir: Path): Path = {
     ca.uwaterloo.flix.language.phase.llvm.LlvmNativeDriver.executablePath(outDir)

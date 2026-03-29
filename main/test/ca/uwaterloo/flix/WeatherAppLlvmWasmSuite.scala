@@ -165,9 +165,6 @@ class WeatherAppLlvmWasmSuite extends AnyFunSuite {
   private def stripAnsi(s: String): String =
     s.replaceAll("\u001B\\[[0-9;]*m", "")
 
-  private def hasZig: Boolean =
-    ca.uwaterloo.flix.util.ZigToolchain.hasUsableCommand
-
   private def hasWasmTools: Boolean =
     hasCmd(List("wasm-tools", "--version"))
 

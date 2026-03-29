@@ -1701,7 +1701,7 @@ class WasmEffectBindingsToolSuite extends AnyFunSuite {
   }
 
   private def hasCargoStable: Boolean = hasCmd(List("cargo", "+stable", "--version"))
-  private def hasZig: Boolean = ca.uwaterloo.flix.util.ZigToolchain.hasUsableCommand
+
   private def hasWasmTools: Boolean = hasCmd(List("wasm-tools", "--version"))
   private def hasJco: Boolean = hasCmd(List("jco", "--version"))
   private def hasNode: Boolean = hasCmd(List("node", "--version"))

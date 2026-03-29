@@ -698,8 +698,6 @@ class WasmImportsLlvmWasmSuite extends AnyFunSuite {
       case _: Throwable => false
     }
   }
-
-  private def hasZig: Boolean = ca.uwaterloo.flix.util.ZigToolchain.hasUsableCommand
   private def hasWasmTools: Boolean = hasCommand(List("wasm-tools", "--version"))
   private def hasJco: Boolean = hasCommand(List("jco", "--version"))
   private def hasNode: Boolean = hasCommand(List("node", "--version"))

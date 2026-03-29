@@ -546,8 +546,6 @@ class NativeProgramsLlvmNativeSuite extends AnyFunSuite {
     (p.exitValue(), outStr)
   }
 
-  private def hasZig: Boolean = ca.uwaterloo.flix.util.ZigToolchain.hasUsableCommand
-
   private def executablePath(outDir: Path): Path = {
     ca.uwaterloo.flix.language.phase.llvm.LlvmNativeDriver.executablePath(outDir)
   }

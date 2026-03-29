@@ -287,9 +287,6 @@ class PortableStdlibLlvmWasmtimeRuntimeSuite extends AnyFunSuite {
     (exit, output)
   }
 
-  private def hasZig: Boolean =
-    ca.uwaterloo.flix.util.ZigToolchain.hasUsableCommand
-
   private def hasWasmTools: Boolean =
     hasCmd(List("wasm-tools", "--version"))
 
