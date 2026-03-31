@@ -1,10 +1,12 @@
 package ca.uwaterloo.flix.tools.pkg
 
-import ca.uwaterloo.flix.api.{Bootstrap, BootstrapError}
+import ca.uwaterloo.flix.api.{Bootstrap, BootstrapError, Version}
+import ca.uwaterloo.flix.language.phase.llvm.LlvmNativeDriver
 import ca.uwaterloo.flix.util.{CompilationTarget, FileOps, Formatter, Result, RunnerKind, StdlibProfile}
 import org.scalatest.funsuite.AnyFunSuite
 
 import java.io.IOException
+import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 import java.security.{DigestInputStream, MessageDigest}
 import java.text.SimpleDateFormat
@@ -173,6 +175,131 @@ class TestBootstrap extends AnyFunSuite {
     flix.setOptions(flix.options.copy(target = CompilationTarget.LlvmNative, stdlibProfile = StdlibProfile.Portable))
 
     b.test(flix, Some(RunnerKind.Native)).unsafeGet
+  }
+
+  test("build-native-with-manifest-link-config") {
+    val zigCmd = ca.uwaterloo.flix.util.ZigToolchain.usableCommand.getOrElse(cancel("usable zig command not available"))
+
+    val p = Files.createTempDirectory(ProjectPrefix)
+    Bootstrap.init(p)(System.out).unsafeGet
+
+    val nativeLibDir = p.resolve("native-lib").normalize()
+    Files.createDirectories(nativeLibDir)
+    buildNativeSmokeLibrary(nativeLibDir, zigCmd)
+
+    FileOps.writeString(p.resolve("flix.toml").normalize(),
+      s"""
+         |[package]
+         |name = "test"
+         |description = "test"
+         |version = "0.1.0"
+         |flix = "${Version.CurrentVersion}"
+         |authors = ["flix"]
+         |
+         |[build]
+         |targets = ["native"]
+         |
+         |[run]
+         |target = "native"
+         |runner = "native"
+         |
+         |[test]
+         |target = "native"
+         |runner = "native"
+         |
+         |[target.native]
+         |emit = ["exe"]
+         |link-libs = ["nativeffi_smoke"]
+         |link-search = [${tomlString(nativeLibDir.toAbsolutePath.normalize().toString)}]
+         |""".stripMargin)
+
+    FileOps.writeString(p.resolve("src/Main.flix").normalize(),
+      """
+        |extern native(symbol = "flix_native_mul2")
+        |def mul2(x: Int32): Int32
+        |
+        |pub def main(): Unit \ IO =
+        |    if (mul2(21) == 42)
+        |        println("native-ffi: ok")
+        |    else
+        |        bug!("unexpected native ffi result")
+        |""".stripMargin)
+
+    val b = Bootstrap.bootstrap(p, None)(Formatter.getDefault, System.out).unsafeGet
+    val flix = PkgTestUtils.mkFlix
+    flix.setOptions(flix.options.copy(target = CompilationTarget.LlvmNative, stdlibProfile = StdlibProfile.Portable))
+
+    b.build(flix).unsafeGet
+
+    val exePath = LlvmNativeDriver.executablePath(Bootstrap.getBuildTargetDirectory(p, CompilationTarget.LlvmNative), b.artifactName)
+    val (exit, output) = exec(List(exePath.toString), p)
+    assert(exit == 0, s"expected native ffi smoke executable to succeed, got exit $exit:\n$output")
+    assert(output.contains("native-ffi: ok"), s"unexpected native ffi smoke output:\n$output")
+  }
+
+  test("build-native-with-manifest-link-config-string-bytes") {
+    val zigCmd = ca.uwaterloo.flix.util.ZigToolchain.usableCommand.getOrElse(cancel("usable zig command not available"))
+
+    val p = Files.createTempDirectory(ProjectPrefix)
+    Bootstrap.init(p)(System.out).unsafeGet
+
+    val nativeLibDir = p.resolve("native-lib").normalize()
+    Files.createDirectories(nativeLibDir)
+    buildNativeStringBytesLibrary(nativeLibDir, zigCmd)
+
+    FileOps.writeString(p.resolve("flix.toml").normalize(),
+      s"""
+         |[package]
+         |name = "test"
+         |description = "test"
+         |version = "0.1.0"
+         |flix = "${Version.CurrentVersion}"
+         |authors = ["flix"]
+         |
+         |[build]
+         |targets = ["native"]
+         |
+         |[run]
+         |target = "native"
+         |runner = "native"
+         |
+         |[test]
+         |target = "native"
+         |runner = "native"
+         |
+         |[target.native]
+         |emit = ["exe"]
+         |link-libs = ["nativeffi_bridge"]
+         |link-search = [${tomlString(nativeLibDir.toAbsolutePath.normalize().toString)}]
+         |""".stripMargin)
+
+    FileOps.writeString(p.resolve("src/Main.flix").normalize(),
+      """
+        |extern native(symbol = "flix_native_echo_bang")
+        |def echoBang(s: String): String
+        |
+        |extern native(symbol = "flix_native_bytes_dup")
+        |def bytesDup(bs: Array[Int8, Static]): Array[Int8, Static]
+        |
+        |pub def main(): Unit \ IO =
+        |    let s = echoBang("hello");
+        |    let bs = bytesDup(Array#{1i8, 2i8, 3i8} @ Static);
+        |    if (s == "hello!" and Array.length(bs) == 3 and Array.get(0, bs) == 1i8 and Array.get(1, bs) == 2i8 and Array.get(2, bs) == 3i8)
+        |        println("native-ffi-strings-bytes: ok")
+        |    else
+        |        bug!("unexpected native ffi string/bytes result")
+        |""".stripMargin)
+
+    val b = Bootstrap.bootstrap(p, None)(Formatter.getDefault, System.out).unsafeGet
+    val flix = PkgTestUtils.mkFlix
+    flix.setOptions(flix.options.copy(target = CompilationTarget.LlvmNative, stdlibProfile = StdlibProfile.Portable))
+
+    b.build(flix).unsafeGet
+
+    val exePath = LlvmNativeDriver.executablePath(Bootstrap.getBuildTargetDirectory(p, CompilationTarget.LlvmNative), b.artifactName)
+    val (exit, output) = exec(List(exePath.toString), p)
+    assert(exit == 0, s"expected native ffi string/bytes smoke executable to succeed, got exit $exit:\n$output")
+    assert(output.contains("native-ffi-strings-bytes: ok"), s"unexpected native ffi string/bytes smoke output:\n$output")
   }
 
   test("test-wasm-node") {
@@ -434,6 +561,96 @@ class TestBootstrap extends AnyFunSuite {
     }.get
   }
 
+  private def buildNativeSmokeLibrary(dir: Path, zigCmd: List[String]): Unit = {
+    buildStaticCLibrary(
+      dir = dir,
+      zigCmd = zigCmd,
+      baseName = "nativeffi_smoke",
+      source =
+      """
+        |#include <stdint.h>
+        |
+        |int32_t flix_native_mul2(int32_t x) {
+        |    return x * 2;
+        |}
+        |""".stripMargin)
+  }
+
+  private def buildNativeStringBytesLibrary(dir: Path, zigCmd: List[String]): Unit = {
+    buildStaticCLibrary(
+      dir = dir,
+      zigCmd = zigCmd,
+      baseName = "nativeffi_bridge",
+      source =
+      """
+        |#include <stdint.h>
+        |#include <stdlib.h>
+        |#include <string.h>
+        |
+        |typedef struct flix_ctx flix_ctx_t;
+        |typedef int64_t flix_handle_t;
+        |typedef flix_handle_t flix_string_t;
+        |typedef flix_handle_t flix_bytes_t;
+        |typedef flix_handle_t flix_i8_array_t;
+        |
+        |extern flix_string_t flix_string_from_utf8(flix_ctx_t* ctx, const uint8_t* bytes, int64_t len);
+        |extern uint8_t* flix_string_to_utf8(flix_ctx_t* ctx, flix_string_t str, int64_t* out_len);
+        |extern flix_i8_array_t flix_i8_array_from_bytes(flix_ctx_t* ctx, const uint8_t* bytes, int64_t len);
+        |extern uint8_t* flix_i8_array_to_bytes(flix_ctx_t* ctx, flix_i8_array_t arr, int64_t* out_len);
+        |extern void flix_free(void* ptr);
+        |
+        |flix_string_t flix_native_echo_bang(flix_ctx_t* ctx, flix_string_t s) {
+        |    int64_t len = 0;
+        |    uint8_t* in = flix_string_to_utf8(ctx, s, &len);
+        |    uint8_t* out = malloc((size_t)len + 1);
+        |    memcpy(out, in, (size_t)len);
+        |    out[len] = '!';
+        |    flix_string_t result = flix_string_from_utf8(ctx, out, len + 1);
+        |    flix_free(in);
+        |    free(out);
+        |    return result;
+        |}
+        |
+        |flix_bytes_t flix_native_bytes_dup(flix_ctx_t* ctx, flix_bytes_t b) {
+        |    int64_t len = 0;
+        |    uint8_t* in = flix_i8_array_to_bytes(ctx, (flix_i8_array_t)b, &len);
+        |    flix_i8_array_t result = flix_i8_array_from_bytes(ctx, in, len);
+        |    flix_free(in);
+        |    return (flix_bytes_t)result;
+        |}
+        |""".stripMargin)
+  }
+
+  private def buildStaticCLibrary(dir: Path, zigCmd: List[String], baseName: String, source: String): Unit = {
+    val cFile = dir.resolve(s"$baseName.c").normalize()
+    val objFile = dir.resolve(s"$baseName.o").normalize()
+    val libFile = dir.resolve(s"lib$baseName.a").normalize()
+
+    FileOps.writeString(cFile, source)
+
+    val compileCmd = zigCmd ::: List("cc", "-fno-sanitize=undefined", "-c", cFile.toString, "-o", objFile.toString)
+    val (compileExit, compileOutput) = exec(compileCmd, dir)
+    if (compileExit != 0) {
+      fail(s"native ffi smoke C compile failed with exit $compileExit:\n${compileCmd.mkString(" ")}\n\n$compileOutput")
+    }
+
+    val archiveCmd = zigCmd ::: List("ar", "rcs", libFile.toString, objFile.toString)
+    val (archiveExit, archiveOutput) = exec(archiveCmd, dir)
+    if (archiveExit != 0) {
+      fail(s"native ffi smoke archive failed with exit $archiveExit:\n${archiveCmd.mkString(" ")}\n\n$archiveOutput")
+    }
+  }
+
+  private def exec(cmd: List[String], cwd: Path): (Int, String) = {
+    val pb = new ProcessBuilder(cmd*)
+    pb.directory(cwd.toFile)
+    pb.redirectErrorStream(true)
+    val p = pb.start()
+    val output = new String(p.getInputStream.readAllBytes(), StandardCharsets.UTF_8)
+    val exit = p.waitFor()
+    (exit, output)
+  }
+
   private def hasCmd(cmd: List[String]): Boolean = {
     try {
       val p = new ProcessBuilder(cmd.asJava).redirectErrorStream(true).start()
@@ -444,5 +661,14 @@ class TestBootstrap extends AnyFunSuite {
       case _: InterruptedException => false
     }
   }
+
+  private def tomlString(s: String): String = "\"" + s.flatMap {
+    case '\\' => "\\\\"
+    case '"' => "\\\""
+    case '\n' => "\\n"
+    case '\r' => "\\r"
+    case '\t' => "\\t"
+    case c => c.toString
+  } + "\""
 
 }

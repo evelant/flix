@@ -18,7 +18,7 @@ package ca.uwaterloo.flix.language.phase.llvm
 
 import ca.uwaterloo.flix.api.Flix
 import ca.uwaterloo.flix.language.ast.SourceLocation
-import ca.uwaterloo.flix.util.{ArtifactNames, Build, InternalCompilerException, ZigToolchain}
+import ca.uwaterloo.flix.util.{ArtifactNames, Build, InternalCompilerException, NativeLinkConfig, ZigToolchain}
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{FileSystem, FileSystemNotFoundException, FileSystems, Files, Path, Paths, StandardCopyOption}
@@ -70,7 +70,7 @@ object LlvmNativeDriver {
 
     val cmd = linkerCommand(optFlag) ::: List(
       moduleObj.toString,
-    ) ::: runtimeObjs.map(_.toString) ::: List(
+    ) ::: runtimeObjs.map(_.toString) ::: nativeLinkFlags(flix.options.nativeLinkConfig) ::: List(
       "-o",
       exePath.toString
     )
@@ -147,7 +147,7 @@ object LlvmNativeDriver {
 
     val linkCmd = linkerCommand(optFlag, Some(linkModeFlag)) ::: windowsExportFlags ::: List(
       moduleObj.toString,
-    ) ::: runtimeObjs.map(_.toString) ::: List(
+    ) ::: runtimeObjs.map(_.toString) ::: nativeLinkFlags(flix.options.nativeLinkConfig) ::: List(
       "-o",
       libPath.toString
     )
@@ -322,6 +322,24 @@ object LlvmNativeDriver {
       else zigCommand ::: List("cc", "-Wno-override-module") ::: zigSafetyFlags ::: List(optFlag)
 
     base ::: linkModeFlag.toList
+  }
+
+  private def nativeLinkFlags(config: NativeLinkConfig): List[String] = {
+    if (!isMac && (config.frameworks.nonEmpty || config.frameworkSearchPaths.nonEmpty)) {
+      throw InternalCompilerException(
+        "Native framework linkage is only supported on macOS.",
+        SourceLocation.Unknown
+      )
+    }
+    val searchPaths = config.searchPaths.map(path => s"-L${path.toAbsolutePath.normalize()}")
+    val frameworks =
+      if (isMac) config.frameworks.flatMap(name => List("-framework", name))
+      else Nil
+    val frameworkSearchPaths =
+      if (isMac) config.frameworkSearchPaths.map(path => s"-F${path.toAbsolutePath.normalize()}")
+      else Nil
+    val libs = config.libraries.map(lib => s"-l$lib")
+    searchPaths ::: frameworkSearchPaths ::: frameworks ::: libs
   }
 
 }

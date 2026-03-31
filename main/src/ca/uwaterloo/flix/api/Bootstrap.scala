@@ -27,7 +27,7 @@ import ca.uwaterloo.flix.tools.pkg.github.GitHub
 import ca.uwaterloo.flix.tools.pkg.{FlixPackageManager, JarPackageManager, Manifest, ManifestParser, MavenPackageManager, PackageModules, ReleaseError}
 import ca.uwaterloo.flix.util.Result.{Err, Ok}
 import ca.uwaterloo.flix.util.collection.ListMap
-import ca.uwaterloo.flix.util.{ArtifactNames, Build, EmitKind, FileOps, Formatter, Result, RunnerKind, Validation}
+import ca.uwaterloo.flix.util.{ArtifactNames, Build, EmitKind, FileOps, Formatter, NativeLinkConfig, Result, RunnerKind, Validation}
 import ca.uwaterloo.flix.util.CompilationTarget
 import ca.uwaterloo.flix.api.lsp.Formatter as LspFormatter
 import ca.uwaterloo.flix.language.CompilationMessage
@@ -350,6 +350,9 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
   def artifactName: String =
     optManifest.map(_.name).getOrElse(projectPath.toAbsolutePath.normalize().getFileName.toString)
 
+  def nativeLinkConfig: NativeLinkConfig =
+    optManifest.map(_.targetConfigs.native.link).map(resolveNativeLinkConfig).getOrElse(NativeLinkConfig())
+
   /**
     * Parses `flix.toml` to a Manifest and downloads all required files.
     * Then makes a list of all flix source files, flix packages
@@ -378,18 +381,39 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
     Result.Ok(())
   }
 
+  private def resolveNativeLinkConfig(config: NativeLinkConfig): NativeLinkConfig = {
+    def resolvePath(path: Path): Path =
+      if (path.isAbsolute) path.normalize()
+      else projectPath.resolve(path).normalize()
+
+    config.copy(
+      searchPaths = config.searchPaths.map(resolvePath),
+      frameworkSearchPaths = config.frameworkSearchPaths.map(resolvePath)
+    )
+  }
+
+  private def applyProjectTargetConfig(options: ca.uwaterloo.flix.util.Options): ca.uwaterloo.flix.util.Options = {
+    val nativeLinks = options.target match {
+      case CompilationTarget.LlvmNative => nativeLinkConfig
+      case _ => NativeLinkConfig()
+    }
+    options.copy(
+      artifactName = artifactName,
+      nativeLinkConfig = nativeLinks
+    )
+  }
+
   /**
     * Builds (compiles) the source files for the project.
     */
   def build(flix: Flix, build: Build = Build.Development, includeTests: Boolean = false): Result[CompilationResult, BootstrapError] = {
     // We disable incremental compilation to ensure a clean compile.
-    val newOptions = flix.options.copy(
+    val newOptions = applyProjectTargetConfig(flix.options.copy(
       build = build,
       incremental = false,
       outputJvm = true,
       outputPath = Bootstrap.getBuildTargetDirectory(projectPath, flix.options.target),
-      artifactName = artifactName
-    )
+    ))
     flix.setOptions(newOptions)
 
     // We also clear any cached ASTs.
@@ -404,7 +428,7 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
     */
   def buildJar(flix: Flix): Result[Unit, BootstrapError] = {
     val jarFile = Bootstrap.getJarFile(projectPath)
-    flix.setOptions(flix.options.copy(artifactName = artifactName))
+    flix.setOptions(applyProjectTargetConfig(flix.options))
     Steps.updateStaleSources(flix, forceReload = true)
     for {
       _ <- Steps.configureJarOutput(flix)
@@ -426,7 +450,7 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
   def buildFatJar(flix: Flix): Result[Unit, BootstrapError] = {
     val jarFile = Bootstrap.getJarFile(projectPath)
     val libDir = Bootstrap.getLibraryDirectory(projectPath)
-    flix.setOptions(flix.options.copy(artifactName = artifactName))
+    flix.setOptions(applyProjectTargetConfig(flix.options))
     Steps.updateStaleSources(flix, forceReload = true)
     for {
       _ <- Steps.configureJarOutput(flix)
@@ -766,7 +790,7 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
     * Type checks the source files for the project.
     */
   def check(flix: Flix): Result[Unit, BootstrapError] = {
-    flix.setOptions(flix.options.copy(artifactName = artifactName))
+    flix.setOptions(applyProjectTargetConfig(flix.options))
     Steps.updateStaleSources(flix, forceReload = true)
     Steps.check(flix).map(_ => ())
   }
@@ -779,7 +803,7 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
   def reconfigureFlix(flix: Flix): Unit = {
     // TODO: Figure out if this function can be removed somehow (maybe by removing shell depending on bootstrap)
     // TODO: Can be removed by moving `updateStaleSources` into all step functions that require updating stale sources (almost all). This also remove responsibility from the caller.
-    flix.setOptions(flix.options.copy(artifactName = artifactName))
+    flix.setOptions(applyProjectTargetConfig(flix.options))
     Steps.updateStaleSources(flix, forceReload = true)
   }
 
@@ -787,7 +811,7 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
     * Generates API documentation.
     */
   def doc(flix: Flix): Result[Unit, BootstrapError] = {
-    flix.setOptions(flix.options.copy(artifactName = artifactName))
+    flix.setOptions(applyProjectTargetConfig(flix.options))
     Steps.updateStaleSources(flix, forceReload = true)
     Steps.check(flix).map(HtmlDocumentor.run(_, getPackageModules)(flix))
   }
@@ -796,7 +820,7 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
     * Formats all source files in the project.
     */
   def format(flix: Flix): Result[Unit, BootstrapError] = {
-    flix.setOptions(flix.options.copy(artifactName = artifactName))
+    flix.setOptions(applyProjectTargetConfig(flix.options))
     Steps.updateStaleSources(flix, forceReload = true)
     Steps.check(flix).map {
       case _ =>
@@ -1330,14 +1354,13 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
   }
 
   private def buildPortableTestDriver(flix: Flix): Result[CompilationResult, BootstrapError] = {
-    val newOptions = flix.options.copy(
+    val newOptions = applyProjectTargetConfig(flix.options.copy(
       build = Build.Development,
       entryPoint = None,
       incremental = false,
       outputJvm = true,
       outputPath = Bootstrap.getBuildTargetDirectory(projectPath, flix.options.target),
-      artifactName = artifactName
-    )
+    ))
     flix.setOptions(newOptions)
     flix.clearCaches()
 

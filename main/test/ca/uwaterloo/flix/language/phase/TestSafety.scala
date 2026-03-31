@@ -107,8 +107,12 @@ class TestSafety extends AnyFunSuite with TestUtils {
   test("IllegalNativeImportType.01") {
     val input =
       """
-        |extern native(symbol = "strlen")
-        |def strlen(s: String): Int64
+        |enum Color {
+        |    case Red
+        |}
+        |
+        |extern native(symbol = "color_id")
+        |def colorId(c: Color): Int64
       """.stripMargin
     val result = check(input, LlvmPortableOptions)
     expectError[IllegalNativeImportType](result)
@@ -122,6 +126,26 @@ class TestSafety extends AnyFunSuite with TestUtils {
       """.stripMargin
     val result = check(input, LlvmPortableOptions)
     expectError[NativeImportTypeParametersNotSupported](result)
+  }
+
+  test("NativeImportZeroArgString.01") {
+    val input =
+      """
+        |extern native(symbol = "greet")
+        |def greet(): String
+      """.stripMargin
+    val result = check(input, LlvmPortableOptions)
+    expectSuccess(result)
+  }
+
+  test("NativeImportRecursivePortableResult.01") {
+    val input =
+      """
+        |extern native(symbol = "open_widget")
+        |def openWidget(seed: Int32): Result[Int32, (String, Array[Int8, Static])]
+      """.stripMargin
+    val result = check(input, LlvmPortableOptions)
+    expectSuccess(result)
   }
 
   test("WasmImportNotSupportedOnTarget.01") {
@@ -152,6 +176,16 @@ class TestSafety extends AnyFunSuite with TestUtils {
       """.stripMargin
     val result = check(input, WasmPortableOptions)
     expectError[IllegalWasmImportType](result)
+  }
+
+  test("WasmImportZeroArgScalar.01") {
+    val input =
+      """
+        |extern wasm(interface = "host:demo/basic@0.1.0", func = "now")
+        |def now(): Int64
+      """.stripMargin
+    val result = check(input, WasmPortableOptions)
+    expectSuccess(result)
   }
 
   test("MalformedWasmImportInterface.01") {

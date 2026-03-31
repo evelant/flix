@@ -178,25 +178,34 @@ object SafetyError {
   case class IllegalNativeImportType(tpe: Type, loc: SourceLocation)(implicit flix: Flix) extends SafetyError {
     def code: ErrorCode = ErrorCode.E6026
 
-    def summary: String = "`extern native` uses a type that is not supported by the raw C ABI."
+    def summary: String = "`extern native` uses a type that is not supported by the native import ABI."
 
     def message(fmt: Formatter)(implicit root: Option[TypedAst.Root]): String = {
       import fmt.*
-      s""">> `extern native` uses a type that is not supported by the raw C ABI.
+      s""">> `extern native` uses a type that is not supported by the native import ABI.
          |
          |${highlight(loc, "unsupported type", fmt)}
          |
          |Type: ${red(FormatType.formatType(tpe))}
          |
-         |${underline("Explanation:")} The v0 native import ABI only supports:
+         |${underline("Explanation:")} The current native import ABI supports:
          |
          |  - Unit
          |  - Bool
          |  - Int8 / Int16 / Int32 / Int64
          |  - Float32 / Float64
+         |  - String
+         |  - Array[Int8, Static] as Bytes
+         |  - recursive portable ABI aggregates:
+         |    - List[t]
+         |    - Array[t, Static]
+         |    - Tuple[...]
+         |    - Option[t]
+         |    - Result[e, t]
+         |    - closed records
          |
-         |Strings, records, lists, arrays, and polymorphic types are not part of the direct
-         |raw C ABI. Those need a richer import story later.
+         |Arbitrary ADTs, open records, region-polymorphic arrays, and polymorphic types are not part
+         |of the native import ABI.
          |""".stripMargin
     }
   }

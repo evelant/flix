@@ -133,10 +133,12 @@ object LlvmBackend {
         case CompilationTarget.LlvmNative =>
           root.defs.values.toList.flatMap { defn =>
             extractNativeImportBody(defn.exp).map { body =>
-              val sig = NativeImportAbi.signatureOf(defn.fparams.map(_.tpe), body.resultTpe).getOrElse {
-                throw new IllegalStateException(s"Unsupported lowered native import signature for '${defn.sym}'.")
+              val sig = defn.nativeImportSignature.getOrElse {
+                throw new IllegalStateException(s"Missing native import signature for '${defn.sym}'.")
               }
-              Decl.DeclareFun(nativeImportLlvmType(sig.result), body.spec.symbol, sig.params.map(nativeImportLlvmType))
+              val callParams =
+                (if (sig.requiresBridgeCtx) List(Type.Ptr) else Nil) ::: sig.params.map(nativeImportCallLlvmType)
+              Decl.DeclareFun(nativeImportCallLlvmType(sig.result), body.spec.symbol, callParams)
             }
           }.distinct
         case CompilationTarget.LlvmWasm =>
@@ -1764,13 +1766,13 @@ object LlvmBackend {
       if (defn.cparams.nonEmpty || defn.lparams.nonEmpty) {
         throw new IllegalStateException(s"Unexpected closure/local params on direct import '${defn.sym}'.")
       }
-      val sig = NativeImportAbi.signatureOf(defn.fparams.map(_.tpe), resultTpe).getOrElse {
-        throw new IllegalStateException(s"Unsupported lowered native import signature for '${defn.sym}'.")
+      val sig = defn.nativeImportSignature.getOrElse {
+        throw new IllegalStateException(s"Missing native import signature for '${defn.sym}'.")
       }
 
       val fnName = LlvmNames.defName(defn.sym)
       val params = LlvmIr.Param("ctx", Type.Ptr) :: defn.fparams.zipWithIndex.map {
-        case (_, i) => LlvmIr.Param(LlvmNames.paramName(i), nativeImportLlvmType(sig.params(i)))
+        case (fp, i) => LlvmIr.Param(LlvmNames.paramName(i), llvmTypeOf(fp.tpe))
       }
 
       val fb = new FunBuilder()
@@ -1809,9 +1811,11 @@ object LlvmBackend {
       val pollOkBlock = fb.newBlock(pollOkLabel)
       fb.setCurrent(pollOkBlock)
 
-      val args = defn.fparams.zipWithIndex.map {
-        case (_, i) => Value.Local(LlvmNames.paramName(i), nativeImportLlvmType(sig.params(i)))
+      val preparedArgs = defn.fparams.zip(sig.params).zipWithIndex.map {
+        case ((fp, abiTpe), i) =>
+          prepareNativeImportArg(ctxPtr, Value.Local(LlvmNames.paramName(i), llvmTypeOf(fp.tpe)), fp.tpe, abiTpe, fb)
       }
+      val args = (if (sig.requiresBridgeCtx) List(ctxPtr) else Nil) ::: preparedArgs.map(_.arg)
 
       val rawResultValue = sig.result match {
         case NativeImportAbi.AbiType.Unit =>
@@ -1819,15 +1823,18 @@ object LlvmBackend {
           emitConstant(Constant.Unit, ctxPtr, fb)
 
         case abiTpe =>
-          val callTpe = nativeImportLlvmType(abiTpe)
+          val callTpe = nativeImportCallLlvmType(abiTpe)
           val tmp = freshTmp(callTpe)
           fb.current.emitAssign(tmp, Op.Call(callTpe, cSymbol, args))
           tmp
       }
+      preparedArgs.foreach(_.cleanupHandle.foreach(emitReleaseExportHandle(ctxPtr, _, fb)))
+
+      val loweredResultValue = decodeNativeImportResult(ctxPtr, resultTpe, sig.result, rawResultValue, fb)
 
       val resultValue =
-        if (boxed) emitApplyAtomic(AtomicOp.Box, List(resultTpe), List(rawResultValue), defn.tpe, ctxPtr, fb, None)
-        else rawResultValue
+        if (boxed) emitApplyAtomic(AtomicOp.Box, List(resultTpe), List(loweredResultValue), defn.tpe, ctxPtr, fb, None)
+        else loweredResultValue
 
       val packed = packResult(resultValue, defn.tpe, fb)
       fb.current.setTerminator(Terminator.Ret(flixResultType, packed))
@@ -2964,6 +2971,7 @@ object LlvmBackend {
     }
 
     private case class ExportHandle(handle: Value, owned: Boolean)
+    private case class NativeImportPreparedArg(arg: Value, cleanupHandle: Option[Value])
     private case class WasmImportPreparedArg(arg: Value, cleanup: Option[(WasmImportInterface.Id, ExportAbi.AbiType, Value)])
 
     private def emitStoreExportOkValue(ctxPtr: Value, outPtr: Value, payload: Value, loweredTpe: SimpleType, abiTpe: ExportAbi.AbiType, fb: FunBuilder): Unit = abiTpe match {
@@ -2995,6 +3003,42 @@ object LlvmBackend {
 
     private def emitReleaseExportHandle(ctxPtr: Value, handle: Value, fb: FunBuilder): Unit =
       fb.current.emitCallVoid("flix_handle_release", List(ctxPtr, handle))
+
+    private def prepareNativeImportArg(ctxPtr: Value, value: Value, loweredTpe: SimpleType, abiTpe: NativeImportAbi.AbiType, fb: FunBuilder): NativeImportPreparedArg = abiTpe match {
+      case NativeImportAbi.AbiType.String | NativeImportAbi.AbiType.Bytes =>
+        val ptr = llvmTypeOf(loweredTpe) match {
+          case Type.Ptr => castValue(value, Type.Ptr, fb)
+          case other =>
+            fb.current.emitTrap()
+            Value.Undef(other)
+        }
+        val handle = freshTmp(Type.I64)
+        fb.current.emitAssign(handle, Op.Call(Type.I64, "flix_handle_new", List(ctxPtr, ptr)))
+        NativeImportPreparedArg(handle, Some(handle))
+
+      case NativeImportAbi.AbiType.Portable(portableTpe) =>
+        val encoded = emitEncodeExportAbiValue(ctxPtr, value, portableTpe, fb)
+        NativeImportPreparedArg(encoded.handle, if (encoded.owned) Some(encoded.handle) else None)
+
+      case _ =>
+        NativeImportPreparedArg(castValue(value, nativeImportCallLlvmType(abiTpe), fb), None)
+    }
+
+    private def decodeNativeImportResult(ctxPtr: Value, loweredTpe: SimpleType, abiTpe: NativeImportAbi.AbiType, value: Value, fb: FunBuilder): Value = abiTpe match {
+      case NativeImportAbi.AbiType.String | NativeImportAbi.AbiType.Bytes =>
+        val handle = castValue(value, Type.I64, fb)
+        val portableTpe =
+          if (abiTpe == NativeImportAbi.AbiType.String) ExportAbi.AbiType.String
+          else ExportAbi.AbiType.Bytes
+        emitOwnedImportHandleToLoweredValue(ctxPtr, ExportHandle(handle, owned = true), loweredTpe, portableTpe, fb)
+
+      case NativeImportAbi.AbiType.Portable(portableTpe) =>
+        val handle = castValue(value, Type.I64, fb)
+        emitOwnedImportHandleToLoweredValue(ctxPtr, ExportHandle(handle, owned = true), loweredTpe, portableTpe, fb)
+
+      case _ =>
+        value
+    }
 
     private def emitEncodeExportAbiValue(ctxPtr: Value, value: Value, abiTpe: ExportAbi.AbiType, fb: FunBuilder): ExportHandle =
       emitEncodeExportAbiValue(ctxPtr, value, abiTpe, stringBytesOwned = false, fb)
@@ -4253,7 +4297,7 @@ object LlvmBackend {
       case _ => Type.Ptr
     }
 
-    private def nativeImportLlvmType(tpe: NativeImportAbi.AbiType): Type = tpe match {
+    private def nativeImportCallLlvmType(tpe: NativeImportAbi.AbiType): Type = tpe match {
       case NativeImportAbi.AbiType.Unit => Type.Void
       case NativeImportAbi.AbiType.Bool => Type.I1
       case NativeImportAbi.AbiType.Int8 => Type.I8
@@ -4262,6 +4306,9 @@ object LlvmBackend {
       case NativeImportAbi.AbiType.Int64 => Type.I64
       case NativeImportAbi.AbiType.Float32 => Type.Float
       case NativeImportAbi.AbiType.Float64 => Type.Double
+      case NativeImportAbi.AbiType.String => Type.I64
+      case NativeImportAbi.AbiType.Bytes => Type.I64
+      case NativeImportAbi.AbiType.Portable(_) => Type.I64
     }
 
     private def emitLoadWasmImportSequenceElement(seqPtr0: Value, idx0: Value, elmTpe: ExportAbi.AbiType, fb: FunBuilder): Value = {

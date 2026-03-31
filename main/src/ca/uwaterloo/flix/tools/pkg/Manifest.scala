@@ -18,7 +18,7 @@ package ca.uwaterloo.flix.tools.pkg
 
 import ca.uwaterloo.flix.language.ast.shared.SecurityContext
 import ca.uwaterloo.flix.tools.pkg.github.GitHub
-import ca.uwaterloo.flix.util.{CompilationTarget, EmitKind, RunnerKind}
+import ca.uwaterloo.flix.util.{CompilationTarget, EmitKind, NativeLinkConfig, RunnerKind}
 
 case class Manifest(name: String,
                     description: String,
@@ -46,8 +46,11 @@ object Manifest {
 
   case class TargetConfig(emits: Option[List[EmitKind]] = None)
 
+  case class NativeTargetConfig(emits: Option[List[EmitKind]] = None,
+                                link: NativeLinkConfig = NativeLinkConfig())
+
   case class TargetConfigs(jvm: TargetConfig = TargetConfig(),
-                           native: TargetConfig = TargetConfig(),
+                           native: NativeTargetConfig = NativeTargetConfig(),
                            wasm: TargetConfig = TargetConfig()) {
     def emitFor(target: CompilationTarget): Option[List[EmitKind]] = target match {
       case CompilationTarget.Jvm => jvm.emits
@@ -70,7 +73,7 @@ object Manifest {
     val packageSection = mkPackageSection(manifest)
     val buildSection = mkBuildSection(manifest)
     val targetJvmSection = mkTargetSection("jvm", manifest.targetConfigs.jvm)
-    val targetNativeSection = mkTargetSection("native", manifest.targetConfigs.native)
+    val targetNativeSection = mkNativeTargetSection(manifest.targetConfigs.native)
     val targetWasmSection = mkTargetSection("wasm", manifest.targetConfigs.wasm)
     val runSection = mkRunSection(manifest)
     val testSection = mkTestSection(manifest)
@@ -151,6 +154,17 @@ object Manifest {
         val entry = TomlEntry.Present(TomlKey("emit"), TomlExp.TomlArray(emits.map(formatEmit).map(TomlExp.TomlValue.apply)))
         Some(TomlSection(s"target.$name", List(entry)))
     }
+
+  private def mkNativeTargetSection(config: NativeTargetConfig): Option[TomlSection] = {
+    val entries = List(
+      config.emits.map(emits => TomlEntry.Present(TomlKey("emit"), TomlExp.TomlArray(emits.map(formatEmit).map(TomlExp.TomlValue.apply)))).getOrElse(TomlEntry.Absent),
+      if (config.link.libraries.isEmpty) TomlEntry.Absent else TomlEntry.Present(TomlKey("link-libs"), TomlExp.TomlArray(config.link.libraries.map(TomlExp.TomlValue.apply))),
+      if (config.link.searchPaths.isEmpty) TomlEntry.Absent else TomlEntry.Present(TomlKey("link-search"), TomlExp.TomlArray(config.link.searchPaths.map(p => TomlExp.TomlValue(p.toString)))),
+      if (config.link.frameworks.isEmpty) TomlEntry.Absent else TomlEntry.Present(TomlKey("frameworks"), TomlExp.TomlArray(config.link.frameworks.map(TomlExp.TomlValue.apply))),
+      if (config.link.frameworkSearchPaths.isEmpty) TomlEntry.Absent else TomlEntry.Present(TomlKey("framework-search"), TomlExp.TomlArray(config.link.frameworkSearchPaths.map(p => TomlExp.TomlValue(p.toString))))
+    )
+    if (entries.exists(_.isInstanceOf[TomlEntry.Present])) Some(TomlSection("target.native", entries)) else None
+  }
 
   private def mkMavenDependencySection(manifest: Manifest) = {
     TomlSection("mvn-dependencies", manifest.mavenDependencies.map(mkMavenDependency))

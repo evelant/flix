@@ -84,6 +84,18 @@ class TestMain extends AnyFunSuite {
     assert(opts.bindOut.contains(java.nio.file.Paths.get("bar")))
   }
 
+  test("bind native") {
+    val args = Array("bind", "native", "--header", "foo.h", "--out", "bar", "--native-module", "Native", "--include", "inc", "--define", "FEATURE=1", "--cflag", "-DMORE=1")
+    val opts = Main.parseCmdOpts(args).get
+    assert(opts.command == Main.Command.BindNative)
+    assert(opts.bindHeader.contains(java.nio.file.Paths.get("foo.h")))
+    assert(opts.bindOut.contains(java.nio.file.Paths.get("bar")))
+    assert(opts.bindNativeModule == "Native")
+    assert(opts.bindIncludePaths == List(java.nio.file.Paths.get("inc")))
+    assert(opts.bindDefines == List("FEATURE=1"))
+    assert(opts.bindCFlags == List("-DMORE=1"))
+  }
+
   test("format") {
     val args = Array("format")
     val opts = Main.parseCmdOpts(args).get

@@ -16,7 +16,7 @@
 
 package ca.uwaterloo.flix.language.phase
 
-import ca.uwaterloo.flix.language.ast.{SimpleType, Type}
+import ca.uwaterloo.flix.language.ast.{SimpleType, Type, TypeConstructor}
 import ca.uwaterloo.flix.language.phase.ExportAbi.AbiType
 import ca.uwaterloo.flix.util.Result
 
@@ -26,12 +26,22 @@ object WasmImportAbi {
 
   def signatureOf(fparams: List[Type], result: Type): Option[Signature] =
     for {
-      ps <- traverseResult(fparams)(ExportAbi.portableFromType)
+      ps <- traverseResult(normalizeZeroArgTypeParams(fparams))(ExportAbi.portableFromType)
       r <- ExportAbi.portableFromType(result).toOption.flatten
     } yield ExportAbi.Signature(ps, r)
 
   def signatureOf(fparams: List[SimpleType], result: SimpleType): Option[Signature] =
-    ExportAbi.portableSignature(fparams, result)
+    ExportAbi.portableSignature(normalizeZeroArgSimpleTypeParams(fparams), result)
+
+  def normalizeZeroArgTypeParams(fparams: List[Type]): List[Type] = fparams match {
+    case Type.Cst(TypeConstructor.Unit, _) :: Nil => Nil
+    case params => params
+  }
+
+  def normalizeZeroArgSimpleTypeParams(fparams: List[SimpleType]): List[SimpleType] = fparams match {
+    case SimpleType.Unit :: Nil => Nil
+    case params => params
+  }
 
   def supportsParam(tpe: Type): Boolean =
     ExportAbi.portableFromType(tpe).toOption.flatten.nonEmpty

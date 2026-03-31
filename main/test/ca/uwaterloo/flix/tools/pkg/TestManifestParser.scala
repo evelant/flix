@@ -4,7 +4,7 @@ import ca.uwaterloo.flix.language.ast.Symbol
 import ca.uwaterloo.flix.language.ast.shared.SecurityContext
 import ca.uwaterloo.flix.tools.pkg.github.GitHub
 import ca.uwaterloo.flix.util.Result.{Err, Ok}
-import ca.uwaterloo.flix.util.{CompilationTarget, EmitKind, Formatter, Result, RunnerKind}
+import ca.uwaterloo.flix.util.{CompilationTarget, EmitKind, Formatter, NativeLinkConfig, Result, RunnerKind}
 import org.scalatest.funsuite.AnyFunSuite
 
 import java.io.File
@@ -75,6 +75,10 @@ class TestManifestParser extends AnyFunSuite {
       |
       |[target.native]
       |emit = ["staticlib", "sharedlib"]
+      |link-libs = ["nativeffi_smoke", "m"]
+      |link-search = ["native-lib", "/opt/homebrew/lib"]
+      |frameworks = ["Security"]
+      |framework-search = ["/Library/Frameworks"]
       |
       |[target.wasm]
       |emit = ["component"]
@@ -298,6 +302,20 @@ class TestManifestParser extends AnyFunSuite {
     assertResult(expected = Some(List(EmitKind.StaticLib, EmitKind.SharedLib)))(actual = {
       ManifestParser.parse(tomlWithTargets, null) match {
         case Ok(manifest) => manifest.targetConfigs.native.emits
+        case Err(e) => e.message(f)
+      }
+    })
+  }
+
+  test("Ok.target.native.link") {
+    assertResult(expected = NativeLinkConfig(
+      libraries = List("nativeffi_smoke", "m"),
+      searchPaths = List(Paths.get("native-lib"), Paths.get("/opt/homebrew/lib")),
+      frameworks = List("Security"),
+      frameworkSearchPaths = List(Paths.get("/Library/Frameworks"))
+    ))(actual = {
+      ManifestParser.parse(tomlWithTargets, null) match {
+        case Ok(manifest) => manifest.targetConfigs.native.link
         case Err(e) => e.message(f)
       }
     })

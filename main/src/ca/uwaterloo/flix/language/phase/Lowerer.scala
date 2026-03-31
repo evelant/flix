@@ -46,7 +46,7 @@ object Lowerer {
   }(DebugNoOp())
 
   private def visitDef(d: ErasedAst.Def, target: CompilationTarget)(implicit root: ErasedAst.Root, suspendableDefs: Map[Symbol.DefnSym, Boolean]): LoweredAst.Def = d match {
-    case ErasedAst.Def(ann, mod, sym, cparams0, fparams0, exp, tpe, unboxedType0, exportedSignature, wasmImportSignature, loc) =>
+    case ErasedAst.Def(ann, mod, sym, cparams0, fparams0, exp, tpe, unboxedType0, exportedSignature, nativeImportSignature, wasmImportSignature, loc) =>
       implicit val lctx: LocalContext = new LocalContext(isControlImpure = canSuspend(exp.purity, target) || suspendableDefs.getOrElse(sym, false))
 
       // It is important to visit parameters and variables in the order the backend expects: cparams, fparams, then lparams.
@@ -58,7 +58,7 @@ object Lowerer {
       val pcPoints = lctx.getPcPoints
       val unboxedType = LoweredAst.UnboxedType(unboxedType0.tpe)
 
-      LoweredAst.Def(ann, mod, sym, cparams, fparams, ls, pcPoints, e, tpe, unboxedType, exportedSignature, wasmImportSignature, loc)
+      LoweredAst.Def(ann, mod, sym, cparams, fparams, ls, pcPoints, e, tpe, unboxedType, exportedSignature, nativeImportSignature, wasmImportSignature, loc)
   }
 
   private def visitEnum(enm: ErasedAst.Enum): LoweredAst.Enum = {

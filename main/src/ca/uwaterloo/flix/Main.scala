@@ -360,6 +360,45 @@ object Main {
               System.exit(1)
           }
 
+        case Command.BindNative =>
+          if (cmdOpts.files.nonEmpty) {
+            println("The 'bind native' command does not support file arguments.")
+            System.exit(1)
+          }
+          val header = cmdOpts.bindHeader.getOrElse {
+            println("The 'bind native' command requires --header <file>.")
+            System.exit(1)
+            null
+          }
+          val outDir = cmdOpts.bindOut.getOrElse {
+            println("The 'bind native' command requires --out <dir>.")
+            System.exit(1)
+            null
+          }
+          NativeBindingsTool.run(NativeBindingsTool.Config(
+            header = header,
+            outDir = outDir,
+            rootModule = cmdOpts.bindNativeModule,
+            includePaths = cmdOpts.bindIncludePaths,
+            defines = cmdOpts.bindDefines,
+            cflags = cmdOpts.bindCFlags,
+          )) match {
+            case Result.Ok(generated) =>
+              println(s"Generated ${generated.flixFile.toAbsolutePath.normalize()}")
+              generated.shimFile.foreach(p => println(s"Generated ${p.toAbsolutePath.normalize()}"))
+              generated.shimHeaderFile.foreach(p => println(s"Generated ${p.toAbsolutePath.normalize()}"))
+              if (generated.skipped.nonEmpty) {
+                println(s"Generated ${generated.generatedDecls} of ${generated.totalDecls} extern declarations.")
+                generated.skipped.foreach { skip =>
+                  println(s"Skipped ${skip.symbol}: ${skip.reason}")
+                }
+              }
+              System.exit(0)
+            case Result.Err(msg) =>
+              println(msg)
+              System.exit(1)
+          }
+
         case Command.Doc =>
           if (cmdOpts.files.isEmpty) {
             exitOnResult {
@@ -601,6 +640,11 @@ object Main {
   case class CmdOpts(
     command: Command = Command.None,
     args: List[String] = Nil,
+    bindCFlags: List[String] = Nil,
+    bindDefines: List[String] = Nil,
+    bindHeader: Option[Path] = None,
+    bindIncludePaths: List[Path] = Nil,
+    bindNativeModule: String = "Native",
     bindOut: Option[Path] = None,
     bindRootModule: String = "Wit",
     bindWit: Option[Path] = None,
@@ -657,6 +701,8 @@ object Main {
     case object Clean extends Command
 
     case object Doctor extends Command
+
+    case object BindNative extends Command
 
     case object BindWasmEffects extends Command
 
@@ -778,6 +824,8 @@ object Main {
 
       cmd("bind").text("  generates source bindings from external interface definitions.")
         .children(
+          cmd("native").action((_, c) => c.copy(command = Command.BindNative))
+            .text("  generates Flix native bindings from a curated C header."),
           cmd("wasm-effects").action((_, c) => c.copy(command = Command.BindWasmEffects))
             .text("  generates Flix async effect bindings from a WIT world.")
         )
@@ -844,6 +892,9 @@ object Main {
       opt[String]("wit").action((s, c) => c.copy(bindWit = Some(Paths.get(s)))).
         text("WIT package directory for binding generation.")
 
+      opt[String]("header").action((s, c) => c.copy(bindHeader = Some(Paths.get(s)))).
+        text("curated C header for native binding generation.")
+
       opt[String]("world").action((s, c) => c.copy(bindWorld = Some(s))).
         text("WIT world name for binding generation.")
 
@@ -852,6 +903,18 @@ object Main {
 
       opt[String]("root-module").action((s, c) => c.copy(bindRootModule = s)).
         text("root Flix module for generated WIT effect bindings.")
+
+      opt[String]("native-module").action((s, c) => c.copy(bindNativeModule = s)).
+        text("root Flix module for generated native bindings.")
+
+      opt[String]("include").unbounded().action((s, c) => c.copy(bindIncludePaths = c.bindIncludePaths :+ Paths.get(s))).
+        text("additional C include path for native binding generation.")
+
+      opt[String]("define").unbounded().action((s, c) => c.copy(bindDefines = c.bindDefines :+ s)).
+        text("preprocessor definition for native binding generation.")
+
+      opt[String]("cflag").unbounded().action((s, c) => c.copy(bindCFlags = c.bindCFlags :+ s)).
+        text("additional C compiler flag for native binding generation.")
 
       help("help").text("prints this usage information.")
 
@@ -1511,6 +1574,7 @@ object Main {
     case Command.BuildPkg => "package"
     case Command.Clean => "clean"
     case Command.Doctor => "doctor"
+    case Command.BindNative => "bind native"
     case Command.BindWasmEffects => "bind wasm-effects"
     case Command.Doc => "doc"
     case Command.Format => "format"

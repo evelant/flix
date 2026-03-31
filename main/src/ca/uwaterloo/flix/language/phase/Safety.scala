@@ -62,7 +62,7 @@ object Safety {
         if (defn.spec.tparams.nonEmpty) {
           sctx.errors.add(SafetyError.NativeImportTypeParametersNotSupported(loc))
         }
-        defn.spec.fparams.foreach { fp =>
+        normalizeZeroArgImportParams(defn.spec.fparams).foreach { fp =>
           if (!NativeImportAbi.supportsParam(fp.tpe)) {
             sctx.errors.add(SafetyError.IllegalNativeImportType(fp.tpe, fp.loc))
           }
@@ -77,7 +77,7 @@ object Safety {
         if (WasmImportInterface.parse(spec.interface).isEmpty || !WasmImportInterface.isValidFuncName(spec.func)) {
           sctx.errors.add(SafetyError.MalformedWasmImportInterface(spec.interface, loc))
         }
-        defn.spec.fparams.foreach { fp =>
+        normalizeZeroArgImportParams(defn.spec.fparams).foreach { fp =>
           if (!WasmImportAbi.supportsParam(fp.tpe)) {
             sctx.errors.add(SafetyError.IllegalWasmImportType(fp.tpe, fp.loc))
           }
@@ -89,6 +89,15 @@ object Safety {
     }
     visitExp(defn.exp)
     defn
+  }
+
+  /**
+    * Source-level zero-arg defs are internally represented with a synthetic unit formal.
+    * Import ABIs treat that encoding as "no boundary args", so Safety must ignore it too.
+    */
+  private def normalizeZeroArgImportParams(fparams: List[FormalParam]): List[FormalParam] = fparams match {
+    case fp :: Nil if fp.tpe.typeConstructor == Some(TypeConstructor.Unit) => Nil
+    case params => params
   }
 
   /** Checks the safety and well-formedness of `trt`. */

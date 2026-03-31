@@ -19,7 +19,7 @@ import ca.uwaterloo.flix.language.ast.Symbol
 import ca.uwaterloo.flix.language.ast.shared.SecurityContext
 import ca.uwaterloo.flix.tools.pkg.Dependency.{FlixDependency, JarDependency, MavenDependency}
 import ca.uwaterloo.flix.tools.pkg.github.GitHub
-import ca.uwaterloo.flix.util.{CompilationTarget, EmitKind, RunnerKind}
+import ca.uwaterloo.flix.util.{CompilationTarget, EmitKind, NativeLinkConfig, RunnerKind}
 import ca.uwaterloo.flix.util.Result
 import ca.uwaterloo.flix.util.Result.{Err, Ok, traverse}
 import org.tomlj.*
@@ -108,7 +108,7 @@ object ManifestParser {
 
       buildTargets <- parseBuildTargets(parser, p);
       jvmTargetConfig <- parseTargetConfig("target.jvm", parser, p);
-      nativeTargetConfig <- parseTargetConfig("target.native", parser, p);
+      nativeTargetConfig <- parseNativeTargetConfig("target.native", parser, p);
       wasmTargetConfig <- parseTargetConfig("target.wasm", parser, p);
       runTarget <- parseOptionalTargetProperty("run.target", parser, p);
       runRunner <- parseOptionalRunnerProperty("run.runner", parser, p);
@@ -193,6 +193,40 @@ object ManifestParser {
           traverse(emits)(toEmitKind(_, p, s"$prefix.emit")).map(xs => Manifest.TargetConfig(Some(xs.distinct)))
         }
     }
+  }
+
+  private def parseNativeTargetConfig(prefix: String, parser: TomlParseResult, p: Path): Result[Manifest.NativeTargetConfig, ManifestError] = {
+    for {
+      emits <- getOptionalArrayProperty(s"$prefix.emit", parser, p).flatMap {
+        case None => Ok(None)
+        case Some(array) =>
+          convertTomlArrayToStringList(array, p).flatMap(xs => traverse(xs)(toEmitKind(_, p, s"$prefix.emit")).map(ys => Some(ys.distinct)))
+      }
+      linkLibs <- getOptionalArrayProperty(s"$prefix.link-libs", parser, p).flatMap {
+        case None => Ok(Nil)
+        case Some(array) => convertTomlArrayToStringList(array, p).map(_.distinct)
+      }
+      linkSearch <- getOptionalArrayProperty(s"$prefix.link-search", parser, p).flatMap {
+        case None => Ok(Nil)
+        case Some(array) => convertTomlArrayToStringList(array, p).map(_.distinct.map(Path.of(_)))
+      }
+      frameworks <- getOptionalArrayProperty(s"$prefix.frameworks", parser, p).flatMap {
+        case None => Ok(Nil)
+        case Some(array) => convertTomlArrayToStringList(array, p).map(_.distinct)
+      }
+      frameworkSearch <- getOptionalArrayProperty(s"$prefix.framework-search", parser, p).flatMap {
+        case None => Ok(Nil)
+        case Some(array) => convertTomlArrayToStringList(array, p).map(_.distinct.map(Path.of(_)))
+      }
+    } yield Manifest.NativeTargetConfig(
+      emits = emits,
+      link = NativeLinkConfig(
+        libraries = linkLibs,
+        searchPaths = linkSearch,
+        frameworks = frameworks,
+        frameworkSearchPaths = frameworkSearch
+      )
+    )
   }
 
   private def toCompilationTarget(s: String, p: Path, prop: String): Result[CompilationTarget, ManifestError] = s match {

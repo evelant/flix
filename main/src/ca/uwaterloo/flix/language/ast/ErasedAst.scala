@@ -16,7 +16,7 @@
 
 package ca.uwaterloo.flix.language.ast
 
-import ca.uwaterloo.flix.language.phase.ExportAbi
+import ca.uwaterloo.flix.language.phase.{ExportAbi, NativeImportAbi}
 import ca.uwaterloo.flix.language.ast.Purity.Pure
 import ca.uwaterloo.flix.language.ast.shared.SymUse.{EffSymUse, OpSymUse}
 import ca.uwaterloo.flix.language.ast.shared.*
@@ -40,6 +40,7 @@ object ErasedAst {
                  tpe: SimpleType,
                  unboxedType: UnboxedType,
                  exportedSignature: Option[ExportAbi.Signature],
+                 nativeImportSignature: Option[NativeImportAbi.Signature],
                  wasmImportSignature: Option[ExportAbi.Signature],
                  loc: SourceLocation) {
     val arrowType: SimpleType.Arrow = SimpleType.mkArrow(fparams.map(_.tpe), tpe)

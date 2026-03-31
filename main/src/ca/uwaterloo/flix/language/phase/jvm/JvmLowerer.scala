@@ -67,7 +67,7 @@ object JvmLowerer {
   }
 
   private def visitDef(d: LoweredAst.Def)(implicit root: LoweredAst.Root, ctx: SharedContext): JvmAst.Def = d match {
-    case LoweredAst.Def(ann, mod, sym, cparams0, fparams0, lparams0, pcPoints0, exp, tpe, unboxedType0, _, _, loc) =>
+    case LoweredAst.Def(ann, mod, sym, cparams0, fparams0, lparams0, pcPoints0, exp, tpe, unboxedType0, _, _, _, loc) =>
       implicit val lctx: LocalContext = new LocalContext(isControlImpure = Purity.isControlImpure(exp.purity))
 
       // It is important to visit parameters and variables in the order the backend expects: cparams, fparams, then lparams.
