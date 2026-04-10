@@ -539,28 +539,26 @@ object LlvmWasmDriver {
   }
 
   private def resolveNodeRunner(outDir: Path): Path = {
-    if (Files.exists(DefaultNodeRunner)
-      && Files.exists(DefaultRunnerModule)
-      && Files.exists(DefaultEffectHandlersModule)
-      && Files.exists(DefaultWitEffectBindingsModule)
-      && Files.exists(DefaultNodeHandlersModule)
-      && Files.exists(DefaultNodeTcpHandlersModule)
-      && Files.exists(DefaultNodeProcessHandlersModule)) {
-      return DefaultNodeRunner
-    }
-
     val runnerDir = outDir.resolve("wasm-runner-js")
     Files.createDirectories(runnerDir)
 
-    copyBundledResource(BundledRunFlixResource, runnerDir.resolve("run-flix.mjs"))
-    copyBundledResource(BundledRunnerResource, runnerDir.resolve("runner.mjs"))
-    copyBundledResource(BundledEffectHandlersResource, runnerDir.resolve("effect-handlers.mjs"))
-    copyBundledResource(BundledWitEffectBindingsResource, runnerDir.resolve("wit-effect-bindings.mjs"))
-    copyBundledResource(BundledNodeHandlersResource, runnerDir.resolve("node-handlers.mjs"))
-    copyBundledResource(BundledNodeTcpHandlersResource, runnerDir.resolve("node-tcp-handlers.mjs"))
-    copyBundledResource(BundledNodeProcessHandlersResource, runnerDir.resolve("node-process-handlers.mjs"))
+    copyRunnerSupportFile(DefaultNodeRunner, BundledRunFlixResource, runnerDir.resolve("run-flix.mjs"))
+    copyRunnerSupportFile(DefaultRunnerModule, BundledRunnerResource, runnerDir.resolve("runner.mjs"))
+    copyRunnerSupportFile(DefaultEffectHandlersModule, BundledEffectHandlersResource, runnerDir.resolve("effect-handlers.mjs"))
+    copyRunnerSupportFile(DefaultWitEffectBindingsModule, BundledWitEffectBindingsResource, runnerDir.resolve("wit-effect-bindings.mjs"))
+    copyRunnerSupportFile(DefaultNodeHandlersModule, BundledNodeHandlersResource, runnerDir.resolve("node-handlers.mjs"))
+    copyRunnerSupportFile(DefaultNodeTcpHandlersModule, BundledNodeTcpHandlersResource, runnerDir.resolve("node-tcp-handlers.mjs"))
+    copyRunnerSupportFile(DefaultNodeProcessHandlersModule, BundledNodeProcessHandlersResource, runnerDir.resolve("node-process-handlers.mjs"))
 
     runnerDir.resolve("run-flix.mjs")
+  }
+
+  private def copyRunnerSupportFile(defaultPath: Path, bundledResource: String, dest: Path): Unit = {
+    if (Files.exists(defaultPath)) {
+      Files.copy(defaultPath, dest, StandardCopyOption.REPLACE_EXISTING)
+    } else {
+      copyBundledResource(bundledResource, dest)
+    }
   }
 
   def resolveWasmtimeRunnerManifest(outputPath: Path): Path = {

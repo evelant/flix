@@ -379,6 +379,7 @@ object Main {
             header = header,
             outDir = outDir,
             rootModule = cmdOpts.bindNativeModule,
+            spec = cmdOpts.bindSpec,
             includePaths = cmdOpts.bindIncludePaths,
             defines = cmdOpts.bindDefines,
             cflags = cmdOpts.bindCFlags,
@@ -646,6 +647,7 @@ object Main {
     bindIncludePaths: List[Path] = Nil,
     bindNativeModule: String = "Native",
     bindOut: Option[Path] = None,
+    bindSpec: Option[Path] = None,
     bindRootModule: String = "Wit",
     bindWit: Option[Path] = None,
     bindWorld: Option[String] = None,
@@ -894,6 +896,9 @@ object Main {
 
       opt[String]("header").action((s, c) => c.copy(bindHeader = Some(Paths.get(s)))).
         text("curated C header for native binding generation.")
+
+      opt[String]("spec").action((s, c) => c.copy(bindSpec = Some(Paths.get(s)))).
+        text("sidecar TOML spec for native binding generation semantics.")
 
       opt[String]("world").action((s, c) => c.copy(bindWorld = Some(s))).
         text("WIT world name for binding generation.")
@@ -1448,7 +1453,8 @@ object Main {
   private[flix] def validateCommandPreflight(cmdOpts: CmdOpts,
                                              options: Options,
                                              runner: Option[RunnerKind] = None,
-                                             hasCmd: List[String] => Boolean = Main.hasCmd): Option[String] = {
+                                             hasCmd: List[String] => Boolean = Main.hasCmd,
+                                             hasUsableZig: => Boolean = ca.uwaterloo.flix.util.ZigToolchain.hasUsableCommand): Option[String] = {
     val effectiveCommand = cmdOpts.command match {
       case Command.None if cmdOpts.files.nonEmpty => Command.Run
       case other => other
@@ -1459,7 +1465,7 @@ object Main {
     } else {
       validateTargetProfile(cmdOpts, options)
         .orElse(validateCommandSupport(effectiveCommand, options))
-        .orElse(validateRequiredTools(effectiveCommand, options, runner, hasCmd))
+        .orElse(validateRequiredTools(effectiveCommand, options, runner, hasCmd, hasUsableZig))
         .orElse(validateBrowserRunner(options, runner))
     }
   }
@@ -1508,9 +1514,10 @@ object Main {
   private[flix] def validateRequiredTools(command: Command,
                                           options: Options,
                                           runner: Option[RunnerKind],
-                                          hasCmd: List[String] => Boolean): Option[String] = {
+                                          hasCmd: List[String] => Boolean,
+                                          hasUsableZig: => Boolean): Option[String] = {
     def toolAvailable(t: ToolRequirement): Boolean =
-      if (t.name == "zig") ca.uwaterloo.flix.util.ZigToolchain.probeCommands.exists(hasCmd)
+      if (t.name == "zig") hasUsableZig
       else hasCmd(t.probe)
 
     val missing = requiredTools(command, options, runner).filterNot(toolAvailable)

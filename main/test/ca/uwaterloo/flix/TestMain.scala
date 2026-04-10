@@ -85,10 +85,11 @@ class TestMain extends AnyFunSuite {
   }
 
   test("bind native") {
-    val args = Array("bind", "native", "--header", "foo.h", "--out", "bar", "--native-module", "Native", "--include", "inc", "--define", "FEATURE=1", "--cflag", "-DMORE=1")
+    val args = Array("bind", "native", "--header", "foo.h", "--spec", "foo.bind.toml", "--out", "bar", "--native-module", "Native", "--include", "inc", "--define", "FEATURE=1", "--cflag", "-DMORE=1")
     val opts = Main.parseCmdOpts(args).get
     assert(opts.command == Main.Command.BindNative)
     assert(opts.bindHeader.contains(java.nio.file.Paths.get("foo.h")))
+    assert(opts.bindSpec.contains(java.nio.file.Paths.get("foo.bind.toml")))
     assert(opts.bindOut.contains(java.nio.file.Paths.get("bar")))
     assert(opts.bindNativeModule == "Native")
     assert(opts.bindIncludePaths == List(java.nio.file.Paths.get("inc")))
@@ -296,7 +297,7 @@ class TestMain extends AnyFunSuite {
     val cmdOpts = Main.CmdOpts(command = Main.Command.Build, targets = List(CompilationTarget.LlvmNative))
     val options = Options.Default.copy(target = CompilationTarget.LlvmNative, stdlibProfile = StdlibProfile.Portable)
 
-    val result = Main.validateCommandPreflight(cmdOpts, options, hasCmd = _ => false)
+    val result = Main.validateCommandPreflight(cmdOpts, options, hasCmd = _ => false, hasUsableZig = false)
 
     assert(result.nonEmpty)
     assert(result.get.contains("zig"))
@@ -306,7 +307,7 @@ class TestMain extends AnyFunSuite {
     val cmdOpts = Main.CmdOpts(command = Main.Command.Build, targets = List(CompilationTarget.LlvmWasm))
     val options = Options.Default.copy(target = CompilationTarget.LlvmWasm, stdlibProfile = StdlibProfile.Portable)
 
-    val result = Main.validateCommandPreflight(cmdOpts, options, hasCmd = _ => false)
+    val result = Main.validateCommandPreflight(cmdOpts, options, hasCmd = _ => false, hasUsableZig = false)
 
     assert(result.nonEmpty)
     assert(result.get.contains("zig"))
@@ -323,7 +324,7 @@ class TestMain extends AnyFunSuite {
       case List("wasm-tools", "--version") => true
       case List("jco", "--version") => true
       case _ => false
-    })
+    }, hasUsableZig = true)
 
     assert(result.nonEmpty)
     assert(result.get.contains("node"))
@@ -333,7 +334,7 @@ class TestMain extends AnyFunSuite {
     val cmdOpts = Main.CmdOpts(command = Main.Command.Build, targets = List(CompilationTarget.LlvmNative), xstdlibProfile = StdlibProfile.Jvm, xstdlibProfileExplicit = true)
     val options = Options.Default.copy(target = CompilationTarget.LlvmNative, stdlibProfile = StdlibProfile.Jvm)
 
-    val result = Main.validateCommandPreflight(cmdOpts, options, hasCmd = _ => true)
+    val result = Main.validateCommandPreflight(cmdOpts, options, hasCmd = _ => true, hasUsableZig = true)
 
     assert(result.nonEmpty)
     assert(result.get.contains("portable"))
@@ -343,7 +344,7 @@ class TestMain extends AnyFunSuite {
     val cmdOpts = Main.CmdOpts(command = Main.Command.Test, targets = List(CompilationTarget.LlvmNative))
     val options = Options.Default.copy(target = CompilationTarget.LlvmNative, stdlibProfile = StdlibProfile.Portable)
 
-    val result = Main.validateCommandPreflight(cmdOpts, options, runner = Some(RunnerKind.Native), hasCmd = _ => false)
+    val result = Main.validateCommandPreflight(cmdOpts, options, runner = Some(RunnerKind.Native), hasCmd = _ => false, hasUsableZig = false)
 
     assert(result.nonEmpty)
     assert(result.get.contains("zig"))
@@ -358,7 +359,7 @@ class TestMain extends AnyFunSuite {
       case List("wasm-tools", "--version") => true
       case List("jco", "--version") => true
       case _ => false
-    })
+    }, hasUsableZig = true)
 
     assert(result.nonEmpty)
     assert(result.get.contains("node"))
@@ -373,7 +374,7 @@ class TestMain extends AnyFunSuite {
       case List("wasm-tools", "--version") => true
       case List("jco", "--version") => true
       case _ => false
-    })
+    }, hasUsableZig = true)
 
     assert(result.nonEmpty)
     assert(result.get.contains("cargo +stable"))

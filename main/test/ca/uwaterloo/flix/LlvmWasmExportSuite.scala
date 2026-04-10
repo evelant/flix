@@ -67,6 +67,7 @@ class LlvmWasmExportSuite extends AnyFunSuite {
       assert(manifestText.contains("flix-export-sdk-v0"))
       assert(manifestText.contains("\"target\": \"wasm\""))
       assert(manifestText.contains("\"symbol\": \"Api.add\""))
+      assert(manifestText.contains("\"symbol\": \"Api.fortyTwo\""))
       val publicWit = Files.readString(compiled.typedWitDir.resolve("bindings.wit"), StandardCharsets.UTF_8)
       assert(publicWit.contains("type list-int32 = list<s32>;"))
       assert(publicWit.contains("type array-int32 = list<s32>;"))
@@ -126,6 +127,9 @@ class LlvmWasmExportSuite extends AnyFunSuite {
            |try {
            |  const add = Exports.Api.add(ctx, 1, 2);
            |  assert(add.tag === "ok" && add.val === 3, `bad add: $${JSON.stringify(add)}`);
+           |
+           |  const fortyTwo = Exports.Api.fortyTwo(ctx);
+           |  assert(fortyTwo.tag === "ok" && fortyTwo.val === 42, `bad fortyTwo: $${JSON.stringify(fortyTwo)}`);
            |
            |  const echo = Exports.Api.echo(ctx, "hello");
            |  assert(echo.tag === "ok" && echo.val === "hello", `bad echo: $${JSON.stringify(echo)}`);

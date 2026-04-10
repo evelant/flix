@@ -12891,6 +12891,16 @@ fn makeHandleForObjectSlot(ctx_ptr: *anyopaque, obj_ptr: *anyopaque, slot_idx: u
         flix_handle_new_i64(ctx_ptr, payload);
 }
 
+fn makeHandleForObjectSlotI64(ctx_ptr: *anyopaque, obj_ptr: *anyopaque, slot_idx: usize) i64 {
+    const payload = objPayloadSlots(obj_ptr)[slot_idx];
+    return flix_handle_new_i64(ctx_ptr, payload);
+}
+
+fn makeHandleForObjectSlotPtr(ctx_ptr: *anyopaque, obj_ptr: *anyopaque, slot_idx: usize) i64 {
+    const payload = objPayloadSlots(obj_ptr)[slot_idx];
+    return flix_handle_new(ctx_ptr, nullablePtrFromPayload(payload));
+}
+
 fn arrayElementsArePtrs(arr_ptr: *anyopaque) bool {
     if (flixArrayElemSize(arr_ptr) != @sizeOf(i64)) @panic("expected slot array");
     return isPtrArrayObject(arr_ptr);
@@ -12977,10 +12987,16 @@ export fn flix_export_tag_id(ctx_ptr: *anyopaque, tagged_handle: i64) i64 {
     return objPayloadSlots(tagged_ptr)[0];
 }
 
-export fn flix_export_tag_field(ctx_ptr: *anyopaque, tagged_handle: i64, idx0: i32) i64 {
+export fn flix_export_tag_field_i64(ctx_ptr: *anyopaque, tagged_handle: i64, idx0: i32) i64 {
     if (idx0 < 0) @panic("negative tag field index");
     const tagged_ptr = flix_handle_get(ctx_ptr, tagged_handle);
-    return makeHandleForObjectSlot(ctx_ptr, tagged_ptr, @as(usize, @intCast(idx0)) + 1);
+    return makeHandleForObjectSlotI64(ctx_ptr, tagged_ptr, @as(usize, @intCast(idx0)) + 1);
+}
+
+export fn flix_export_tag_field_ptr(ctx_ptr: *anyopaque, tagged_handle: i64, idx0: i32) i64 {
+    if (idx0 < 0) @panic("negative tag field index");
+    const tagged_ptr = flix_handle_get(ctx_ptr, tagged_handle);
+    return makeHandleForObjectSlotPtr(ctx_ptr, tagged_ptr, @as(usize, @intCast(idx0)) + 1);
 }
 
 export fn flix_export_list_length(ctx_ptr: *anyopaque, list_handle: i64, nil_tag_id: i64, cons_tag_id: i64) i64 {
@@ -13326,11 +13342,19 @@ export fn exports_flix_runtime_runtime_tag_id(ctx: exports_flix_runtime_runtime_
     return @intCast(flix_export_tag_id(ctx.flix_ctx, tagged.handle));
 }
 
-export fn exports_flix_runtime_runtime_tag_field(ctx: exports_flix_runtime_runtime_borrow_ctx_t, tagged: exports_flix_runtime_runtime_borrow_value_t, idx: u32) exports_flix_runtime_runtime_own_value_t {
-    if (!is_wasm) @panic("tag-field: wasm-only");
+export fn exports_flix_runtime_runtime_tag_field_i64(ctx: exports_flix_runtime_runtime_borrow_ctx_t, tagged: exports_flix_runtime_runtime_borrow_value_t, idx: u32) exports_flix_runtime_runtime_own_value_t {
+    if (!is_wasm) @panic("tag-field-i64: wasm-only");
     witSetCurrentCtx(ctx);
 
-    const h = flix_export_tag_field(ctx.flix_ctx, tagged.handle, @intCast(idx));
+    const h = flix_export_tag_field_i64(ctx.flix_ctx, tagged.handle, @intCast(idx));
+    return makeOwnRuntimeValue(ctx, h);
+}
+
+export fn exports_flix_runtime_runtime_tag_field_ptr(ctx: exports_flix_runtime_runtime_borrow_ctx_t, tagged: exports_flix_runtime_runtime_borrow_value_t, idx: u32) exports_flix_runtime_runtime_own_value_t {
+    if (!is_wasm) @panic("tag-field-ptr: wasm-only");
+    witSetCurrentCtx(ctx);
+
+    const h = flix_export_tag_field_ptr(ctx.flix_ctx, tagged.handle, @intCast(idx));
     return makeOwnRuntimeValue(ctx, h);
 }
 

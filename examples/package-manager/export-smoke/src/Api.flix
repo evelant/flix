@@ -7,6 +7,9 @@ mod Api {
     pub def add(x: Int32, y: Int32): Int32 = x + y
 
     @Export
+    pub def fortyTwo(): Int32 = 42
+
+    @Export
     pub def echo(s: String): String = s
 
     @Export

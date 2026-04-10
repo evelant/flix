@@ -26,13 +26,27 @@ import java.nio.file.Path
   */
 case class NativeLinkConfig(libraries: List[String] = Nil,
                             searchPaths: List[Path] = Nil,
+                            pkgConfigPackages: List[String] = Nil,
                             frameworks: List[String] = Nil,
-                            frameworkSearchPaths: List[Path] = Nil) {
+                            frameworkSearchPaths: List[Path] = Nil,
+                            flags: List[String] = Nil) {
 
   def isEmpty: Boolean =
     libraries.isEmpty &&
       searchPaths.isEmpty &&
+      pkgConfigPackages.isEmpty &&
       frameworks.isEmpty &&
-      frameworkSearchPaths.isEmpty
+      frameworkSearchPaths.isEmpty &&
+      flags.isEmpty
+
+  def ++(other: NativeLinkConfig): NativeLinkConfig =
+    NativeLinkConfig(
+      libraries = libraries ::: other.libraries,
+      searchPaths = searchPaths ::: other.searchPaths,
+      pkgConfigPackages = pkgConfigPackages ::: other.pkgConfigPackages,
+      frameworks = frameworks ::: other.frameworks,
+      frameworkSearchPaths = frameworkSearchPaths ::: other.frameworkSearchPaths,
+      flags = flags ::: other.flags,
+    )
 
 }

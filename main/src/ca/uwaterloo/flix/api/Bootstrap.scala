@@ -21,24 +21,25 @@ import ca.uwaterloo.flix.language.ast.{Scheme, SourceLocation, Symbol, TypedAst}
 import ca.uwaterloo.flix.language.ast.shared.SecurityContext
 import ca.uwaterloo.flix.language.phase.HtmlDocumentor
 import ca.uwaterloo.flix.runtime.CompilationResult
-import ca.uwaterloo.flix.tools.{ProjectTestDriver, Tester}
+import ca.uwaterloo.flix.tools.{NativeBindingsTool, ProjectTestDriver, Tester, WasmEffectBindingsTool}
 import ca.uwaterloo.flix.tools.pkg.FlixPackageManager.findFlixDependencies
+import ca.uwaterloo.flix.tools.pkg.Dependency.{FlixDependency, PathDependency}
 import ca.uwaterloo.flix.tools.pkg.github.GitHub
 import ca.uwaterloo.flix.tools.pkg.{FlixPackageManager, JarPackageManager, Manifest, ManifestParser, MavenPackageManager, PackageModules, ReleaseError}
 import ca.uwaterloo.flix.util.Result.{Err, Ok}
 import ca.uwaterloo.flix.util.collection.ListMap
-import ca.uwaterloo.flix.util.{ArtifactNames, Build, EmitKind, FileOps, Formatter, NativeLinkConfig, Result, RunnerKind, Validation}
-import ca.uwaterloo.flix.util.CompilationTarget
+import ca.uwaterloo.flix.util.{ArtifactNames, BindingsConfig, Build, CompilationTarget, EmitKind, FileOps, Formatter, NativeBindingConfig, NativeCompileConfig, NativeLinkConfig, PkgConfig, Result, RunnerKind, Validation, WasmBindingConfig}
 import ca.uwaterloo.flix.api.lsp.Formatter as LspFormatter
 import ca.uwaterloo.flix.language.CompilationMessage
 
 import java.io.PrintStream
 import java.net.URI
+import java.nio.charset.StandardCharsets
 import java.nio.file.*
 import java.util.zip.{ZipInputStream, ZipOutputStream}
 import scala.collection.mutable
 import scala.io.StdIn.readLine
-import scala.jdk.CollectionConverters.IterableHasAsScala
+import scala.jdk.CollectionConverters.{IterableHasAsScala, IteratorHasAsScala}
 import scala.util.{Failure, Success, Using}
 
 
@@ -323,11 +324,22 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
 
   // Lists of paths to the source files, flix packages and .jar files used
   private var sourcePaths: List[Path] = List.empty
+  private var generatedSourcePaths: Map[CompilationTarget, List[Path]] = Map.empty
   private var flixPackagePaths: List[Path] = List.empty
   private var mavenPackagePaths: List[Path] = List.empty
   private var jarPackagePaths: List[Path] = List.empty
+  private var generatedNativeCompileConfig: NativeCompileConfig = NativeCompileConfig()
+  private var installedFlixDependencies: List[InstalledFlixDependency] = List.empty
 
   private var securityLevels: Map[Path, SecurityContext] = Map.empty
+
+  private case class GeneratedBindingState(sourcePaths: List[Path],
+                                           nativeCompileConfig: NativeCompileConfig = NativeCompileConfig())
+
+  private case class InstalledFlixDependency(manifest: Manifest,
+                                             security: SecurityContext,
+                                             packagePath: Option[Path],
+                                             extractedRoot: Path)
 
   def buildTargets: List[CompilationTarget] =
     optManifest.map(_.buildConfig.targets).getOrElse(List(CompilationTarget.Jvm))
@@ -351,7 +363,17 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
     optManifest.map(_.name).getOrElse(projectPath.toAbsolutePath.normalize().getFileName.toString)
 
   def nativeLinkConfig: NativeLinkConfig =
-    optManifest.map(_.targetConfigs.native.link).map(resolveNativeLinkConfig).getOrElse(NativeLinkConfig())
+    optManifest.map(_.targetConfigs.native.link).map(resolveNativeLinkConfig).getOrElse(NativeLinkConfig()) ++ dependencyNativeLinkConfig
+
+  def nativeCompileConfig: NativeCompileConfig =
+    optManifest.map(_.targetConfigs.native.compile).map(resolveNativeCompileConfig).getOrElse(NativeCompileConfig()) ++ dependencyNativeCompileConfig ++ generatedNativeCompileConfig
+
+  def bindingsConfig: BindingsConfig =
+    optManifest.map(_.bindings).map(resolveBindingsConfig).getOrElse(BindingsConfig())
+
+  private lazy val nativePkgConfigResolution: Result[PkgConfig.Resolution, BootstrapError] =
+    PkgConfig.resolve(nativeLinkConfig.pkgConfigPackages, projectPath)
+      .mapErr(BootstrapError.GeneralError.apply)
 
   /**
     * Parses `flix.toml` to a Manifest and downloads all required files.
@@ -381,25 +403,119 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
     Result.Ok(())
   }
 
-  private def resolveNativeLinkConfig(config: NativeLinkConfig): NativeLinkConfig = {
-    def resolvePath(path: Path): Path =
-      if (path.isAbsolute) path.normalize()
-      else projectPath.resolve(path).normalize()
+  private def resolvePathAgainst(root: Path, path: Path): Path =
+    if (path.isAbsolute) path.normalize()
+    else root.resolve(path).normalize()
 
+  private def resolveProjectPath(path: Path): Path =
+    resolvePathAgainst(projectPath, path)
+
+  private def resolveDependencyPath(root: Path, path: Path): Path =
+    resolvePathAgainst(root, path)
+
+  private def dependencyNativeLinkConfig: NativeLinkConfig =
+    installedFlixDependencies.foldLeft(NativeLinkConfig()) {
+      case (acc, dep) => acc ++ resolveDependencyNativeLinkConfig(dep)
+    }
+
+  private def dependencyNativeCompileConfig: NativeCompileConfig =
+    installedFlixDependencies.foldLeft(NativeCompileConfig()) {
+      case (acc, dep) => acc ++ resolveDependencyNativeCompileConfig(dep)
+    }
+
+  private def resolveNativeLinkConfig(config: NativeLinkConfig): NativeLinkConfig =
+    resolveNativeLinkConfigAt(projectPath, config)
+
+  private def resolveNativeCompileConfig(config: NativeCompileConfig): NativeCompileConfig =
+    resolveNativeCompileConfigAt(projectPath, config)
+
+  private def resolveBindingsConfig(config: BindingsConfig): BindingsConfig =
+    resolveBindingsConfigAt(projectPath, config)
+
+  private def resolveNativeBindingConfig(config: NativeBindingConfig): NativeBindingConfig =
+    resolveNativeBindingConfigAt(projectPath, config)
+
+  private def resolveWasmBindingConfig(config: WasmBindingConfig): WasmBindingConfig =
+    resolveWasmBindingConfigAt(projectPath, config)
+
+  private def resolveNativeLinkConfigAt(root: Path, config: NativeLinkConfig): NativeLinkConfig =
     config.copy(
-      searchPaths = config.searchPaths.map(resolvePath),
-      frameworkSearchPaths = config.frameworkSearchPaths.map(resolvePath)
+      searchPaths = config.searchPaths.map(resolvePathAgainst(root, _)),
+      frameworkSearchPaths = config.frameworkSearchPaths.map(resolvePathAgainst(root, _))
     )
+
+  private def resolveNativeCompileConfigAt(root: Path, config: NativeCompileConfig): NativeCompileConfig =
+    config.copy(
+      sources = config.sources.map(resolvePathAgainst(root, _)),
+      includePaths = config.includePaths.map(resolvePathAgainst(root, _))
+    )
+
+  private def resolveBindingsConfigAt(root: Path, config: BindingsConfig): BindingsConfig =
+    config.copy(
+      native = config.native.map(resolveNativeBindingConfigAt(root, _)),
+      wasm = config.wasm.map(resolveWasmBindingConfigAt(root, _))
+    )
+
+  private def resolveNativeBindingConfigAt(root: Path, config: NativeBindingConfig): NativeBindingConfig =
+    config.copy(
+      header = resolvePathAgainst(root, config.header),
+      spec = config.spec.map(resolvePathAgainst(root, _)),
+      includePaths = config.includePaths.map(resolvePathAgainst(root, _))
+    )
+
+  private def resolveWasmBindingConfigAt(root: Path, config: WasmBindingConfig): WasmBindingConfig =
+    config.copy(
+      witDir = resolvePathAgainst(root, config.witDir)
+    )
+
+  private def resolveDependencyNativeLinkConfig(dep: InstalledFlixDependency): NativeLinkConfig =
+    dep.manifest.targetConfigs.native.link.copy(
+      searchPaths = dep.manifest.targetConfigs.native.link.searchPaths.map(resolveDependencyPath(dep.extractedRoot, _)),
+      frameworkSearchPaths = dep.manifest.targetConfigs.native.link.frameworkSearchPaths.map(resolveDependencyPath(dep.extractedRoot, _)),
+    )
+
+  private def resolveDependencyNativeCompileConfig(dep: InstalledFlixDependency): NativeCompileConfig =
+    dep.manifest.targetConfigs.native.compile.copy(
+      sources = dep.manifest.targetConfigs.native.compile.sources.map(resolveDependencyPath(dep.extractedRoot, _)),
+      includePaths = dep.manifest.targetConfigs.native.compile.includePaths.map(resolveDependencyPath(dep.extractedRoot, _)),
+    ) ++ packagedDependencyBindingCompileConfig(dep)
+
+  private def packagedDependencyBindingCompileConfig(dep: InstalledFlixDependency): NativeCompileConfig =
+    dep.manifest.bindings.native.zipWithIndex.foldLeft(NativeCompileConfig()) {
+      case (acc, (config, index)) =>
+        acc ++ packagedDependencyBindingCompileState(dep.extractedRoot, config, index)
+    }
+
+  private def packagedDependencyBindingCompileState(extractedRoot: Path, config: NativeBindingConfig, index: Int): NativeCompileConfig = {
+    val outDir = packagedDependencyNativeBindingOutDir(extractedRoot, config, index)
+    val shimFile = outDir.resolve("native").resolve(s"${config.module}_shim.c").normalize()
+    val shimHeaderFile = outDir.resolve("native").resolve("include").resolve(config.header.getFileName.toString).normalize()
+    if (!Files.isRegularFile(shimFile)) {
+      NativeCompileConfig()
+    } else {
+      NativeCompileConfig(
+        sources = List(shimFile),
+        includePaths = (shimHeaderFile.getParent :: resolveDependencyPath(extractedRoot, config.header).getParent :: config.includePaths.map(resolveDependencyPath(extractedRoot, _))).distinct,
+        cflags = config.defines.map(d => s"-D$d") ::: config.cflags,
+      )
+    }
   }
 
+  private def packagedDependencyNativeBindingOutDir(extractedRoot: Path, config: NativeBindingConfig, index: Int): Path =
+    extractedRoot.resolve("build").resolve("native").resolve("generated").resolve("bindings").resolve("native").resolve(f"${index}%02d-${sanitizeGeneratedSegment(config.module)}").normalize()
+
+  private def sanitizeGeneratedSegment(segment: String): String =
+    segment.replaceAll("[^A-Za-z0-9._-]", "_")
+
   private def applyProjectTargetConfig(options: ca.uwaterloo.flix.util.Options): ca.uwaterloo.flix.util.Options = {
-    val nativeLinks = options.target match {
-      case CompilationTarget.LlvmNative => nativeLinkConfig
-      case _ => NativeLinkConfig()
+    val (nativeLinks, nativeCompile) = options.target match {
+      case CompilationTarget.LlvmNative => (nativeLinkConfig, nativeCompileConfig)
+      case _ => (NativeLinkConfig(), NativeCompileConfig())
     }
     options.copy(
       artifactName = artifactName,
-      nativeLinkConfig = nativeLinks
+      nativeLinkConfig = nativeLinks,
+      nativeCompileConfig = nativeCompile
     )
   }
 
@@ -419,8 +535,10 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
     // We also clear any cached ASTs.
     flix.clearCaches()
 
-    Steps.updateStaleSources(flix, includeTests = includeTests, forceReload = true)
-    Steps.compile(flix)
+    for {
+      _ <- Steps.updateStaleSources(flix, includeTests = includeTests, forceReload = true)
+      result <- Steps.compile(flix)
+    } yield result
   }
 
   /**
@@ -429,8 +547,8 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
   def buildJar(flix: Flix): Result[Unit, BootstrapError] = {
     val jarFile = Bootstrap.getJarFile(projectPath)
     flix.setOptions(applyProjectTargetConfig(flix.options))
-    Steps.updateStaleSources(flix, forceReload = true)
     for {
+      _ <- Steps.updateStaleSources(flix, forceReload = true)
       _ <- Steps.configureJarOutput(flix)
       _ <- Steps.compile(flix)
       _ <- Steps.validateJarFile(jarFile)
@@ -451,8 +569,8 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
     val jarFile = Bootstrap.getJarFile(projectPath)
     val libDir = Bootstrap.getLibraryDirectory(projectPath)
     flix.setOptions(applyProjectTargetConfig(flix.options))
-    Steps.updateStaleSources(flix, forceReload = true)
     for {
+      _ <- Steps.updateStaleSources(flix, forceReload = true)
       _ <- Steps.configureJarOutput(flix)
       _ <- Steps.compile(flix)
       _ <- Steps.validateJarFile(jarFile)
@@ -493,6 +611,26 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
     // Copy the `flix.toml` to the artifact directory.
     Files.copy(Bootstrap.getManifestFile(projectPath), Bootstrap.getArtifactDirectory(projectPath).resolve(FLIX_TOML), StandardCopyOption.REPLACE_EXISTING)
 
+    val manifest = optManifest.getOrElse {
+      return Result.Err(BootstrapError.FileError(s"Cannot create a Flix package without a parsed `${formatter.red(FLIX_TOML)}` manifest."))
+    }
+
+    if (manifest.flixDependencies.exists(_.isInstanceOf[PathDependency])) {
+      return Result.Err(BootstrapError.FileError("Cannot create a Flix package with local path dependencies. Publishable packages must use released dependencies."))
+    }
+
+    val generatedBindingFiles = Steps.packageGeneratedBindingFiles() match {
+      case Ok(files) => files
+      case Err(e) => return Err(e)
+    }
+
+    val srcFiles = FileOps.getFlixFilesIn(Bootstrap.getSourceDirectory(projectPath), Int.MaxValue)
+    val interopAssetFiles = packagedInteropAssetFiles(manifest) match {
+      case Ok(files) => files
+      case Err(e) => return Err(e)
+    }
+    val packagedFiles = (srcFiles ::: interopAssetFiles ::: generatedBindingFiles).distinct.filter(Files.isRegularFile(_))
+
     // Construct a new zip file.
     Using(new ZipOutputStream(Files.newOutputStream(pkgFile))) { zip =>
       // Add required resources.
@@ -500,17 +638,43 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
       FileOps.addToZip(zip, LICENSE, Bootstrap.getLicenseFile(projectPath))
       FileOps.addToZip(zip, README, Bootstrap.getReadmeFile(projectPath))
 
-      // Add all source files.
-      // Here we sort entries by relative file name to apply https://reproducible-builds.org/
-      val srcFiles = FileOps.getFlixFilesIn(Bootstrap.getSourceDirectory(projectPath), Int.MaxValue)
-      for ((sourceFile, fileNameWithSlashes) <- FileOps.sortPlatformIndependently(projectPath, srcFiles)) {
-        FileOps.addToZip(zip, fileNameWithSlashes, sourceFile)
+      // Add all package files deterministically.
+      for ((file, fileNameWithSlashes) <- FileOps.sortPlatformIndependently(projectPath, packagedFiles)) {
+        FileOps.addToZip(zip, fileNameWithSlashes, file)
       }
     } match {
       case Success(()) => Result.Ok(())
       case Failure(e) => Result.Err(BootstrapError.FileError(e.getMessage))
     }
   }
+
+  private def packagedInteropAssetFiles(manifest: Manifest): Result[List[Path], BootstrapError] = {
+    val resolvedNativeCompile = resolveNativeCompileConfig(manifest.targetConfigs.native.compile)
+    val resolvedBindings = resolveBindingsConfig(manifest.bindings)
+
+    val filePaths =
+      resolvedNativeCompile.sources :::
+        resolvedBindings.native.flatMap(config => config.header :: config.spec.toList) :::
+        resolvedBindings.native.flatMap(_.includePaths) :::
+        resolvedBindings.wasm.map(_.witDir) :::
+        resolvedNativeCompile.includePaths
+
+    collectPackagedFiles(filePaths.distinct)
+  }
+
+  private def collectPackagedFiles(paths: List[Path]): Result[List[Path], BootstrapError] =
+    Result.traverse(paths) { path =>
+      val normalized = path.normalize()
+      if (!Files.exists(normalized)) {
+        Err(BootstrapError.FileError(s"Cannot package interop asset '$normalized': the path does not exist."))
+      } else if (!normalized.startsWith(projectPath.normalize())) {
+        Err(BootstrapError.FileError(s"Cannot package interop asset '$normalized': the path is outside the project root '$projectPath'."))
+      } else if (Files.isDirectory(normalized)) {
+        Ok(FileOps.getFilesIn(normalized, Int.MaxValue))
+      } else {
+        Ok(List(normalized))
+      }
+    }.map(_.flatten.distinct)
 
   /**
     * Returns `Ok(())` if the dependencies are consistent with the `effects.lock` file.
@@ -527,8 +691,8 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
       case Ok(true) => ()
     }
 
-    Steps.updateStaleSources(flix, forceReload = true)
     for {
+      _ <- Steps.updateStaleSources(flix, forceReload = true)
       json <- FileOps.readString(Bootstrap.getEffectLockFile(projectPath)).mapErr(e => BootstrapError.FileError(s"IO error: ${e.getMessage}"))
       (lockedDefs, lockedSigs) <- EffectLock.deserialize(json).mapErr(BootstrapError.FileError.apply)
       root <- Steps.check(flix)
@@ -594,8 +758,8 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
     if (!isProjectMode) {
       return Err(BootstrapError.FileError("No 'flix.toml' found. Refusing to run 'eff-lock'"))
     }
-    Steps.updateStaleSources(flix, forceReload = true)
     for {
+      _ <- Steps.updateStaleSources(flix, forceReload = true)
       root <- Steps.check(flix)
     } yield {
       EffectLock.lock(root) match {
@@ -791,8 +955,7 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
     */
   def check(flix: Flix): Result[Unit, BootstrapError] = {
     flix.setOptions(applyProjectTargetConfig(flix.options))
-    Steps.updateStaleSources(flix, forceReload = true)
-    Steps.check(flix).map(_ => ())
+    Steps.updateStaleSources(flix, forceReload = true).flatMap(_ => Steps.check(flix).map(_ => ()))
   }
 
   /**
@@ -800,7 +963,7 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
     * If they have, they are added to flix. Then updates the timestamps
     * map to reflect the current source files and packages.
     */
-  def reconfigureFlix(flix: Flix): Unit = {
+  def reconfigureFlix(flix: Flix): Result[Unit, BootstrapError] = {
     // TODO: Figure out if this function can be removed somehow (maybe by removing shell depending on bootstrap)
     // TODO: Can be removed by moving `updateStaleSources` into all step functions that require updating stale sources (almost all). This also remove responsibility from the caller.
     flix.setOptions(applyProjectTargetConfig(flix.options))
@@ -812,8 +975,7 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
     */
   def doc(flix: Flix): Result[Unit, BootstrapError] = {
     flix.setOptions(applyProjectTargetConfig(flix.options))
-    Steps.updateStaleSources(flix, forceReload = true)
-    Steps.check(flix).map(HtmlDocumentor.run(_, getPackageModules)(flix))
+    Steps.updateStaleSources(flix, forceReload = true).flatMap(_ => Steps.check(flix).map(HtmlDocumentor.run(_, getPackageModules)(flix)))
   }
 
   /**
@@ -821,12 +983,11 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
     */
   def format(flix: Flix): Result[Unit, BootstrapError] = {
     flix.setOptions(applyProjectTargetConfig(flix.options))
-    Steps.updateStaleSources(flix, forceReload = true)
-    Steps.check(flix).map {
+    Steps.updateStaleSources(flix, forceReload = true).flatMap(_ => Steps.check(flix).map {
       case _ =>
         val syntaxTree = flix.getParsedAst
         LspFormatter.formatFiles(syntaxTree, sourcePaths)(flix)
-    }
+    })
   }
 
   /**
@@ -928,7 +1089,7 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
   def outdated(flix: Flix)(implicit out: PrintStream): Result[Boolean, BootstrapError] = {
     implicit val formatter: Formatter = flix.getFormatter
 
-    val flixDeps = optManifest.map(findFlixDependencies).getOrElse(Nil)
+    val flixDeps = optManifest.map(findFlixDependencies).getOrElse(Nil).collect { case dep: FlixDependency => dep }
 
     val rows = flixDeps.flatMap { dep =>
       val updates = FlixPackageManager.findAvailableUpdates(dep, flix.options.githubToken) match {
@@ -1032,6 +1193,244 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
       val result = filesHere ::: filesSrc ::: filesTest
       sourcePaths = result
       result
+    }
+
+    private def refreshGeneratedBindings(target: CompilationTarget): Result[Unit, BootstrapError] = {
+      val manifest = optManifest.getOrElse {
+        return Result.Ok(())
+      }
+      val result = refreshGeneratedBindingsFor(projectPath, manifest, target)
+
+      result.map { state =>
+        generatedSourcePaths = generatedSourcePaths.updated(target, state.sourcePaths.distinct)
+        if (target == CompilationTarget.LlvmNative) {
+          generatedNativeCompileConfig = state.nativeCompileConfig
+        }
+        ()
+      }
+    }
+
+    def packageGeneratedBindingFiles(): Result[List[Path], BootstrapError] = {
+      for {
+        nativeFiles <- Result.traverse(bindingsConfig.native.zipWithIndex.toList) {
+          case (config, index) =>
+            ensureNativeBinding(projectPath, nativePkgConfigResolution, config, index).map(_ => packagedGeneratedFiles(nativeBindingOutDir(projectPath, config, index)))
+        }
+        wasmFiles <- Result.traverse(bindingsConfig.wasm.zipWithIndex.toList) {
+          case (config, index) =>
+            ensureWasmBinding(projectPath, config, index).map(_ => packagedGeneratedFiles(wasmBindingOutDir(projectPath, config, index)))
+        }
+      } yield (nativeFiles.flatten ::: wasmFiles.flatten).distinct
+    }
+
+    private def packagedGeneratedFiles(outDir: Path): List[Path] =
+      if (!Files.exists(outDir)) Nil
+      else FileOps.getFilesIn(outDir, Int.MaxValue).filterNot(_.getFileName.toString == ".flix-bindings.stamp")
+
+    private def localDependencySourceEntries(target: CompilationTarget): Result[List[(Path, SecurityContext)], BootstrapError] =
+      Result.traverse(installedFlixDependencies.filter(_.packagePath.isEmpty)) { dep =>
+        refreshGeneratedBindingsFor(dep.extractedRoot, dep.manifest, target).map { state =>
+          val filesHere = FileOps.getFlixFilesIn(dep.extractedRoot, 1)
+          val filesSrc = FileOps.getFlixFilesIn(Bootstrap.getSourceDirectory(dep.extractedRoot), Int.MaxValue)
+          val allFiles = (filesHere ::: filesSrc ::: state.sourcePaths).distinct
+          allFiles.map(_ -> dep.security)
+        }
+      }.map(_.flatten)
+
+    private def refreshGeneratedBindingsFor(root: Path, manifest: Manifest, target: CompilationTarget): Result[GeneratedBindingState, BootstrapError] = {
+      val resolvedBindings = resolveBindingsConfigAt(root, manifest.bindings)
+      val pkgConfigResolution = PkgConfig.resolve(resolveNativeLinkConfigAt(root, manifest.targetConfigs.native.link).pkgConfigPackages, root)
+        .mapErr(BootstrapError.GeneralError.apply)
+
+      target match {
+        case CompilationTarget.Jvm =>
+          Result.Ok(GeneratedBindingState(Nil))
+
+        case CompilationTarget.LlvmNative =>
+          Result.traverse(resolvedBindings.native.zipWithIndex.toList) {
+            case (config, index) => ensureNativeBinding(root, pkgConfigResolution, config, index)
+          }.map { states =>
+            states.foldLeft(GeneratedBindingState(Nil)) {
+              case (acc, state) =>
+                GeneratedBindingState(
+                  sourcePaths = acc.sourcePaths ::: state.sourcePaths,
+                  nativeCompileConfig = acc.nativeCompileConfig ++ state.nativeCompileConfig
+                )
+            }
+          }
+
+        case CompilationTarget.LlvmWasm =>
+          Result.traverse(resolvedBindings.wasm.zipWithIndex.toList) {
+            case (config, index) => ensureWasmBinding(root, config, index)
+          }.map { states =>
+            GeneratedBindingState(states.flatMap(_.sourcePaths))
+          }
+      }
+    }
+
+    private def ensureNativeBinding(root: Path, pkgConfigResolution: Result[PkgConfig.Resolution, BootstrapError], config: NativeBindingConfig, index: Int): Result[GeneratedBindingState, BootstrapError] = {
+      pkgConfigResolution.flatMap { pkgConfig =>
+        val effectiveConfig = config.copy(
+          cflags = (config.cflags ::: pkgConfig.compile.cflags).distinct
+        )
+
+        val outDir = nativeBindingOutDir(root, config, index)
+        val stamp = outDir.resolve(".flix-bindings.stamp").normalize()
+        val flixFile = outDir.resolve("flix").resolve(s"${config.module}.flix").normalize()
+        val shimFile = outDir.resolve("native").resolve(s"${config.module}_shim.c").normalize()
+        val shimHeaderFile = outDir.resolve("native").resolve("include").resolve(config.header.getFileName.toString).normalize()
+        val fingerprint = nativeBindingFingerprint(config, pkgConfig)
+        val hasShimOutputs = Files.exists(shimFile) || Files.exists(shimHeaderFile)
+        val expectedOutputs = flixFile :: (if (hasShimOutputs) List(shimFile, shimHeaderFile) else Nil)
+
+        val generated =
+          if (bindingOutputsFresh(stamp, fingerprint, nativeBindingInputs(root, config), expectedOutputs)) {
+            Result.Ok(())
+          } else {
+            Files.createDirectories(outDir)
+            NativeBindingsTool.run(NativeBindingsTool.Config(
+              header = config.header,
+              outDir = outDir,
+              rootModule = config.module,
+              spec = config.spec,
+              includePaths = config.includePaths,
+              defines = config.defines,
+              cflags = effectiveConfig.cflags
+            )).mapErr(BootstrapError.GeneralError.apply).map { _ =>
+              FileOps.writeString(stamp, fingerprint)
+              ()
+            }
+          }
+
+        generated.map { _ =>
+          GeneratedBindingState(
+            sourcePaths = List(flixFile),
+            nativeCompileConfig = generatedNativeCompileState(root, effectiveConfig, shimFile, shimHeaderFile),
+          )
+        }
+      }
+    }
+
+    private def ensureWasmBinding(root: Path, config: WasmBindingConfig, index: Int): Result[GeneratedBindingState, BootstrapError] = {
+      val outDir = wasmBindingOutDir(root, config, index)
+      val stamp = outDir.resolve(".flix-bindings.stamp").normalize()
+      val flixFile = outDir.resolve("flix").resolve(s"${config.module}.flix").normalize()
+      val bindingsFile = outDir.resolve("manifest").resolve("wit-effect-bindings.json").normalize()
+      val jsFile = outDir.resolve("js").resolve("index.mjs").normalize()
+      val dtsFile = outDir.resolve("js").resolve("index.d.ts").normalize()
+      val jsBrowserHostStubFile = outDir.resolve("js").resolve("browser-host.stub.mjs").normalize()
+      val jsPackageFile = outDir.resolve("js").resolve("package.json").normalize()
+      val rustFile = outDir.resolve("rust").resolve("src").resolve("wit_effect_bindings.rs").normalize()
+      val rustLibFile = outDir.resolve("rust").resolve("src").resolve("lib.rs").normalize()
+      val rustHostStubFile = outDir.resolve("rust").resolve("examples").resolve("host_stub.rs").normalize()
+      val rustCargoTomlFile = outDir.resolve("rust").resolve("Cargo.toml").normalize()
+      val readmeFile = outDir.resolve("README.md").normalize()
+      val fingerprint = wasmBindingFingerprint(config)
+      val expectedOutputs = List(
+        flixFile,
+        bindingsFile,
+        jsFile,
+        dtsFile,
+        jsBrowserHostStubFile,
+        jsPackageFile,
+        rustFile,
+        rustLibFile,
+        rustHostStubFile,
+        rustCargoTomlFile,
+        readmeFile,
+      )
+
+      val generated =
+        if (bindingOutputsFresh(stamp, fingerprint, List(config.witDir), expectedOutputs)) {
+          Result.Ok(())
+        } else {
+          Files.createDirectories(outDir)
+          WasmEffectBindingsTool.run(WasmEffectBindingsTool.Config(
+            witDir = config.witDir,
+            world = config.world,
+            outDir = outDir,
+            rootModule = config.module,
+          )).mapErr(BootstrapError.GeneralError.apply).map { _ =>
+            FileOps.writeString(stamp, fingerprint)
+            ()
+          }
+        }
+
+      generated.map(_ => GeneratedBindingState(List(flixFile)))
+    }
+
+    private def generatedNativeCompileState(root: Path, config: NativeBindingConfig, shimFile: Path, shimHeaderFile: Path): NativeCompileConfig = {
+      if (!Files.isRegularFile(shimFile)) {
+        NativeCompileConfig()
+      } else {
+        NativeCompileConfig(
+          sources = List(shimFile),
+          includePaths = (shimHeaderFile.getParent :: config.header.getParent :: config.includePaths.map(resolvePathAgainst(root, _))).distinct,
+          cflags = config.defines.map(d => s"-D$d") ::: config.cflags,
+        )
+      }
+    }
+
+    private def nativeBindingInputs(root: Path, config: NativeBindingConfig): List[Path] =
+      (config.header :: config.spec.toList ::: config.includePaths.filter(path => path.normalize().startsWith(root.normalize()))).distinct
+
+    private def nativeBindingOutDir(root: Path, config: NativeBindingConfig, index: Int): Path =
+      generatedBindingsRoot(root, CompilationTarget.LlvmNative).resolve("native").resolve(f"${index}%02d-${sanitizeGeneratedSegment(config.module)}").normalize()
+
+    private def wasmBindingOutDir(root: Path, config: WasmBindingConfig, index: Int): Path =
+      generatedBindingsRoot(root, CompilationTarget.LlvmWasm).resolve("wasm").resolve(f"${index}%02d-${sanitizeGeneratedSegment(config.module)}").normalize()
+
+    private def generatedBindingsRoot(root: Path, target: CompilationTarget): Path =
+      Bootstrap.getBuildTargetDirectory(root, target).resolve("generated").resolve("bindings").normalize()
+
+    private def sanitizeGeneratedSegment(segment: String): String =
+      segment.replaceAll("[^A-Za-z0-9._-]", "_")
+
+    private def nativeBindingFingerprint(config: NativeBindingConfig, pkgConfig: PkgConfig.Resolution): String =
+      List(
+        s"header=${config.header.toAbsolutePath.normalize()}",
+        s"module=${config.module}",
+        s"spec=${config.spec.map(_.toAbsolutePath.normalize()).getOrElse("<none>")}",
+        s"include=${config.includePaths.map(_.toAbsolutePath.normalize()).mkString(";")}",
+        s"define=${config.defines.mkString(";")}",
+        s"cflag=${config.cflags.mkString(";")}",
+        s"pkg-cflags=${pkgConfig.compile.cflags.mkString(";")}",
+        s"pkg-libs=${pkgConfig.link.flags.mkString(";")}",
+      ).mkString("\n")
+
+    private def wasmBindingFingerprint(config: WasmBindingConfig): String =
+      List(
+        s"schema=${WasmEffectBindingsTool.OutputSchemaVersion}",
+        s"wit=${config.witDir.toAbsolutePath.normalize()}",
+        s"world=${config.world}",
+        s"module=${config.module}",
+      ).mkString("\n")
+
+    private def bindingOutputsFresh(stamp: Path, fingerprint: String, inputs: List[Path], outputs: List[Path]): Boolean = {
+      if (!Files.isRegularFile(stamp) || outputs.exists(path => !Files.exists(path))) {
+        return false
+      }
+
+      val recordedFingerprint = Files.readString(stamp, StandardCharsets.UTF_8)
+      if (recordedFingerprint != fingerprint) {
+        return false
+      }
+
+      val stampTime = Files.getLastModifiedTime(stamp).toMillis
+      maxInputTimestamp(inputs) <= stampTime
+    }
+
+    private def maxInputTimestamp(paths: List[Path]): Long =
+      paths.filter(Files.exists(_)).map(pathTimestamp).maxOption.getOrElse(0L)
+
+    private def pathTimestamp(path: Path): Long = {
+      if (Files.isDirectory(path)) {
+        Using(Files.walk(path)) { stream =>
+          stream.iterator().asScala.map(p => Files.getLastModifiedTime(p).toMillis).maxOption.getOrElse(0L)
+        }.getOrElse(0L)
+      } else {
+        Files.getLastModifiedTime(path).toMillis
+      }
     }
 
     /**
@@ -1200,10 +1599,98 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
         case Ok(result: List[(Path, SecurityContext)]) =>
           securityLevels = result.toMap
           flixPackagePaths = result.map { case (path, _) => path }
-          Ok(flixPackagePaths)
+          collectInstalledFlixDependencies(resolution) match {
+            case Ok(deps) =>
+              installedFlixDependencies = deps
+              Ok(flixPackagePaths)
+            case Err(e) => Err(e)
+          }
         case Err(e) =>
           Err(BootstrapError.FlixPackageError(e))
       }
+    }
+
+    private def collectInstalledFlixDependencies(resolution: FlixPackageManager.SecureResolution): Result[List[InstalledFlixDependency], BootstrapError] =
+      Result.traverse(resolution.manifestToFlixDeps.map(identity).toList) {
+        case (manifest, dep: FlixDependency) =>
+          val packagePath = installedFlixPackagePath(dep)
+          val extractedRoot = installedFlixDependencyRoot(dep)
+          ensureExtractedPackage(packagePath, extractedRoot).map(_ =>
+            InstalledFlixDependency(
+              manifest = manifest,
+              security = resolution.security(manifest),
+              packagePath = Some(packagePath),
+              extractedRoot = extractedRoot,
+            )
+          )
+
+        case (manifest, _: PathDependency) =>
+          resolution.manifestRoots.get(manifest) match {
+            case Some(root) =>
+              Ok(InstalledFlixDependency(
+                manifest = manifest,
+                security = resolution.security(manifest),
+                packagePath = None,
+                extractedRoot = root,
+              ))
+            case None =>
+              Err(BootstrapError.GeneralError(s"Missing local dependency root for manifest '${manifest.name}'."))
+          }
+      }
+
+    private def installedFlixPackagePath(dep: ca.uwaterloo.flix.tools.pkg.Dependency.FlixDependency): Path =
+      Bootstrap.getLibraryDirectory(projectPath)
+        .resolve("github")
+        .resolve(dep.username)
+        .resolve(dep.projectName)
+        .resolve(dep.version.toString)
+        .resolve(s"${dep.projectName}-${dep.version}.fpkg")
+        .normalize()
+
+    private def installedFlixDependencyRoot(dep: ca.uwaterloo.flix.tools.pkg.Dependency.FlixDependency): Path =
+      Bootstrap.getBuildDirectory(projectPath)
+        .resolve("dependency-packages")
+        .resolve("github")
+        .resolve(dep.username)
+        .resolve(dep.projectName)
+        .resolve(dep.version.toString)
+        .normalize()
+
+    private def ensureExtractedPackage(packagePath: Path, extractedRoot: Path): Result[Unit, BootstrapError] = {
+      val stamp = extractedRoot.resolve(".flix-package-extract.stamp").normalize()
+      val fingerprint = s"${Files.getLastModifiedTime(packagePath).toMillis}:${Files.size(packagePath)}"
+      if (Files.isRegularFile(stamp) && Files.readString(stamp, StandardCharsets.UTF_8) == fingerprint) {
+        return Ok(())
+      }
+
+      deleteDirectoryIfExists(extractedRoot)
+      Files.createDirectories(extractedRoot)
+
+      Result.fromTry(Using(new ZipInputStream(Files.newInputStream(packagePath))) { zipIn =>
+        var entry = zipIn.getNextEntry
+        while (entry != null) {
+          if (!entry.isDirectory) {
+            val target = extractedRoot.resolve(entry.getName).normalize()
+            if (!target.startsWith(extractedRoot)) {
+              throw new IllegalStateException(s"Refusing to extract package entry outside destination root: '${entry.getName}'.")
+            }
+            Files.createDirectories(target.getParent)
+            Files.write(target, zipIn.readAllBytes())
+          }
+          entry = zipIn.getNextEntry
+        }
+      }).mapErr(e => BootstrapError.FileError(e.getMessage)).map { _ =>
+        FileOps.writeString(stamp, fingerprint)
+      }
+    }
+
+    private def deleteDirectoryIfExists(path: Path): Unit = {
+      if (!Files.exists(path)) return
+      Using(Files.walk(path)) { stream =>
+        stream.iterator().asScala.toList
+          .sortBy(_.getNameCount)(Ordering.Int.reverse)
+          .foreach(Files.deleteIfExists(_))
+      }.get
     }
 
     /**
@@ -1271,37 +1758,49 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
       * If they have, they are added to flix. Then updates the timestamps
       * map to reflect the current source files and packages.
       */
-    def updateStaleSources(flix: Flix, includeTests: Boolean = true, forceReload: Boolean = false): Unit = {
-      val selectedSourcePaths =
-        if (includeTests) sourcePaths
-        else sourcePaths.filterNot(isTestSourcePath)
+    def updateStaleSources(flix: Flix, includeTests: Boolean = true, forceReload: Boolean = false): Result[Unit, BootstrapError] = {
+      for {
+        _ <- refreshGeneratedBindings(flix.options.target)
+        dependencySourceEntries <- localDependencySourceEntries(flix.options.target)
+      } yield {
+        flix.setOptions(applyProjectTargetConfig(flix.options))
 
-      val previousSources = timestamps.keySet
+        val localSourcePaths =
+          if (includeTests) sourcePaths
+          else sourcePaths.filterNot(isTestSourcePath)
+        val selectedSourceEntries =
+          localSourcePaths.map(_ -> SecurityContext.Unrestricted) :::
+            generatedSourcePaths.getOrElse(flix.options.target, Nil).map(_ -> SecurityContext.Unrestricted) :::
+            dependencySourceEntries
 
-      for (path <- selectedSourcePaths if forceReload || hasChanged(path)) {
-        flix.addFile(path)(SecurityContext.Unrestricted)
+        val previousSources = timestamps.keySet
+
+        for ((path, sctx) <- selectedSourceEntries if forceReload || hasChanged(path)) {
+          flix.addFile(path)(sctx)
+        }
+
+        for (path <- flixPackagePaths if forceReload || hasChanged(path)) {
+          flix.addPkg(path)(securityLevels.getOrElse(path, SecurityContext.Plain))
+        }
+
+        for (path <- mavenPackagePaths if forceReload || hasChanged(path)) {
+          flix.addJar(path)
+        }
+
+        for (path <- jarPackagePaths if forceReload || hasChanged(path)) {
+          flix.addJar(path)
+        }
+
+        val currentSources = (selectedSourceEntries.map(_._1) ::: flixPackagePaths ::: mavenPackagePaths ::: jarPackagePaths).filter(p => Files.exists(p))
+
+        val deletedSources = previousSources -- currentSources
+        for (path <- deletedSources) {
+          flix.remFile(path)(securityLevels.getOrElse(path, SecurityContext.Unrestricted))
+        }
+
+        securityLevels = securityLevels ++ dependencySourceEntries.toMap
+        timestamps = currentSources.map(f => f -> f.toFile.lastModified).toMap
       }
-
-      for (path <- flixPackagePaths if forceReload || hasChanged(path)) {
-        flix.addPkg(path)(securityLevels.getOrElse(path, SecurityContext.Plain))
-      }
-
-      for (path <- mavenPackagePaths if forceReload || hasChanged(path)) {
-        flix.addJar(path)
-      }
-
-      for (path <- jarPackagePaths if forceReload || hasChanged(path)) {
-        flix.addJar(path)
-      }
-
-      val currentSources = (selectedSourcePaths ::: flixPackagePaths ::: mavenPackagePaths ::: jarPackagePaths).filter(p => Files.exists(p))
-
-      val deletedSources = previousSources -- currentSources
-      for (path <- deletedSources) {
-        flix.remFile(path)(SecurityContext.Unrestricted)
-      }
-
-      timestamps = currentSources.map(f => f -> f.toFile.lastModified).toMap
     }
 
     private def isTestSourcePath(path: Path): Boolean =
@@ -1364,11 +1863,10 @@ class Bootstrap(val projectPath: Path, apiKey: Option[String]) {
     flix.setOptions(newOptions)
     flix.clearCaches()
 
-    Steps.updateStaleSources(flix, includeTests = true, forceReload = true)
-
     implicit val sctx: SecurityContext = SecurityContext.Unrestricted
 
     for {
+      _ <- Steps.updateStaleSources(flix, includeTests = true, forceReload = true)
       root <- Steps.check(flix)
       driver = ProjectTestDriver.mkDriverSource(ProjectTestDriver.collectProjectTests(root))(flix)
       _ = {

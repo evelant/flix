@@ -45,6 +45,9 @@ import scala.collection.mutable
   */
 object WasmEffectBindingsTool {
 
+  val OutputSchemaVersion: String = "v2"
+  val RustSerdeJsonVersion: String = "1.0.146"
+
   case class Config(witDir: Path,
                     world: String,
                     outDir: Path,
@@ -54,9 +57,11 @@ object WasmEffectBindingsTool {
                        bindingsFile: Path,
                        jsFile: Path,
                        dtsFile: Path,
+                       jsBrowserHostStubFile: Path,
                        jsPackageFile: Path,
                        rustFile: Path,
                        rustLibFile: Path,
+                       rustHostStubFile: Path,
                        rustCargoTomlFile: Path,
                        rustWitDir: Path,
                        readmeFile: Path)
@@ -98,9 +103,11 @@ object WasmEffectBindingsTool {
           copySupportModule(resolveWitEffectRuntimeJs(config.outDir), lowered.witEffectRuntimeJs)
           FileOps.writeString(lowered.jsFile, renderGeneratedJs(lowered.entries))
           FileOps.writeString(lowered.dtsFile, renderGeneratedDts(lowered.entries))
+          FileOps.writeString(lowered.jsBrowserHostStubFile, renderGeneratedJsBrowserHostStub(lowered.entries))
           FileOps.writeString(lowered.jsPackageFile, renderGeneratedJsPackageJson())
           FileOps.writeString(lowered.rustFile, renderGeneratedRust(lowered.entries))
           FileOps.writeString(lowered.rustLibFile, renderGeneratedRustLib())
+          FileOps.writeString(lowered.rustHostStubFile, renderGeneratedRustHostStub(lowered.entries))
           FileOps.writeString(lowered.rustCargoTomlFile, renderGeneratedRustCargoToml())
           copySupportModule(resolveRustEffectsRs(config.outDir), lowered.rustEffectsFile)
           copySupportModule(resolveRustRunnerRs(config.outDir), lowered.rustRunnerFile)
@@ -112,9 +119,11 @@ object WasmEffectBindingsTool {
             lowered.bindingsFile,
             lowered.jsFile,
             lowered.dtsFile,
+            lowered.jsBrowserHostStubFile,
             lowered.jsPackageFile,
             lowered.rustFile,
             lowered.rustLibFile,
+            lowered.rustHostStubFile,
             lowered.rustCargoTomlFile,
             lowered.rustWitDir,
             lowered.readmeFile,
@@ -160,9 +169,11 @@ object WasmEffectBindingsTool {
                                   witEffectRuntimeJs: Path,
                                   jsFile: Path,
                                   dtsFile: Path,
+                                  jsBrowserHostStubFile: Path,
                                   jsPackageFile: Path,
                                   rustFile: Path,
                                   rustLibFile: Path,
+                                  rustHostStubFile: Path,
                                   rustCargoTomlFile: Path,
                                   rustEffectsFile: Path,
                                   rustRunnerFile: Path,
@@ -418,9 +429,11 @@ object WasmEffectBindingsTool {
     val witEffectRuntimeJs = jsInternalDir.resolve("wit-effect-runtime.mjs").toAbsolutePath.normalize()
     val jsFile = jsDir.resolve("index.mjs").toAbsolutePath.normalize()
     val dtsFile = jsDir.resolve("index.d.ts").toAbsolutePath.normalize()
+    val jsBrowserHostStubFile = jsDir.resolve("browser-host.stub.mjs").toAbsolutePath.normalize()
     val jsPackageFile = jsDir.resolve("package.json").toAbsolutePath.normalize()
     val rustFile = rustSrcDir.resolve("wit_effect_bindings.rs").toAbsolutePath.normalize()
     val rustLibFile = rustSrcDir.resolve("lib.rs").toAbsolutePath.normalize()
+    val rustHostStubFile = rustDir.resolve("examples").resolve("host_stub.rs").toAbsolutePath.normalize()
     val rustCargoTomlFile = rustDir.resolve("Cargo.toml").toAbsolutePath.normalize()
     val rustEffectsFile = rustSrcDir.resolve("effects.rs").toAbsolutePath.normalize()
     val rustRunnerFile = rustSrcDir.resolve("runner.rs").toAbsolutePath.normalize()
@@ -434,9 +447,11 @@ object WasmEffectBindingsTool {
       witEffectRuntimeJs = witEffectRuntimeJs,
       jsFile = jsFile,
       dtsFile = dtsFile,
+      jsBrowserHostStubFile = jsBrowserHostStubFile,
       jsPackageFile = jsPackageFile,
       rustFile = rustFile,
       rustLibFile = rustLibFile,
+      rustHostStubFile = rustHostStubFile,
       rustCargoTomlFile = rustCargoTomlFile,
       rustEffectsFile = rustEffectsFile,
       rustRunnerFile = rustRunnerFile,
@@ -612,6 +627,39 @@ object WasmEffectBindingsTool {
       |}
       |""".stripMargin
 
+  private def renderGeneratedJsBrowserHostStub(entries: List[LoweredEntry]): String = {
+    val interfaces = groupInterfaces(entries)
+    val sb = new StringBuilder(8 * 1024)
+    sb.append("""import { makeUnknownHandler } from "./index.mjs";""").append('\n')
+    sb.append('\n')
+    sb.append(
+      """// Fill these handlers with browser-specific implementations.
+        |// This file is intentionally only a typed skeleton; the host still owns
+        |// component loading, runner wiring, and any browser worker / persistence setup.
+        |
+        |export const browserImplementations = {
+        |""".stripMargin
+    )
+    interfaces.foreach { iface =>
+      sb.append(s"  ${iface.jsKey}: {\n")
+      iface.entries.foreach { entry =>
+        val params = entry.publicParams.indices.map(i => s"arg$i").mkString(", ")
+        sb.append(s"    ${entry.publicName}: async ($params) => {\n")
+        sb.append(s"""      throw new Error("TODO: implement ${escapeJsString(iface.interfaceId)}#${escapeJsString(entry.publicName)} for the browser host");\n""")
+        sb.append("    },\n")
+      }
+      sb.append("  },\n")
+    }
+    sb.append("};\n\n")
+    sb.append(
+      """export async function makeBrowserUnknownHandler(effectManifestSource, implementations = browserImplementations) {
+        |  return makeUnknownHandler(effectManifestSource, implementations);
+        |}
+        |""".stripMargin
+    )
+    sb.toString()
+  }
+
   private def renderGeneratedRustLib(): String =
     """pub mod bindings {
       |    wasmtime::component::bindgen!({
@@ -637,9 +685,74 @@ object WasmEffectBindingsTool {
       |[dependencies]
       |anyhow = "1"
       |serde = { version = "1", features = ["derive"] }
-      |serde_json = "1"
+      |serde_json = "=1.0.146"
       |wasmtime = { version = "38", features = ["component-model"] }
       |""".stripMargin
+
+  private def renderGeneratedRustHostStub(entries: List[LoweredEntry]): String = {
+    val interfaces = groupInterfaces(entries)
+    val records = collectRustRecords(entries)
+    val imports = (interfaces.map(_.effectName) :::
+      interfaces.flatMap(iface => iface.resources.map(resource => flixResourceTypeName(iface.effectName, resource))) :::
+      records.map(_.name) :::
+      List("WitEffectHandler")).distinct.sorted
+
+    val sb = new StringBuilder(12 * 1024)
+    sb.append(
+      """use anyhow::Result;
+        |use flix_wit_effect_bindings::{
+        |    effects::{AsyncResult, EffectManifest},
+        |""".stripMargin
+    )
+    imports.foreach { name =>
+      sb.append(s"    $name,\n")
+    }
+    sb.append("};\n\n")
+    sb.append(
+      """// Fill these host structs with Wasmtime-specific state and trait implementations.
+        |// This file is intentionally only a typed skeleton; the host still owns
+        |// component loading, linker setup, store state, and task driving.
+        |
+        |""".stripMargin
+    )
+    interfaces.foreach { iface =>
+      val hostStruct = s"${iface.effectName}Host"
+      sb.append(s"pub struct $hostStruct;\n\n")
+      sb.append(s"impl ${iface.effectName} for $hostStruct {\n")
+      iface.entries.foreach { entry =>
+        val params = entry.publicParams.map { case (name, tpe) =>
+          s"${toRustIdent(name)}: ${renderRustPublicType(tpe, iface.effectName, records)}"
+        }.mkString(", ")
+        sb.append(s"    fn ${toRustIdent(entry.publicName)}(&mut self")
+        if (params.nonEmpty) sb.append(", ").append(params)
+        sb.append(s") -> Result<AsyncResult<${renderRustPublicType(entry.publicResult, iface.effectName, records)}>> {\n")
+        sb.append(s"""        todo!("TODO: implement ${escapeRustString(iface.interfaceId)}#${escapeRustString(entry.publicName)} for the Wasmtime host")\n""")
+        sb.append("    }\n")
+      }
+      sb.append("}\n\n")
+    }
+
+    val hostTypeArgs = interfaces.map(iface => s"${iface.effectName}Host")
+    val hostValueArgs = interfaces.map(iface => s"${iface.rustField}: ${iface.effectName}Host")
+    sb.append("pub fn make_handler(\n")
+    sb.append("    manifest: EffectManifest")
+    if (hostValueArgs.nonEmpty) {
+      sb.append(",\n")
+      sb.append(hostValueArgs.map(arg => s"    $arg").mkString(",\n"))
+    }
+    sb.append("\n)")
+    if (hostTypeArgs.isEmpty) sb.append(" -> WitEffectHandler")
+    else sb.append(s" -> WitEffectHandler<${hostTypeArgs.mkString(", ")}>")
+    sb.append(" {\n")
+    sb.append("    WitEffectHandler::new(manifest")
+    if (interfaces.nonEmpty) {
+      sb.append(", ")
+      sb.append(interfaces.map(_.rustField).mkString(", "))
+    }
+    sb.append(")\n")
+    sb.append("}\n")
+    sb.toString()
+  }
 
   private def renderGeneratedReadme(config: Config, lowered: LoweredFiles): String =
     s"""# Flix Wasm Effect Bindings SDK
@@ -655,7 +768,9 @@ object WasmEffectBindingsTool {
        |- `flix/${config.rootModule}.flix`: generated Flix effects and typed wrappers.
        |- `manifest/wit-effect-bindings.json`: binding manifest for unknown-effect dispatch.
        |- `js/`: typed JS/TS host SDK.
+       |- `js/browser-host.stub.mjs`: browser host skeleton built on top of `js/index.mjs`.
        |- `rust/`: typed Rust/Wasmtime host SDK crate.
+       |- `rust/examples/host_stub.rs`: Wasmtime host skeleton built on top of `rust/`.
        |- `wit/`: a copy of the source WIT world directory used to generate this bundle.
        |
        |Recommended usage:
@@ -663,8 +778,8 @@ object WasmEffectBindingsTool {
        |1. Add `flix/${config.rootModule}.flix` to the Flix project that will run on `llvm-wasm`.
        |2. Build that Flix project for wasm.
        |3. In the host, use:
-       |   - `js/index.mjs` for Node/JS integration, or
-       |   - `rust/` as a path dependency for Wasmtime/Rust integration.
+       |   - `js/browser-host.stub.mjs` + `js/index.mjs` for browser/JS integration, or
+       |   - `rust/examples/host_stub.rs` + `rust/` as a path dependency for Wasmtime/Rust integration.
        |4. Use `manifest/wit-effect-bindings.json` together with the wasm build's effect manifest when wiring unknown-effect handlers.
        |
        |The generated Rust crate is self-contained with the Flix runtime WIT and helper modules under `rust/`.
@@ -1732,6 +1847,19 @@ object WasmEffectBindingsTool {
       case '\r' => b.append("\\r")
       case '\t' => b.append("\\t")
       case c if c < ' ' => b.append(f"\\u${c.toInt}%04x")
+      case c => b.append(c)
+    }
+    b.toString()
+  }
+
+  private def escapeJsString(s: String): String = {
+    val b = new StringBuilder(s.length + 8)
+    s.foreach {
+      case '"' => b.append("\\\"")
+      case '\\' => b.append("\\\\")
+      case '\n' => b.append("\\n")
+      case '\r' => b.append("\\r")
+      case '\t' => b.append("\\t")
       case c => b.append(c)
     }
     b.toString()

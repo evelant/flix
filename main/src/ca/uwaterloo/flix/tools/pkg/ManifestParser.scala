@@ -17,9 +17,9 @@ package ca.uwaterloo.flix.tools.pkg
 
 import ca.uwaterloo.flix.language.ast.Symbol
 import ca.uwaterloo.flix.language.ast.shared.SecurityContext
-import ca.uwaterloo.flix.tools.pkg.Dependency.{FlixDependency, JarDependency, MavenDependency}
+import ca.uwaterloo.flix.tools.pkg.Dependency.{FlixDependency, FlixPackageDependency, JarDependency, MavenDependency, PathDependency}
 import ca.uwaterloo.flix.tools.pkg.github.GitHub
-import ca.uwaterloo.flix.util.{CompilationTarget, EmitKind, NativeLinkConfig, RunnerKind}
+import ca.uwaterloo.flix.util.{BindingsConfig, CompilationTarget, EmitKind, NativeBindingConfig, NativeCompileConfig, NativeLinkConfig, RunnerKind, WasmBindingConfig}
 import ca.uwaterloo.flix.util.Result
 import ca.uwaterloo.flix.util.Result.{Err, Ok, traverse}
 import org.tomlj.*
@@ -107,6 +107,8 @@ object ManifestParser {
       authorsList <- convertTomlArrayToStringList(authors, p);
 
       buildTargets <- parseBuildTargets(parser, p);
+      nativeBindings <- parseNativeBindings(parser, p);
+      wasmBindings <- parseWasmBindings(parser, p);
       jvmTargetConfig <- parseTargetConfig("target.jvm", parser, p);
       nativeTargetConfig <- parseNativeTargetConfig("target.native", parser, p);
       wasmTargetConfig <- parseTargetConfig("target.wasm", parser, p);
@@ -135,6 +137,7 @@ object ManifestParser {
       authorsList,
       depsList ++ mvnDepsList ++ jarDepsList,
       buildConfig = Manifest.BuildConfig(buildTargets),
+      bindings = BindingsConfig(nativeBindings, wasmBindings),
       targetConfigs = Manifest.TargetConfigs(jvmTargetConfig, nativeTargetConfig, wasmTargetConfig),
       runConfig = Manifest.RunConfig(runTarget, runRunner),
       testConfig = Manifest.TestConfig(testTarget, testRunner)
@@ -143,7 +146,7 @@ object ManifestParser {
 
   private def checkKeys(parser: TomlParseResult, p: Path): Result[Unit, ManifestError] = {
     val keySet: Set[String] = parser.keySet().asScala.toSet
-    val allowedKeys = Set("package", "build", "run", "test", "target", "target.jvm", "target.native", "target.wasm", "dependencies", "mvn-dependencies", "jar-dependencies")
+    val allowedKeys = Set("package", "build", "bindings", "bindings.native", "bindings.wasm", "run", "test", "target", "target.jvm", "target.native", "target.wasm", "dependencies", "mvn-dependencies", "jar-dependencies")
     val illegalKeys = keySet.diff(allowedKeys)
 
     if (illegalKeys.nonEmpty) {
@@ -195,6 +198,48 @@ object ManifestParser {
     }
   }
 
+  private def parseNativeBindings(parser: TomlParseResult, p: Path): Result[List[NativeBindingConfig], ManifestError] =
+    getOptionalArrayProperty("bindings.native", parser, p).flatMap {
+      case None => Ok(Nil)
+      case Some(array) => traverse(List.range(0, array.size()))(idx => parseNativeBinding(array, idx, p))
+    }
+
+  private def parseNativeBinding(array: TomlArray, idx: Int, p: Path): Result[NativeBindingConfig, ManifestError] =
+    getTableFromArray(array, idx, p, "bindings.native").flatMap { table =>
+      for {
+        header <- getRequiredStringProperty("header", table, p).map(Path.of(_))
+        module <- getOptionalStringProperty("module", table, p).map(_.getOrElse("Native"))
+        spec <- getOptionalStringProperty("spec", table, p).map(_.map(Path.of(_)))
+        includePaths <- getOptionalArrayProperty("include", table, p).flatMap {
+          case None => Ok(Nil)
+          case Some(values) => convertTomlArrayToStringList(values, p).map(_.distinct.map(Path.of(_)))
+        }
+        defines <- getOptionalArrayProperty("define", table, p).flatMap {
+          case None => Ok(Nil)
+          case Some(values) => convertTomlArrayToStringList(values, p).map(_.distinct)
+        }
+        cflags <- getOptionalArrayProperty("cflag", table, p).flatMap {
+          case None => Ok(Nil)
+          case Some(values) => convertTomlArrayToStringList(values, p).map(_.distinct)
+        }
+      } yield NativeBindingConfig(header, module, spec, includePaths, defines, cflags)
+    }
+
+  private def parseWasmBindings(parser: TomlParseResult, p: Path): Result[List[WasmBindingConfig], ManifestError] =
+    getOptionalArrayProperty("bindings.wasm", parser, p).flatMap {
+      case None => Ok(Nil)
+      case Some(array) => traverse(List.range(0, array.size()))(idx => parseWasmBinding(array, idx, p))
+    }
+
+  private def parseWasmBinding(array: TomlArray, idx: Int, p: Path): Result[WasmBindingConfig, ManifestError] =
+    getTableFromArray(array, idx, p, "bindings.wasm").flatMap { table =>
+      for {
+        witDir <- getRequiredStringProperty("wit", table, p).map(Path.of(_))
+        world <- getRequiredStringProperty("world", table, p)
+        module <- getOptionalStringProperty("module", table, p).map(_.getOrElse("Wit"))
+      } yield WasmBindingConfig(witDir, world, module)
+    }
+
   private def parseNativeTargetConfig(prefix: String, parser: TomlParseResult, p: Path): Result[Manifest.NativeTargetConfig, ManifestError] = {
     for {
       emits <- getOptionalArrayProperty(s"$prefix.emit", parser, p).flatMap {
@@ -210,6 +255,10 @@ object ManifestParser {
         case None => Ok(Nil)
         case Some(array) => convertTomlArrayToStringList(array, p).map(_.distinct.map(Path.of(_)))
       }
+      pkgConfig <- getOptionalArrayProperty(s"$prefix.pkg-config", parser, p).flatMap {
+        case None => Ok(Nil)
+        case Some(array) => convertTomlArrayToStringList(array, p).map(_.distinct)
+      }
       frameworks <- getOptionalArrayProperty(s"$prefix.frameworks", parser, p).flatMap {
         case None => Ok(Nil)
         case Some(array) => convertTomlArrayToStringList(array, p).map(_.distinct)
@@ -218,14 +267,37 @@ object ManifestParser {
         case None => Ok(Nil)
         case Some(array) => convertTomlArrayToStringList(array, p).map(_.distinct.map(Path.of(_)))
       }
+      linkFlags <- getOptionalArrayProperty(s"$prefix.link-flags", parser, p).flatMap {
+        case None => Ok(Nil)
+        case Some(array) => convertTomlArrayToStringList(array, p).map(_.distinct)
+      }
+      compileSources <- getOptionalArrayProperty(s"$prefix.compile-sources", parser, p).flatMap {
+        case None => Ok(Nil)
+        case Some(array) => convertTomlArrayToStringList(array, p).map(_.distinct.map(Path.of(_)))
+      }
+      compileInclude <- getOptionalArrayProperty(s"$prefix.compile-include", parser, p).flatMap {
+        case None => Ok(Nil)
+        case Some(array) => convertTomlArrayToStringList(array, p).map(_.distinct.map(Path.of(_)))
+      }
+      compileCFlags <- getOptionalArrayProperty(s"$prefix.compile-cflags", parser, p).flatMap {
+        case None => Ok(Nil)
+        case Some(array) => convertTomlArrayToStringList(array, p).map(_.distinct)
+      }
     } yield Manifest.NativeTargetConfig(
       emits = emits,
       link = NativeLinkConfig(
         libraries = linkLibs,
         searchPaths = linkSearch,
+        pkgConfigPackages = pkgConfig,
         frameworks = frameworks,
-        frameworkSearchPaths = frameworkSearch
-      )
+        frameworkSearchPaths = frameworkSearch,
+        flags = linkFlags
+      ),
+      compile = NativeCompileConfig(
+        sources = compileSources,
+        includePaths = compileInclude,
+        cflags = compileCFlags
+      ),
     )
   }
 
@@ -275,6 +347,19 @@ object ManifestParser {
     }
   }
 
+  private def getRequiredStringProperty(prop: String, table: TomlTable, p: Path): Result[String, ManifestError] = {
+    try {
+      val result = table.getString(prop)
+      if (result == null) {
+        return Err(ManifestError.MissingRequiredProperty(p, prop, None))
+      }
+      Ok(result)
+    } catch {
+      case e: IllegalArgumentException => Err(ManifestError.MissingRequiredProperty(p, prop, Some(e.getMessage)))
+      case e: TomlInvalidTypeException => Err(ManifestError.RequiredPropertyHasWrongType(p, prop, "String", e.getMessage))
+    }
+  }
+
   /**
     * Parses a String which might be at `prop`
     * and returns the String as an Option.
@@ -282,6 +367,16 @@ object ManifestParser {
   private def getOptionalStringProperty(prop: String, parser: TomlParseResult, p: Path): Result[Option[String], ManifestError] = {
     try {
       val result = parser.getString(prop)
+      Ok(Option(result))
+    } catch {
+      case _: IllegalArgumentException => Ok(None)
+      case e: TomlInvalidTypeException => Err(ManifestError.RequiredPropertyHasWrongType(p, prop, "String", e.getMessage))
+    }
+  }
+
+  private def getOptionalStringProperty(prop: String, table: TomlTable, p: Path): Result[Option[String], ManifestError] = {
+    try {
+      val result = table.getString(prop)
       Ok(Option(result))
     } catch {
       case _: IllegalArgumentException => Ok(None)
@@ -321,6 +416,16 @@ object ManifestParser {
     }
   }
 
+  private def getOptionalArrayProperty(prop: String, table: TomlTable, p: Path): Result[Option[TomlArray], ManifestError] = {
+    try {
+      val array = table.getArray(prop)
+      Ok(Option(array))
+    } catch {
+      case _: IllegalArgumentException => Ok(None)
+      case e: TomlInvalidTypeException => Err(ManifestError.RequiredPropertyHasWrongType(p, prop, "Array", e.getMessage))
+    }
+  }
+
   /**
     * Parses a Table which should be at `prop`
     * and returns the Table or an error if the result
@@ -333,6 +438,14 @@ object ManifestParser {
     } catch {
       case _: IllegalArgumentException => Ok(None)
       case e: TomlInvalidTypeException => Err(ManifestError.RequiredPropertyHasWrongType(p, prop, "Table", e.getMessage))
+    }
+  }
+
+  private def getTableFromArray(array: TomlArray, idx: Int, p: Path, prop: String): Result[TomlTable, ManifestError] = {
+    val value = array.get(idx)
+    value match {
+      case table: TomlTable => Ok(table)
+      case other => Err(ManifestError.RequiredPropertyHasWrongType(p, s"$prop[$idx]", "Table", s"Expected a table but found: $other"))
     }
   }
 
@@ -459,7 +572,7 @@ object ManifestParser {
     * @param p      [[Path]] of the project Toml file.
     * @return [[Result]] of the [[FlixDependency]] if succesful, otherwise a [[ManifestError]]
     */
-  private def createFlixDep(deps: TomlTable, depKey: String, p: Path): Result[FlixDependency, ManifestError] = {
+  private def createFlixDep(deps: TomlTable, depKey: String, p: Path): Result[FlixPackageDependency, ManifestError] = {
     // Regex for extracting repository, username, and project name.
     // (.+) is a capturing group, where . matches any character.
     val validPkg = s"^\"(.+):(.+)/(.+)\"$$".r
@@ -498,8 +611,22 @@ object ManifestParser {
         } else {
           Err(ManifestError.VersionTypeError(Option.apply(p), depKey, deps.get(depKey)))
         }
-      case _ => Err(ManifestError.FlixDependencyFormatError(p, depKey))
+      case _ =>
+        if (!deps.isTable(depKey)) {
+          Err(ManifestError.FlixDependencyFormatError(p, depKey))
+        } else {
+          val depTbl = deps.getTable(depKey)
+          createPathDep(depKey.substring(1, depKey.length - 1), depTbl, p)
+        }
     }
+  }
+
+  private def createPathDep(depName: String, depTbl: TomlTable, p: Path): Result[PathDependency, ManifestError] = {
+    for {
+      checkedName <- checkNameCharacters(depName, p)
+      path <- getRequiredStringProperty("path", depTbl, p).map(Path.of(_))
+      security <- getSecurity(depTbl, "security", p)
+    } yield PathDependency(checkedName, path, security)
   }
 
   /**

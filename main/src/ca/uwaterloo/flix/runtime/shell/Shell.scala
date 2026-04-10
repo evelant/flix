@@ -195,7 +195,10 @@ class Shell(bootstrap: Bootstrap, options: Options) {
   private def execReload()(implicit terminal: Terminal): Result[Unit, Unit] = {
 
     // Scan the disk to find changes, and add source to the flix object
-    bootstrap.reconfigureFlix(flix)
+    bootstrap.reconfigureFlix(flix) match {
+      case Result.Ok(()) => ()
+      case Result.Err(_) => return Result.Err(())
+    }
 
     // Remove any previous definitions, as they may no longer be valid against the new source
     clearFragments()

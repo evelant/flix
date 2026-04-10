@@ -88,11 +88,28 @@ class WasmEffectBindingsToolSuite extends AnyFunSuite {
       assert(bindingsJson.contains("Wit.HostDemoClock.echo"))
       assert(Files.exists(generated.jsFile))
       assert(Files.exists(generated.dtsFile))
+      assert(Files.exists(generated.jsBrowserHostStubFile))
       assert(Files.exists(generated.jsPackageFile))
       assert(Files.exists(generated.rustFile))
       assert(Files.exists(generated.rustLibFile))
+      assert(Files.exists(generated.rustHostStubFile))
       assert(Files.exists(generated.rustCargoTomlFile))
       assert(Files.exists(generated.readmeFile))
+
+      val jsStub = Files.readString(generated.jsBrowserHostStubFile, StandardCharsets.UTF_8)
+      assert(jsStub.contains("export const browserImplementations"))
+      assert(jsStub.contains("hostDemoClock"))
+      assert(jsStub.contains("echo: async (arg0)"))
+      assert(jsStub.contains("makeBrowserUnknownHandler"))
+
+      val rustStub = Files.readString(generated.rustHostStubFile, StandardCharsets.UTF_8)
+      assert(rustStub.contains("pub struct HostDemoClockHost;"))
+      assert(rustStub.contains("impl HostDemoClock for HostDemoClockHost"))
+      assert(rustStub.contains("""todo!("TODO: implement host:demo/clock@0.1.0#echo for the Wasmtime host")"""))
+
+      val readme = Files.readString(generated.readmeFile, StandardCharsets.UTF_8)
+      assert(readme.contains("js/browser-host.stub.mjs"))
+      assert(readme.contains("rust/examples/host_stub.rs"))
 
       val userSource = workDir.resolve("Api.flix")
       Files.writeString(userSource,
@@ -210,6 +227,11 @@ class WasmEffectBindingsToolSuite extends AnyFunSuite {
       assert(rustBindings.contains("pub struct HostDemoUsersUser"))
       assert(rustBindings.contains("pub struct WitEffectHandler"))
       assert(rustBindings.contains("fn pair_users"))
+
+      val rustStub = Files.readString(generated.rustHostStubFile, StandardCharsets.UTF_8)
+      assert(rustStub.contains("pub struct HostDemoUsersHost;"))
+      assert(rustStub.contains("impl HostDemoUsers for HostDemoUsersHost"))
+      assert(rustStub.contains("HostDemoUsersUser"))
 
       val userSource = workDir.resolve("Api.flix")
       Files.writeString(userSource,
@@ -712,6 +734,16 @@ class WasmEffectBindingsToolSuite extends AnyFunSuite {
       assert(rustBindings.contains("pub trait HostDemoCounters"))
       assert(rustBindings.contains("fn counter_new"))
       assert(rustBindings.contains("fn counter_drop"))
+
+      val jsStub = Files.readString(generated.jsBrowserHostStubFile, StandardCharsets.UTF_8)
+      assert(jsStub.contains("hostDemoCounters"))
+      assert(jsStub.contains("counterDrop: async (arg0)"))
+
+      val rustStub = Files.readString(generated.rustHostStubFile, StandardCharsets.UTF_8)
+      assert(rustStub.contains("pub struct HostDemoCountersHost;"))
+      assert(rustStub.contains("impl HostDemoCounters for HostDemoCountersHost"))
+      assert(rustStub.contains("HostDemoCountersCounter"))
+      assert(rustStub.contains("pub fn make_handler("))
 
       val userSource = workDir.resolve("Api.flix")
       Files.writeString(userSource,

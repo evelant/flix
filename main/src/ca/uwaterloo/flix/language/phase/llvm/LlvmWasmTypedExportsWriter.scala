@@ -719,6 +719,10 @@ object LlvmWasmTypedExportsWriter {
     if (isByRefBoundaryType(tpe)) "flix_runtime_runtime_suspension_arg_as_ptr"
     else "flix_runtime_runtime_suspension_arg_as_i64"
 
+  private def runtimeTagFieldMethodName(tpe: AbiType): String =
+    if (tpe.isPointerLike) "flix_runtime_runtime_tag_field_ptr"
+    else "flix_runtime_runtime_tag_field_i64"
+
   private def boxExpr(tpe: AbiType, valueExpr: String): String = tpe match {
     case AbiType.Unit => "flix_runtime_runtime_box_i32(ctx, 0)"
     case t if ExportAbi.isAggregate(t) => s"${boxHelperName(t)}(ctx, $valueExpr)"
@@ -932,10 +936,10 @@ object LlvmWasmTypedExportsWriter {
       sb.append("  flix_runtime_runtime_own_value_t owned_current;\n")
       sb.append("  int current_is_owned = 0;\n")
       sb.append("  for (size_t i = 0; i < out.len; i++) {\n")
-      sb.append("    flix_runtime_runtime_own_value_t head = flix_runtime_runtime_tag_field(ctx, current, 0);\n")
+      sb.append(s"    flix_runtime_runtime_own_value_t head = ${runtimeTagFieldMethodName(elm)}(ctx, current, 0);\n")
       sb.append(indent(renderDecodeOwnedValue(elm, "head", "out.ptr[i]"), 4))
       sb.append("    flix_runtime_runtime_value_drop_own(head);\n")
-      sb.append("    flix_runtime_runtime_own_value_t tail = flix_runtime_runtime_tag_field(ctx, current, 1);\n")
+      sb.append(s"    flix_runtime_runtime_own_value_t tail = ${runtimeTagFieldMethodName(tpe)}(ctx, current, 1);\n")
       sb.append("    if (current_is_owned) {\n")
       sb.append("      flix_runtime_runtime_value_drop_own(owned_current);\n")
       sb.append("    }\n")
@@ -1007,7 +1011,7 @@ object LlvmWasmTypedExportsWriter {
       sb.append("      return out;\n")
       sb.append(s"    case ${portableOptionSomeTagId}u:\n")
       sb.append(s"      out.${adapterRecordFieldName("is_some")} = true;\n")
-      sb.append("      flix_runtime_runtime_own_value_t field0 = flix_runtime_runtime_tag_field(ctx, value, 0);\n")
+      sb.append(s"      flix_runtime_runtime_own_value_t field0 = ${runtimeTagFieldMethodName(elm)}(ctx, value, 0);\n")
       sb.append(renderDecodeOwnedValue(elm, "field0", s"out.${adapterRecordFieldName("val")}", 6))
       sb.append("      flix_runtime_runtime_value_drop_own(field0);\n")
       sb.append("      return out;\n")
@@ -1026,13 +1030,13 @@ object LlvmWasmTypedExportsWriter {
       sb.append("  switch (tag) {\n")
       sb.append(s"    case ${portableResultOkTagId}u:\n")
       sb.append(s"      out.${adapterRecordFieldName("is_ok")} = true;\n")
-      sb.append("      flix_runtime_runtime_own_value_t ok0 = flix_runtime_runtime_tag_field(ctx, value, 0);\n")
+      sb.append(s"      flix_runtime_runtime_own_value_t ok0 = ${runtimeTagFieldMethodName(ok)}(ctx, value, 0);\n")
       sb.append(renderDecodeOwnedValue(ok, "ok0", s"out.${adapterRecordFieldName("ok")}", 6))
       sb.append("      flix_runtime_runtime_value_drop_own(ok0);\n")
       sb.append("      return out;\n")
       sb.append(s"    case ${portableResultErrTagId}u:\n")
       sb.append(s"      out.${adapterRecordFieldName("is_ok")} = false;\n")
-      sb.append("      flix_runtime_runtime_own_value_t err0 = flix_runtime_runtime_tag_field(ctx, value, 0);\n")
+      sb.append(s"      flix_runtime_runtime_own_value_t err0 = ${runtimeTagFieldMethodName(err)}(ctx, value, 0);\n")
       sb.append(renderDecodeOwnedValue(err, "err0", s"out.${adapterRecordFieldName("err")}", 6))
       sb.append("      flix_runtime_runtime_value_drop_own(err0);\n")
       sb.append("      return out;\n")

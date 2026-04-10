@@ -4,7 +4,7 @@ import ca.uwaterloo.flix.language.ast.Symbol
 import ca.uwaterloo.flix.language.ast.shared.SecurityContext
 import ca.uwaterloo.flix.tools.pkg.github.GitHub
 import ca.uwaterloo.flix.util.Result.{Err, Ok}
-import ca.uwaterloo.flix.util.{CompilationTarget, EmitKind, Formatter, NativeLinkConfig, Result, RunnerKind}
+import ca.uwaterloo.flix.util.{BindingsConfig, CompilationTarget, EmitKind, Formatter, NativeBindingConfig, NativeCompileConfig, NativeLinkConfig, Result, RunnerKind, WasmBindingConfig}
 import org.scalatest.funsuite.AnyFunSuite
 
 import java.io.File
@@ -77,11 +77,29 @@ class TestManifestParser extends AnyFunSuite {
       |emit = ["staticlib", "sharedlib"]
       |link-libs = ["nativeffi_smoke", "m"]
       |link-search = ["native-lib", "/opt/homebrew/lib"]
+      |pkg-config = ["sqlite3", "libuv"]
       |frameworks = ["Security"]
       |framework-search = ["/Library/Frameworks"]
+      |link-flags = ["-pthread"]
+      |compile-sources = ["bridge/sqlite_bridge.c", "bridge/sqlite_extra.cpp"]
+      |compile-include = ["bridge/include", "contracts/native"]
+      |compile-cflags = ["-DSQLITE_THREADSAFE=1"]
       |
       |[target.wasm]
       |emit = ["component"]
+      |
+      |[[bindings.native]]
+      |header = "contracts/native/sqlite_bridge.h"
+      |module = "Sqlite"
+      |spec = "contracts/native/sqlite_bridge.bind.toml"
+      |include = ["contracts/native"]
+      |define = ["SQLITE_OMIT_LOAD_EXTENSION=1"]
+      |cflag = ["-DSQLITE_THREADSAFE=1"]
+      |
+      |[[bindings.wasm]]
+      |wit = "contracts/wit"
+      |world = "sqlite-demo"
+      |module = "Wit"
       |""".stripMargin
   }
 
@@ -230,6 +248,28 @@ class TestManifestParser extends AnyFunSuite {
     })
   }
 
+  test("Ok.dependencies.local-path") {
+    val toml =
+      """
+        |[package]
+        |name = "consumer"
+        |description = "A simple program"
+        |version = "0.1.0"
+        |flix = "0.68.0"
+        |authors = ["John Doe <john@example.com>"]
+        |
+        |[dependencies]
+        |"sqlite-bridge" = { path = "../sqlite-bridge", security = "unrestricted" }
+        |""".stripMargin
+
+    assertResult(expected = List(Dependency.PathDependency("sqlite-bridge", Paths.get("../sqlite-bridge"), SecurityContext.Unrestricted)))(actual = {
+      ManifestParser.parse(toml, null) match {
+        case Ok(manifest) => manifest.dependencies
+        case Err(e) => e.message(f)
+      }
+    })
+  }
+
   test("Ok.build.targets") {
     assertResult(expected = List(CompilationTarget.LlvmNative, CompilationTarget.LlvmWasm))(actual = {
       ManifestParser.parse(tomlWithTargets, null) match {
@@ -311,11 +351,49 @@ class TestManifestParser extends AnyFunSuite {
     assertResult(expected = NativeLinkConfig(
       libraries = List("nativeffi_smoke", "m"),
       searchPaths = List(Paths.get("native-lib"), Paths.get("/opt/homebrew/lib")),
+      pkgConfigPackages = List("sqlite3", "libuv"),
       frameworks = List("Security"),
-      frameworkSearchPaths = List(Paths.get("/Library/Frameworks"))
+      frameworkSearchPaths = List(Paths.get("/Library/Frameworks")),
+      flags = List("-pthread")
     ))(actual = {
       ManifestParser.parse(tomlWithTargets, null) match {
         case Ok(manifest) => manifest.targetConfigs.native.link
+        case Err(e) => e.message(f)
+      }
+    })
+  }
+
+  test("Ok.target.native.compile") {
+    assertResult(expected = NativeCompileConfig(
+      sources = List(Paths.get("bridge/sqlite_bridge.c"), Paths.get("bridge/sqlite_extra.cpp")),
+      includePaths = List(Paths.get("bridge/include"), Paths.get("contracts/native")),
+      cflags = List("-DSQLITE_THREADSAFE=1")
+    ))(actual = {
+      ManifestParser.parse(tomlWithTargets, null) match {
+        case Ok(manifest) => manifest.targetConfigs.native.compile
+        case Err(e) => e.message(f)
+      }
+    })
+  }
+
+  test("Ok.bindings") {
+    assertResult(expected = BindingsConfig(
+      native = List(NativeBindingConfig(
+        header = Paths.get("contracts/native/sqlite_bridge.h"),
+        module = "Sqlite",
+        spec = Some(Paths.get("contracts/native/sqlite_bridge.bind.toml")),
+        includePaths = List(Paths.get("contracts/native")),
+        defines = List("SQLITE_OMIT_LOAD_EXTENSION=1"),
+        cflags = List("-DSQLITE_THREADSAFE=1")
+      )),
+      wasm = List(WasmBindingConfig(
+        witDir = Paths.get("contracts/wit"),
+        world = "sqlite-demo",
+        module = "Wit"
+      ))
+    ))(actual = {
+      ManifestParser.parse(tomlWithTargets, null) match {
+        case Ok(manifest) => manifest.bindings
         case Err(e) => e.message(f)
       }
     })

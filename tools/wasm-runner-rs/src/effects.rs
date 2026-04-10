@@ -281,6 +281,21 @@ pub fn decode_arg<T>(
     decode_owned_value(store, rt, ctx, value, tpe)
 }
 
+fn tag_field_for_type<T>(
+    store: &mut Store<T>,
+    rt: &Guest,
+    ctx: Ctx,
+    value: Value,
+    idx: u32,
+    tpe: &AbiType,
+) -> Result<Value> {
+    if tpe.is_pointer_like() {
+        rt.call_tag_field_ptr(store, ctx, value, idx)
+    } else {
+        rt.call_tag_field_i64(store, ctx, value, idx)
+    }
+}
+
 pub fn box_leaf_value<T>(
     store: &mut Store<T>,
     rt: &Guest,
@@ -486,7 +501,7 @@ fn decode_value<T>(
             if tag_id == repr.none_tag_id {
                 Ok(ValueData::Option(None))
             } else if tag_id == repr.some_tag_id {
-                let field = rt.call_tag_field(&mut *store, ctx, value, 0)?;
+                let field = tag_field_for_type(store, rt, ctx, value, 0, element)?;
                 let decoded = decode_owned_value(store, rt, ctx, field, element)?;
                 Ok(ValueData::Option(Some(Box::new(decoded))))
             } else {
@@ -503,11 +518,11 @@ fn decode_value<T>(
             let repr = result_repr(repr.as_ref());
             let tag_id = rt.call_tag_id(&mut *store, ctx, value)?;
             if tag_id == repr.ok_tag_id {
-                let field = rt.call_tag_field(&mut *store, ctx, value, 0)?;
+                let field = tag_field_for_type(store, rt, ctx, value, 0, ok)?;
                 let decoded = decode_owned_value(store, rt, ctx, field, ok)?;
                 Ok(ValueData::Result(Ok(Box::new(decoded))))
             } else if tag_id == repr.err_tag_id {
-                let field = rt.call_tag_field(&mut *store, ctx, value, 0)?;
+                let field = tag_field_for_type(store, rt, ctx, value, 0, err)?;
                 let decoded = decode_owned_value(store, rt, ctx, field, err)?;
                 Ok(ValueData::Result(Err(Box::new(decoded))))
             } else {
@@ -537,8 +552,8 @@ fn decode_value<T>(
             let mut current = value;
             let mut owns_current = false;
             for _ in 0..len {
-                let head = rt.call_tag_field(&mut *store, ctx, current, 0)?;
-                let next = rt.call_tag_field(&mut *store, ctx, current, 1)?;
+                let head = tag_field_for_type(store, rt, ctx, current, 0, element)?;
+                let next = rt.call_tag_field_ptr(&mut *store, ctx, current, 1)?;
                 out.push(decode_owned_value(store, rt, ctx, head, element)?);
                 if owns_current {
                     drop_value(store, current);

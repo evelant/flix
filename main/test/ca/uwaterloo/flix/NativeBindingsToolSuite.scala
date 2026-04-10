@@ -35,6 +35,7 @@ class NativeBindingsToolSuite extends AnyFunSuite {
 
     try {
       val headerFile = workDir.resolve("nativeffi_smoke.h").normalize()
+      val specFile = workDir.resolve("nativeffi_smoke.bind.toml").normalize()
       val libDir = workDir.resolve("native-lib").normalize()
       Files.createDirectories(libDir)
       buildNativeSmokeLibrary(libDir, zigCmd)
@@ -51,40 +52,102 @@ class NativeBindingsToolSuite extends AnyFunSuite {
           |double flix_native_add_half(double x);
           |int32_t flix_native_strlen_plus(const char* s, int32_t bonus);
           |int64_t flix_native_sum_bytes(const uint8_t* bytes, int64_t len);
-          |// flix-bind: callback=cb callback-export=Api.bump
           |int32_t flix_native_apply_twice(int32_t x, flix_int_cb_t cb);
-          |// flix-bind: result=borrowed-string
           |const char* flix_native_borrowed_greeting(void);
-          |// flix-bind: result=owned-string free=free
           |char* flix_native_owned_greeting(void);
-          |// flix-bind: result=borrowed-bytes len=out_len
           |const uint8_t* flix_native_borrowed_bytes(size_t* out_len);
-          |// flix-bind: result=owned-bytes len=out_len free=free
           |uint8_t* flix_native_owned_bytes(size_t* out_len);
           |const char* flix_native_echo(const char* s);
-          |// flix-bind: result=owned-handle type=Counter effect=IO
           |flix_counter_t* flix_counter_create(int32_t seed);
-          |// flix-bind: result=borrowed-handle type=CounterRef
           |const flix_counter_t* flix_counter_global(void);
-          |// flix-bind: result=borrowed-handle type=CounterRef borrowed-from=counter
           |const flix_counter_t* flix_counter_view(flix_counter_t* counter);
-          |// flix-bind: effect=IO
           |void flix_counter_inc(flix_counter_t* counter, int32_t delta);
-          |// flix-bind: result=owned-handle type=Counter retain=counter effect=IO
           |flix_counter_t* flix_counter_clone(const flix_counter_t* counter);
-          |// flix-bind: result=status-owned-handle type=Counter out=out_counter ok=0 effect=IO
           |int32_t flix_counter_open(int32_t seed, flix_counter_t** out_counter);
-          |// flix-bind: result=borrowed-string borrowed-from=counter
           |const char* flix_counter_label(const flix_counter_t* counter);
           |int32_t flix_counter_value(const flix_counter_t* counter);
-          |// flix-bind: effect=IO destroy=counter
           |void flix_counter_dispose(flix_counter_t* counter);
+          |""".stripMargin)
+
+      FileOps.writeString(specFile,
+        """
+          |[[binding]]
+          |symbol = "flix_native_apply_twice"
+          |callback = "cb"
+          |callback-export = "Api.bump"
+          |
+          |[[binding]]
+          |symbol = "flix_native_borrowed_greeting"
+          |result = "borrowed-string"
+          |
+          |[[binding]]
+          |symbol = "flix_native_owned_greeting"
+          |result = "owned-string"
+          |free = "free"
+          |
+          |[[binding]]
+          |symbol = "flix_native_borrowed_bytes"
+          |result = "borrowed-bytes"
+          |len = "out_len"
+          |
+          |[[binding]]
+          |symbol = "flix_native_owned_bytes"
+          |result = "owned-bytes"
+          |len = "out_len"
+          |free = "free"
+          |
+          |[[binding]]
+          |symbol = "flix_counter_create"
+          |result = "owned-handle"
+          |type = "Counter"
+          |effect = "IO"
+          |
+          |[[binding]]
+          |symbol = "flix_counter_global"
+          |result = "borrowed-handle"
+          |type = "CounterRef"
+          |
+          |[[binding]]
+          |symbol = "flix_counter_view"
+          |result = "borrowed-handle"
+          |type = "CounterRef"
+          |borrowed-from = "counter"
+          |
+          |[[binding]]
+          |symbol = "flix_counter_inc"
+          |effect = "IO"
+          |
+          |[[binding]]
+          |symbol = "flix_counter_clone"
+          |result = "owned-handle"
+          |type = "Counter"
+          |retain = "counter"
+          |effect = "IO"
+          |
+          |[[binding]]
+          |symbol = "flix_counter_open"
+          |result = "status-owned-handle"
+          |type = "Counter"
+          |out = "out_counter"
+          |ok = "0"
+          |effect = "IO"
+          |
+          |[[binding]]
+          |symbol = "flix_counter_label"
+          |result = "borrowed-string"
+          |borrowed-from = "counter"
+          |
+          |[[binding]]
+          |symbol = "flix_counter_dispose"
+          |effect = "IO"
+          |destroy = "counter"
           |""".stripMargin)
 
       val generated = NativeBindingsTool.run(NativeBindingsTool.Config(
         header = headerFile,
         outDir = workDir.resolve("gen"),
         rootModule = "Native",
+        spec = Some(specFile),
       )) match {
         case ca.uwaterloo.flix.util.Result.Ok(value) => value
         case ca.uwaterloo.flix.util.Result.Err(msg) => fail(msg)

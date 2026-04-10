@@ -17,14 +17,18 @@
 package ca.uwaterloo.flix.tools
 
 import ca.uwaterloo.flix.util.{FileOps, Result, ZigToolchain}
+import org.tomlj.{Toml, TomlTable}
 
+import java.io.IOException
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 import scala.collection.mutable
+import scala.jdk.CollectionConverters.{ListHasAsScala, SetHasAsScala}
 
 /**
  * Generates Flix `extern native` declarations from a curated C header by using
- * `zig translate-c` as the parsing/normalization substrate.
+ * `zig translate-c` as the parsing/normalization substrate plus an optional
+ * sidecar TOML spec for ownership/effect/callback semantics.
  *
  * This generator slice is intentionally conservative:
  *   - curated headers only,
@@ -32,7 +36,7 @@ import scala.collection.mutable
  *   - direct scalar/unit C ABI signatures,
  *   - shim-backed borrowed `const char*` and byte-slice inputs,
  *   - explicit synchronous export-backed callback trampolines over scalar/unit callback signatures,
- *   - explicit borrowed/owned string, byte, and opaque-handle result annotations,
+ *   - explicit borrowed/owned string, byte, and opaque-handle result annotations from a sidecar spec,
  *   - anything richer is reported as skipped rather than guessed.
  */
 object NativeBindingsTool {
@@ -40,6 +44,7 @@ object NativeBindingsTool {
   case class Config(header: Path,
                     outDir: Path,
                     rootModule: String = "Native",
+                    spec: Option[Path] = None,
                     includePaths: List[Path] = Nil,
                     defines: List[String] = Nil,
                     cflags: List[String] = Nil)
@@ -257,9 +262,11 @@ object NativeBindingsTool {
   def run(config: Config): Result[Generated, String] = {
     validateConfig(config).flatMap { _ =>
       val headerSource = Files.readString(config.header.toAbsolutePath.normalize(), StandardCharsets.UTF_8)
-      val sourceDecls = parseSourceDecls(headerSource)
-      val translated = runTranslateC(config)
-      translated.map { zigSource =>
+      val headerDecls = parseHeaderDecls(headerSource)
+      parseBindingSpec(config.spec, headerDecls.keySet).flatMap { specAnnotations =>
+        val sourceDecls = mergeSourceDecls(headerDecls, specAnnotations)
+        val translated = runTranslateC(config)
+        translated.map { zigSource =>
         val decls = parseExternDecls(zigSource)
         val callbackTypes = parseCallbackTypes(zigSource)
         val lowered = lowerDecls(decls, sourceDecls, callbackTypes)
@@ -287,6 +294,7 @@ object NativeBindingsTool {
           generatedDecls = lowered._1.length,
           skipped = lowered._2,
         )
+        }
       }
     }
   }
@@ -295,6 +303,11 @@ object NativeBindingsTool {
     val header = config.header.toAbsolutePath.normalize()
     if (!Files.isRegularFile(header)) {
       return Result.Err(s"Header file does not exist: $header")
+    }
+    config.spec.map(_.toAbsolutePath.normalize()).foreach { spec =>
+      if (!Files.isRegularFile(spec)) {
+        return Result.Err(s"Binding spec file does not exist: $spec")
+      }
     }
     if (!config.rootModule.matches("[A-Z][A-Za-z0-9_]*")) {
       return Result.Err(s"Invalid root module '${config.rootModule}'. Expected an uppercase Flix identifier.")
@@ -1055,27 +1068,10 @@ object NativeBindingsTool {
     else trimmed.split(",").toList.map(_.trim).filter(_.nonEmpty)
   }
 
-  private def parseSourceDecls(headerSource: String): Map[String, SourceDecl] = {
+  private def parseHeaderDecls(headerSource: String): Map[String, SourceDecl] = {
     val result = mutable.Map.empty[String, SourceDecl]
     val currentDecl = new StringBuilder
     var collectingDecl = false
-    var pendingResultAnnotation: Option[ResultAnnotation] = None
-    var pendingCallback: Option[CallbackAnnotation] = None
-    var pendingBorrowedFromParam: Option[String] = None
-    var pendingDestroyParam: Option[String] = None
-    var pendingRetainParam: Option[String] = None
-    var pendingEffect: Option[String] = None
-    var pendingAnnotationError: Option[String] = None
-
-    def resetPending(): Unit = {
-      pendingResultAnnotation = None
-      pendingCallback = None
-      pendingBorrowedFromParam = None
-      pendingDestroyParam = None
-      pendingRetainParam = None
-      pendingEffect = None
-      pendingAnnotationError = None
-    }
 
     def flushDecl(): Unit = {
       val decl = currentDecl.toString()
@@ -1086,10 +1082,9 @@ object NativeBindingsTool {
         case Some(m) =>
           val symbol = m.group(1)
           val rawParams = m.group(2)
-          result(symbol) = SourceDecl(splitSourceParams(rawParams), pendingResultAnnotation, pendingCallback, pendingBorrowedFromParam, pendingDestroyParam, pendingRetainParam, pendingEffect, pendingAnnotationError)
+          result(symbol) = SourceDecl(splitSourceParams(rawParams), None, None, None, None, None, None, None)
         case _ => // ignore non-function declarations in curated headers
       }
-      resetPending()
     }
 
     headerSource.linesIterator.foreach { line =>
@@ -1097,50 +1092,107 @@ object NativeBindingsTool {
       if (collectingDecl) {
         currentDecl.append(line).append('\n')
         if (trimmed.contains(";")) flushDecl()
-      } else if (trimmed.startsWith("// flix-bind:")) {
-        parseAnnotation(trimmed.stripPrefix("// flix-bind:").trim) match {
-          case Result.Ok(ann) =>
-            pendingResultAnnotation = ann.resultAnnotation
-            pendingCallback = ann.callback
-            pendingBorrowedFromParam = ann.borrowedFromParam
-            pendingDestroyParam = ann.destroyParam
-            pendingRetainParam = ann.retainParam
-            pendingEffect = ann.effect
-            pendingAnnotationError = None
-          case Result.Err(msg) =>
-            pendingResultAnnotation = None
-            pendingCallback = None
-            pendingBorrowedFromParam = None
-            pendingDestroyParam = None
-            pendingRetainParam = None
-            pendingEffect = None
-            pendingAnnotationError = Some(msg)
-        }
       } else if (trimmed.isEmpty || trimmed.startsWith("//")) {
         ()
-      } else if (trimmed.startsWith("#")) {
-        resetPending()
       } else if (trimmed.contains("(")) {
         currentDecl.append(line).append('\n')
         if (trimmed.contains(";")) flushDecl() else collectingDecl = true
-      } else {
-        resetPending()
       }
     }
 
     result.toMap
   }
 
-  private def parseAnnotation(body: String): Result[SourceAnnotation, String] = {
-    val tokens = body.split("[,\\s]+").toList.map(_.trim).filter(_.nonEmpty)
-    Result.traverse(tokens) { token =>
-      token.split("=", 2).toList match {
-        case key :: value :: Nil => Result.Ok((key, value))
-        case _ => Result.Err(s"invalid `flix-bind` directive token '$token'")
+  private def parseBindingSpec(spec: Option[Path], headerSymbols: Set[String]): Result[Map[String, SourceAnnotation], String] = spec match {
+    case None => Result.Ok(Map.empty)
+    case Some(specPath0) =>
+      val specPath = specPath0.toAbsolutePath.normalize()
+      val parser =
+        try Toml.parse(specPath)
+        catch {
+          case e: IOException => return Result.Err(s"Failed to read binding spec '$specPath': ${e.getMessage}")
+        }
+
+      if (!parser.errors().isEmpty) {
+        val msg = parser.errors().asScala.map(_.toString).mkString("; ")
+        return Result.Err(s"Failed to parse binding spec '$specPath': $msg")
       }
-    }.flatMap { fields =>
-      val map = fields.toMap
-      val resultAnn = map.get("result") match {
+
+      val bindings = Option(parser.getArray("binding")) match {
+        case Some(array) => List.tabulate(array.size())(array.get)
+        case None => Nil
+      }
+      Result.traverse(bindings.zipWithIndex) {
+        case (rawTable, idx) =>
+          rawTable match {
+            case table: TomlTable => parseBindingSpecTable(table, idx, specPath)
+            case _ => Result.Err(s"Binding spec '$specPath' entry #${idx + 1} must be a TOML table")
+          }
+      }.flatMap { entries =>
+        val duplicates = entries.groupBy(_._1).collectFirst { case (symbol, xs) if xs.size > 1 => symbol }
+        duplicates match {
+          case Some(symbol) => Result.Err(s"Binding spec '$specPath' declares symbol '$symbol' more than once")
+          case None =>
+            val unknown = entries.collectFirst { case (symbol, _) if !headerSymbols.contains(symbol) => symbol }
+            unknown match {
+              case Some(symbol) => Result.Err(s"Binding spec '$specPath' declares symbol '$symbol' which does not exist in the curated header")
+              case None => Result.Ok(entries.toMap)
+            }
+        }
+      }
+  }
+
+  private def parseBindingSpecTable(table: TomlTable, idx: Int, specPath: Path): Result[(String, SourceAnnotation), String] = {
+    val allowedKeys = Set("symbol", "result", "free", "len", "type", "out", "ok", "callback", "callback-export", "borrowed-from", "destroy", "retain", "effect")
+    val unknownKeys = table.keySet().asScala.toSet.diff(allowedKeys)
+    if (unknownKeys.nonEmpty) {
+      return Result.Err(s"Binding spec '$specPath' entry #${idx + 1} contains unsupported keys: ${unknownKeys.toList.sorted.mkString(", ")}")
+    }
+
+    for {
+      symbol <- getRequiredBindingSpecString(table, "symbol", specPath, idx)
+      fieldPairs <- Result.traverse(allowedKeys.toList.sorted.filterNot(_ == "symbol")) { key =>
+        getOptionalBindingSpecString(table, key, specPath, idx).map(_.map(value => key -> value))
+      }
+      annotation <- parseSourceAnnotationFields(fieldPairs.flatten.toMap)
+    } yield symbol -> annotation
+  }
+
+  private def getRequiredBindingSpecString(table: TomlTable, key: String, specPath: Path, idx: Int): Result[String, String] =
+    getOptionalBindingSpecString(table, key, specPath, idx).flatMap {
+      case Some(value) => Result.Ok(value)
+      case None => Result.Err(s"Binding spec '$specPath' entry #${idx + 1} is missing required key '$key'")
+    }
+
+  private def getOptionalBindingSpecString(table: TomlTable, key: String, specPath: Path, idx: Int): Result[Option[String], String] =
+    try {
+      Result.Ok(Option(table.getString(key)))
+    } catch {
+      case _: IllegalArgumentException => Result.Ok(None)
+      case e: Exception => Result.Err(s"Binding spec '$specPath' entry #${idx + 1} key '$key' must be a string: ${e.getMessage}")
+    }
+
+  private def mergeSourceDecls(headerDecls: Map[String, SourceDecl], annotations: Map[String, SourceAnnotation]): Map[String, SourceDecl] =
+    headerDecls.map {
+      case (symbol, decl) =>
+        val merged = annotations.get(symbol) match {
+          case Some(ann) =>
+            decl.copy(
+              resultAnnotation = ann.resultAnnotation,
+              callback = ann.callback,
+              borrowedFromParam = ann.borrowedFromParam,
+              destroyParam = ann.destroyParam,
+              retainParam = ann.retainParam,
+              effect = ann.effect,
+              annotationError = None,
+            )
+          case None => decl
+        }
+        symbol -> merged
+    }
+
+  private def parseSourceAnnotationFields(map: Map[String, String]): Result[SourceAnnotation, String] = {
+    val resultAnn = map.get("result") match {
         case Some("borrowed-string") =>
           Result.Ok(Some(BorrowedStringResultAnnotation))
         case Some("owned-string") =>
@@ -1188,14 +1240,14 @@ object NativeBindingsTool {
               Result.Err("`result=status-owned-handle` requires `type=<FlixHandleType>` and `out=<param>`")
           }
         case Some(other) =>
-          Result.Err(s"unsupported `flix-bind` result annotation '$other'")
+          Result.Err(s"unsupported binding spec result annotation '$other'")
         case None =>
           Result.Ok(None)
       }
 
       val effect = map.get("effect") match {
         case Some("IO") => Result.Ok(Some("IO"))
-        case Some(other) => Result.Err(s"unsupported `flix-bind` effect annotation '$other'")
+        case Some(other) => Result.Err(s"unsupported binding spec effect annotation '$other'")
         case None => Result.Ok(None)
       }
 
@@ -1234,9 +1286,8 @@ object NativeBindingsTool {
         destroyAnnotation <- destroyParam
         retainAnnotation <- retainParam
         effectRow <- effect
-        _ <- if (resultAnnotation.nonEmpty || callbackAnnotation.nonEmpty || borrowedFromAnnotation.nonEmpty || destroyAnnotation.nonEmpty || retainAnnotation.nonEmpty || effectRow.nonEmpty) Result.Ok(()) else Result.Err("`flix-bind` directive requires at least one supported field such as `result=<...>`, `callback=<...>`, `borrowed-from=<...>`, `destroy=<...>`, `retain=<...>`, or `effect=IO`")
+        _ <- if (resultAnnotation.nonEmpty || callbackAnnotation.nonEmpty || borrowedFromAnnotation.nonEmpty || destroyAnnotation.nonEmpty || retainAnnotation.nonEmpty || effectRow.nonEmpty) Result.Ok(()) else Result.Err("binding spec entry requires at least one supported field such as `result`, `callback`, `borrowed-from`, `destroy`, `retain`, or `effect`")
       } yield SourceAnnotation(resultAnnotation, callbackAnnotation, borrowedFromAnnotation, destroyAnnotation, retainAnnotation, effectRow)
-    }
   }
 
   private def classifySourceParam(raw: String): SourceParamShape = {
@@ -1307,10 +1358,19 @@ object NativeBindingsTool {
     candidate
   }
 
+  private def renderInvocation(config: Config): String = {
+    val parts = mutable.ListBuffer("flix", "bind", "native", "--header", config.header.toAbsolutePath.normalize().toString, "--out", config.outDir.toAbsolutePath.normalize().toString)
+    config.spec.foreach(path => parts ++= List("--spec", path.toAbsolutePath.normalize().toString))
+    if (config.rootModule != "Native") {
+      parts ++= List("--native-module", config.rootModule)
+    }
+    parts.mkString(" ")
+  }
+
   private def renderFlix(config: Config, bindings: List[FlixBinding], skipped: List[Skipped], borrowHelpers: List[HandleBorrowHelper], closeHelpers: List[ResourceCloseHelper], retainHelpers: List[ResourceRetainHelper], ownerHelpers: List[BorrowedOwnerHelper]): String = {
     val sb = new StringBuilder
-    sb.append(s"/// Generated by `flix bind native --header ${config.header.toAbsolutePath.normalize()} --out ${config.outDir.toAbsolutePath.normalize()}`.\n")
-    sb.append("/// This generator emits direct scalar/unit imports plus shim-backed String/Bytes adapters, synchronous export-backed callback trampolines, and explicitly annotated borrowed/owned opaque handle wrappers from a curated C header.\n")
+    sb.append(s"/// Generated by `${renderInvocation(config)}`.\n")
+    sb.append("/// This generator emits direct scalar/unit imports plus shim-backed String/Bytes adapters, synchronous export-backed callback trampolines, and explicitly annotated borrowed/owned opaque handle wrappers from a curated C header plus sidecar spec.\n")
     if (skipped.nonEmpty) {
       sb.append("/// Skipped declarations:\n")
       skipped.foreach { skip =>
@@ -1394,7 +1454,7 @@ object NativeBindingsTool {
   private def renderShim(config: Config, shims: List[NativeShim], shimHeaderFile: Path): String = {
     val sb = new StringBuilder
     sb.append("/*\n")
-    sb.append(s" * Generated by `flix bind native --header ${config.header.toAbsolutePath.normalize()} --out ${config.outDir.toAbsolutePath.normalize()}`.\n")
+    sb.append(s" * Generated by `${renderInvocation(config)}`.\n")
     sb.append(" * This shim adapts curated C signatures to the Flix native bridge ABI.\n")
     sb.append(" */\n\n")
     sb.append("#include <stdbool.h>\n")

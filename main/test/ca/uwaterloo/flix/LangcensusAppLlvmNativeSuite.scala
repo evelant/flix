@@ -79,7 +79,10 @@ class LangcensusAppLlvmNativeSuite extends AnyFunSuite {
       case ca.uwaterloo.flix.util.Result.Err(e) => fail(s"Bootstrap failed for langcensus app: $e")
     }
 
-    bootstrap.reconfigureFlix(flix)
+    bootstrap.reconfigureFlix(flix) match {
+      case ca.uwaterloo.flix.util.Result.Ok(()) => ()
+      case ca.uwaterloo.flix.util.Result.Err(e) => fail(s"Reconfigure failed for langcensus app: ${e.message(formatter)}")
+    }
 
     val (optRoot, errors) = flix.check()
     if (errors.nonEmpty) {

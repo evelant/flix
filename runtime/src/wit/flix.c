@@ -523,6 +523,7 @@ void __wasm_export_exports_flix_runtime_runtime_unbox_bytes_post_return(uint8_t 
 
 
 
+
 // Canonical ABI intrinsics
 
 __attribute__((__weak__, __export_name__("cabi_realloc")))
@@ -2367,9 +2368,15 @@ int64_t __wasm_export_exports_flix_runtime_runtime_tag_id(int32_t arg, int32_t a
   return (int64_t) (ret);
 }
 
-__attribute__((__export_name__("flix:runtime/runtime@0.1.0#tag-field")))
-int32_t __wasm_export_exports_flix_runtime_runtime_tag_field(int32_t arg, int32_t arg0, int32_t arg1) {
-  exports_flix_runtime_runtime_own_value_t ret = exports_flix_runtime_runtime_tag_field(((exports_flix_runtime_runtime_ctx_t*) arg), ((exports_flix_runtime_runtime_value_t*) arg0), (uint32_t) (arg1));
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#tag-field-i64")))
+int32_t __wasm_export_exports_flix_runtime_runtime_tag_field_i64(int32_t arg, int32_t arg0, int32_t arg1) {
+  exports_flix_runtime_runtime_own_value_t ret = exports_flix_runtime_runtime_tag_field_i64(((exports_flix_runtime_runtime_ctx_t*) arg), ((exports_flix_runtime_runtime_value_t*) arg0), (uint32_t) (arg1));
+  return (ret).__handle;
+}
+
+__attribute__((__export_name__("flix:runtime/runtime@0.1.0#tag-field-ptr")))
+int32_t __wasm_export_exports_flix_runtime_runtime_tag_field_ptr(int32_t arg, int32_t arg0, int32_t arg1) {
+  exports_flix_runtime_runtime_own_value_t ret = exports_flix_runtime_runtime_tag_field_ptr(((exports_flix_runtime_runtime_ctx_t*) arg), ((exports_flix_runtime_runtime_value_t*) arg0), (uint32_t) (arg1));
   return (ret).__handle;
 }
 

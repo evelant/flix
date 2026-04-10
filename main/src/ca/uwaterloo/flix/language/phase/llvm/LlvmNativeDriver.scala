@@ -18,7 +18,7 @@ package ca.uwaterloo.flix.language.phase.llvm
 
 import ca.uwaterloo.flix.api.Flix
 import ca.uwaterloo.flix.language.ast.SourceLocation
-import ca.uwaterloo.flix.util.{ArtifactNames, Build, InternalCompilerException, NativeLinkConfig, ZigToolchain}
+import ca.uwaterloo.flix.util.{ArtifactNames, Build, InternalCompilerException, NativeCompileConfig, NativeLinkConfig, PkgConfig, ZigToolchain}
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{FileSystem, FileSystemNotFoundException, FileSystems, Files, Path, Paths, StandardCopyOption}
@@ -65,12 +65,14 @@ object LlvmNativeDriver {
     }
 
     val runtimeZig = resolveRuntimeZig(outDir)
+    val resolvedNativeConfigs = resolveNativeConfigs(outDir)
     val runtimeObjs = compileRuntime(runtimeZig, outDir, optFlag)
     val moduleObj = compileModule(modulePath, outDir, optFlag)
+    val extraObjs = compileNativeSources(resolvedNativeConfigs.compile, outDir, optFlag)
 
     val cmd = linkerCommand(optFlag) ::: List(
       moduleObj.toString,
-    ) ::: runtimeObjs.map(_.toString) ::: nativeLinkFlags(flix.options.nativeLinkConfig) ::: List(
+    ) ::: runtimeObjs.map(_.toString) ::: extraObjs.map(_.toString) ::: nativeLinkFlags(resolvedNativeConfigs.link) ::: List(
       "-o",
       exePath.toString
     )
@@ -101,8 +103,10 @@ object LlvmNativeDriver {
     }
 
     val runtimeZig = resolveRuntimeZig(outDir)
+    val resolvedNativeConfigs = resolveNativeConfigs(outDir)
     val runtimeObjs = compileRuntime(runtimeZig, outDir, optFlag)
     val moduleObj = compileModule(modulePath, outDir, optFlag)
+    val extraObjs = compileNativeSources(resolvedNativeConfigs.compile, outDir, optFlag)
 
     val libPath = staticLibraryPath(flix.options.outputPath, flix.options.artifactName)
     val arCmd = zigCommand ::: List(
@@ -110,7 +114,7 @@ object LlvmNativeDriver {
       "rcs",
       libPath.toString,
       moduleObj.toString,
-    ) ::: runtimeObjs.map(_.toString)
+    ) ::: runtimeObjs.map(_.toString) ::: extraObjs.map(_.toString)
     val (arExit, arOutput) = exec(arCmd, outDir)
     if (arExit != 0) {
       throw InternalCompilerException(
@@ -137,8 +141,10 @@ object LlvmNativeDriver {
     }
 
     val runtimeZig = resolveRuntimeZig(outDir)
+    val resolvedNativeConfigs = resolveNativeConfigs(outDir)
     val runtimeObjs = compileRuntime(runtimeZig, outDir, optFlag)
     val moduleObj = compileModule(modulePath, outDir, optFlag)
+    val extraObjs = compileNativeSources(resolvedNativeConfigs.compile, outDir, optFlag)
 
     val libPath = sharedLibraryPath(flix.options.outputPath, flix.options.artifactName)
 
@@ -147,7 +153,7 @@ object LlvmNativeDriver {
 
     val linkCmd = linkerCommand(optFlag, Some(linkModeFlag)) ::: windowsExportFlags ::: List(
       moduleObj.toString,
-    ) ::: runtimeObjs.map(_.toString) ::: nativeLinkFlags(flix.options.nativeLinkConfig) ::: List(
+    ) ::: runtimeObjs.map(_.toString) ::: extraObjs.map(_.toString) ::: nativeLinkFlags(resolvedNativeConfigs.link) ::: List(
       "-o",
       libPath.toString
     )
@@ -280,6 +286,62 @@ object LlvmNativeDriver {
     moduleObj
   }
 
+  private def compileNativeSources(config: NativeCompileConfig, outDir: Path, optFlag: String): List[Path] =
+    config.sources.zipWithIndex.map {
+      case (source, index) =>
+        val normalized = source.toAbsolutePath.normalize()
+        val sourceName = normalized.getFileName.toString
+        val objectName = s"user_${index}_${sourceName.replaceAll("[^A-Za-z0-9._-]", "_")}.o"
+        val objectPath = outDir.resolve(objectName)
+        val compiler = nativeSourceCompiler(normalized)
+        val includeFlags = config.includePaths.map(_.toAbsolutePath.normalize()).map(path => s"-I${path.toString}")
+        val cmd =
+          zigCommand ::: List(compiler, "-c") :::
+            zigSafetyFlags :::
+            picFlags :::
+            includeFlags :::
+            config.cflags :::
+            List(optFlag, normalized.toString, "-o", objectPath.toString)
+
+        val (exit, output) = exec(cmd, outDir)
+        if (exit != 0) {
+          throw InternalCompilerException(
+            s"LLVM-native toolchain failed while compiling bridge source '${normalized}' (exit $exit):\n${cmd.mkString(" ")}\n\n$output",
+            SourceLocation.Unknown
+          )
+        }
+
+        objectPath
+    }
+
+  private def resolveNativeConfigs(cwd: Path)(implicit flix: Flix): PkgConfig.Resolution = {
+    val linkConfig = flix.options.nativeLinkConfig
+    PkgConfig.resolve(linkConfig.pkgConfigPackages, cwd) match {
+      case ca.uwaterloo.flix.util.Result.Ok(resolved) =>
+        PkgConfig.Resolution(
+          compile = flix.options.nativeCompileConfig ++ resolved.compile,
+          link = linkConfig.copy(pkgConfigPackages = Nil) ++ resolved.link,
+        )
+      case ca.uwaterloo.flix.util.Result.Err(msg) =>
+        throw InternalCompilerException(
+          s"LLVM-native toolchain failed to resolve pkg-config packages ${linkConfig.pkgConfigPackages.mkString(", ")}:\n$msg",
+          SourceLocation.Unknown
+        )
+    }
+  }
+
+  private def nativeSourceCompiler(source: Path): String = {
+    val fileName = source.getFileName.toString.toLowerCase
+    if (fileName.endsWith(".c")) "cc"
+    else if (fileName.endsWith(".cc") || fileName.endsWith(".cpp") || fileName.endsWith(".cxx")) "c++"
+    else {
+      throw InternalCompilerException(
+        s"Unsupported native bridge source '${source}'. Expected a .c, .cc, .cpp, or .cxx file.",
+        SourceLocation.Unknown
+      )
+    }
+  }
+
   private def exec(cmd: List[String], cwd: Path): (Int, String) = {
     val pb = new ProcessBuilder(cmd.asJava)
     pb.redirectErrorStream(true)
@@ -318,10 +380,31 @@ object LlvmNativeDriver {
 
   private def linkerCommand(optFlag: String, linkModeFlag: Option[String] = None): List[String] = {
     val base =
-      if (isMac) List("cc")
+      if (isMac) List("cc") ::: macSysrootFlags
       else zigCommand ::: List("cc", "-Wno-override-module") ::: zigSafetyFlags ::: List(optFlag)
 
     base ::: linkModeFlag.toList
+  }
+
+  private lazy val macSysrootFlags: List[String] = {
+    if (!isMac) {
+      Nil
+    } else {
+      resolveMacSdkRoot().map(path => List("-isysroot", path.toString)).getOrElse(Nil)
+    }
+  }
+
+  private def resolveMacSdkRoot(): Option[Path] = {
+    try {
+      val pb = new ProcessBuilder("xcrun", "--sdk", "macosx", "--show-sdk-path")
+      pb.redirectErrorStream(true)
+      val process = pb.start()
+      val output = new String(process.getInputStream.readAllBytes(), StandardCharsets.UTF_8).trim
+      val exit = process.waitFor()
+      if (exit == 0 && output.nonEmpty) Some(Paths.get(output).toAbsolutePath.normalize()) else None
+    } catch {
+      case _: Throwable => None
+    }
   }
 
   private def nativeLinkFlags(config: NativeLinkConfig): List[String] = {
@@ -339,7 +422,7 @@ object LlvmNativeDriver {
       if (isMac) config.frameworkSearchPaths.map(path => s"-F${path.toAbsolutePath.normalize()}")
       else Nil
     val libs = config.libraries.map(lib => s"-l$lib")
-    searchPaths ::: frameworkSearchPaths ::: frameworks ::: libs
+    searchPaths ::: frameworkSearchPaths ::: config.flags ::: frameworks ::: libs
   }
 
 }

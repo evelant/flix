@@ -73,6 +73,12 @@ function sameTagId(lhs, rhs) {
   return normalizeTagId(lhs) === normalizeTagId(rhs);
 }
 
+function tagField(runtime, ctx, valueHandle, idx, tpe) {
+  return isPointerLikeAbiType(tpe)
+    ? runtime.tagFieldPtr(ctx, valueHandle, idx)
+    : runtime.tagFieldI64(ctx, valueHandle, idx);
+}
+
 function flattenHandlers(handlers) {
   const out = new Map();
   if (!handlers || typeof handlers !== "object") return out;
@@ -183,7 +189,7 @@ function decodeValue(runtime, ctx, valueHandle, tpe) {
       if (!sameTagId(tagId, repr.someTagId)) {
         throw new Error(`bad async effect option tag id: expected ${repr.noneTagId}/${repr.someTagId}, got ${tagId}`);
       }
-      const field = runtime.tagField(ctx, valueHandle, 0);
+      const field = tagField(runtime, ctx, valueHandle, 0, tpe.element);
       try {
         return decodeValue(runtime, ctx, field, tpe.element);
       } finally {
@@ -195,7 +201,7 @@ function decodeValue(runtime, ctx, valueHandle, tpe) {
       const repr = resultRepr(tpe);
       const tagId = runtime.tagId(ctx, valueHandle);
       if (sameTagId(tagId, repr.okTagId)) {
-        const field = runtime.tagField(ctx, valueHandle, 0);
+        const field = tagField(runtime, ctx, valueHandle, 0, tpe.ok);
         try {
           return { tag: "ok", val: decodeValue(runtime, ctx, field, tpe.ok) };
         } finally {
@@ -203,7 +209,7 @@ function decodeValue(runtime, ctx, valueHandle, tpe) {
         }
       }
       if (sameTagId(tagId, repr.errTagId)) {
-        const field = runtime.tagField(ctx, valueHandle, 0);
+        const field = tagField(runtime, ctx, valueHandle, 0, tpe.err);
         try {
           return { tag: "err", val: decodeValue(runtime, ctx, field, tpe.err) };
         } finally {
@@ -234,8 +240,8 @@ function decodeValue(runtime, ctx, valueHandle, tpe) {
       let current = valueHandle;
       let ownsCurrent = false;
       for (let i = 0; i < len; i++) {
-        const head = runtime.tagField(ctx, current, 0);
-        const next = runtime.tagField(ctx, current, 1);
+        const head = tagField(runtime, ctx, current, 0, tpe.element);
+        const next = runtime.tagFieldPtr(ctx, current, 1);
         try {
           out[i] = decodeValue(runtime, ctx, head, tpe.element);
         } finally {

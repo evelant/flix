@@ -401,7 +401,8 @@ object LlvmBackend {
         Decl.DeclareFun(Type.I64, "flix_export_tuple_field", List(Type.Ptr, Type.I64, Type.I32)),
         Decl.DeclareFun(Type.I64, "flix_export_tag_new", List(Type.Ptr, Type.I64, Type.Ptr, Type.I32)),
         Decl.DeclareFun(Type.I64, "flix_export_tag_id", List(Type.Ptr, Type.I64)),
-        Decl.DeclareFun(Type.I64, "flix_export_tag_field", List(Type.Ptr, Type.I64, Type.I32)),
+        Decl.DeclareFun(Type.I64, "flix_export_tag_field_i64", List(Type.Ptr, Type.I64, Type.I32)),
+        Decl.DeclareFun(Type.I64, "flix_export_tag_field_ptr", List(Type.Ptr, Type.I64, Type.I32)),
         Decl.DeclareFun(Type.I64, "flix_export_list_length", List(Type.Ptr, Type.I64, Type.I64, Type.I64)),
         Decl.DeclareFun(Type.I64, "flix_export_array_new", List(Type.Ptr, Type.I32, Type.Ptr, Type.I32)),
         Decl.DeclareFun(Type.I64, "flix_export_array_length", List(Type.Ptr, Type.I64)),
@@ -869,6 +870,44 @@ object LlvmBackend {
       }
     }
 
+    private def portableEnumCaseSym(enumName: String, caseName: String): Symbol.CaseSym =
+      root.enums.values
+        .find(enm => enm.sym.text == enumName && enm.sym.namespace.isEmpty)
+        .flatMap(enm => enm.cases.keys.find(_.name == caseName))
+        .getOrElse {
+          throw new IllegalStateException(s"Missing portable $enumName.$caseName case symbol.")
+        }
+
+    private def portableEnumSym(enumName: String): Symbol.EnumSym =
+      root.enums.values
+        .find(enm => enm.sym.text == enumName && enm.sym.namespace.isEmpty)
+        .map(_.sym)
+        .getOrElse {
+          throw new IllegalStateException(s"Missing portable $enumName enum symbol.")
+        }
+
+    private def portableImportLoweredType(abiTpe: ExportAbi.AbiType): SimpleType = abiTpe match {
+      case ExportAbi.AbiType.Unit => SimpleType.Unit
+      case ExportAbi.AbiType.Bool => SimpleType.Bool
+      case ExportAbi.AbiType.Int8 => SimpleType.Int8
+      case ExportAbi.AbiType.Int16 => SimpleType.Int16
+      case ExportAbi.AbiType.Int32 => SimpleType.Int32
+      case ExportAbi.AbiType.Int64 => SimpleType.Int64
+      case ExportAbi.AbiType.Float32 => SimpleType.Float32
+      case ExportAbi.AbiType.Float64 => SimpleType.Float64
+      case ExportAbi.AbiType.String => SimpleType.String
+      case ExportAbi.AbiType.Bytes => SimpleType.mkArray(SimpleType.Int8)
+      case ExportAbi.AbiType.List(_) => SimpleType.mkEnum(portableEnumSym("List"), Nil)
+      case ExportAbi.AbiType.Array(elmTpe) => SimpleType.mkArray(portableImportLoweredType(elmTpe))
+      case ExportAbi.AbiType.Tuple(elmTpes) => SimpleType.mkTuple(elmTpes.map(portableImportLoweredType))
+      case ExportAbi.AbiType.Option(_) => SimpleType.mkEnum(portableEnumSym("Option"), Nil)
+      case ExportAbi.AbiType.Result(_, _) => SimpleType.mkEnum(portableEnumSym("Result"), Nil)
+      case ExportAbi.AbiType.Record(fields) =>
+        fields.reverse.foldLeft[SimpleType](SimpleType.RecordEmpty) {
+          case (rest, (label, fieldTpe)) => SimpleType.RecordExtend(label, portableImportLoweredType(fieldTpe), rest)
+        }
+    }
+
     private def computeCancelledKindId(): Long = {
       // Cancellation is represented as `Exn` with payload type `Cancelled` (stdlib).
       // We compute a stable kind id from the payload type.
@@ -1222,7 +1261,22 @@ object LlvmBackend {
         val caseBlock = fb.newBlock(caseLabel)
         fb.setCurrent(caseBlock)
 
-        val expected = e.defn.cparams.length + e.defn.fparams.length
+        val sig = e.defn.exportedSignature.getOrElse {
+          throw new IllegalStateException(s"Missing portable export signature for '${e.sym}'.")
+        }
+        val loweredParams = e.defn.cparams ::: e.defn.fparams
+        if (sig.params.length > loweredParams.length) {
+          throw new IllegalStateException(s"Portable export signature arity exceeds lowered arity for '${e.sym}'.")
+        }
+        val exposedParams = loweredParams.take(sig.params.length)
+        val hiddenParams = loweredParams.drop(sig.params.length)
+        hiddenParams.foreach { p =>
+          if (p.tpe != SimpleType.Unit) {
+            throw new IllegalStateException(s"Unexpected hidden non-Unit wasm export parameter for '${e.sym}': ${p.tpe}.")
+          }
+        }
+
+        val expected = exposedParams.length
         val arityOk = Value.Local(s"arity_ok_${e.defId}", Type.I1)
         caseBlock.emitAssign(arityOk, Op.ICmp("eq", argc, Value.IntConst(expected.toLong, Type.I32)))
 
@@ -1232,8 +1286,7 @@ object LlvmBackend {
         val callBlock = fb.newBlock(callLabel)
         fb.setCurrent(callBlock)
 
-        val paramTpes = e.defn.cparams ::: e.defn.fparams
-        val args: List[Value] = paramTpes.zipWithIndex.map {
+        val exposedArgs: List[Value] = exposedParams.zipWithIndex.map {
           case (p, idx) =>
             val eltPtr = freshTmp(Type.Ptr)
             fb.current.emitAssign(eltPtr, Op.Gep(Type.I64, argsPtr, Value.IntConst(idx.toLong, Type.I64)))
@@ -1241,6 +1294,8 @@ object LlvmBackend {
             fb.current.emitAssign(bits, Op.Load(Type.I64, eltPtr))
             unboxFromI64(bits, p.tpe, fb)
         }
+        val hiddenArgs: List[Value] = hiddenParams.map(_ => Value.IntConst(0L, Type.I64))
+        val args: List[Value] = exposedArgs ::: hiddenArgs
 
         val callTmp = freshTmp(flixResultType)
         fb.current.emitAssign(callTmp, Op.Call(flixResultType, LlvmNames.defName(e.sym), ctxPtr :: args))
@@ -2475,6 +2530,9 @@ object LlvmBackend {
 
     private def collectTupleTypes(): Set[SimpleType.Tuple] = {
       val tpes = mutable.Set.empty[SimpleType.Tuple]
+      tpes ++= collectPortableAbiLoweredTypes().collect {
+        case tup: SimpleType.Tuple => tup
+      }
 
       def record(tpe: SimpleType): Unit = tpe match {
         case tup: SimpleType.Tuple => tpes += tup
@@ -2582,6 +2640,9 @@ object LlvmBackend {
 
     private def collectRecordTypes(): Set[SimpleType] = {
       val tpes = mutable.Set.empty[SimpleType]
+      tpes ++= collectPortableAbiLoweredTypes().collect {
+        case rec@SimpleType.RecordExtend(_, _, _) => rec
+      }
 
       def record(tpe: SimpleType): Unit = tpe match {
         case SimpleType.RecordEmpty =>
@@ -2664,6 +2725,24 @@ object LlvmBackend {
 
       root.defs.values.foreach(defn => visitExp(defn.exp))
       tpes.toSet
+    }
+
+    private def collectPortableAbiLoweredTypes(): Set[SimpleType] = {
+      val exported = root.defs.values.toList.flatMap(_.exportedSignature)
+      val wasmImported = root.defs.values.toList.flatMap(_.wasmImportSignature)
+      val nativeImported = root.defs.values.toList.flatMap(_.nativeImportSignature).flatMap { sig =>
+        (sig.params :+ sig.result).collect {
+          case NativeImportAbi.AbiType.Portable(tpe) => tpe
+        }
+      }
+
+      val abiTypes =
+        (exported ::: wasmImported).flatMap(sig => sig.params :+ sig.result) ::: nativeImported
+
+      abiTypes
+        .flatMap(ExportAbi.flattenAbiType)
+        .map(portableImportLoweredType)
+        .toSet
     }
 
     private def emitClosureInvokeWrapper(defn: LoweredAst.Def): LlvmIr.Function = {
@@ -3318,6 +3397,13 @@ object LlvmBackend {
         ExportHandle(handle, owned = true)
     }
 
+    private def emitExportTagFieldHandle(ctxPtr: Value, taggedHandle: Value, idx: Long, fieldTpe: ExportAbi.AbiType, fb: FunBuilder): Value = {
+      val helperName = if (fieldTpe.isPointerLike) "flix_export_tag_field_ptr" else "flix_export_tag_field_i64"
+      val out = freshTmp(Type.I64)
+      fb.current.emitAssign(out, Op.Call(Type.I64, helperName, List(ctxPtr, taggedHandle, Value.IntConst(idx, Type.I32))))
+      out
+    }
+
     private def emitDecodeExportHandle(ctxPtr: Value, handle: Value, abiTpe: ExportAbi.AbiType, fb: FunBuilder): Value = abiTpe match {
       case ExportAbi.AbiType.Unit =>
         Value.IntConst(0L, Type.I64)
@@ -3369,10 +3455,8 @@ object LlvmBackend {
         fb.setCurrent(loopBody)
         val currentHandle = freshTmp(Type.I64)
         fb.current.emitAssign(currentHandle, Op.Load(Type.I64, currentSlot))
-        val headHandle = freshTmp(Type.I64)
-        fb.current.emitAssign(headHandle, Op.Call(Type.I64, "flix_export_tag_field", List(ctxPtr, currentHandle, Value.IntConst(0L, Type.I32))))
-        val tailHandle = freshTmp(Type.I64)
-        fb.current.emitAssign(tailHandle, Op.Call(Type.I64, "flix_export_tag_field", List(ctxPtr, currentHandle, Value.IntConst(1L, Type.I32))))
+        val headHandle = emitExportTagFieldHandle(ctxPtr, currentHandle, 0L, elmTpe, fb)
+        val tailHandle = emitExportTagFieldHandle(ctxPtr, currentHandle, 1L, abiTpe, fb)
         val elmValue = emitDecodeExportHandle(ctxPtr, headHandle, elmTpe, fb)
         emitStoreSequenceElement(elemsBuf, idx, elmTpe, elmValue, fb)
         emitReleaseExportHandle(ctxPtr, currentHandle, fb)
@@ -3466,8 +3550,7 @@ object LlvmBackend {
 
         val someBlock = fb.newBlock(someLabel)
         fb.setCurrent(someBlock)
-        val someHandle = freshTmp(Type.I64)
-        fb.current.emitAssign(someHandle, Op.Call(Type.I64, "flix_export_tag_field", List(ctxPtr, handle, Value.IntConst(0L, Type.I32))))
+        val someHandle = emitExportTagFieldHandle(ctxPtr, handle, 0L, elmTpe, fb)
         val someValue = emitDecodeExportHandle(ctxPtr, someHandle, elmTpe, fb)
         emitReleaseExportHandle(ctxPtr, handle, fb)
         val someStruct = buildExportStructValue(abiTpe, List(Value.IntConst(1L, Type.I8), someValue), fb)
@@ -3500,8 +3583,7 @@ object LlvmBackend {
 
         val okBlock = fb.newBlock(okLabel)
         fb.setCurrent(okBlock)
-        val okFieldHandle = freshTmp(Type.I64)
-        fb.current.emitAssign(okFieldHandle, Op.Call(Type.I64, "flix_export_tag_field", List(ctxPtr, handle, Value.IntConst(0L, Type.I32))))
+        val okFieldHandle = emitExportTagFieldHandle(ctxPtr, handle, 0L, okTpe, fb)
         val okValue = emitDecodeExportHandle(ctxPtr, okFieldHandle, okTpe, fb)
         emitReleaseExportHandle(ctxPtr, handle, fb)
         val okStruct = buildExportStructValue(abiTpe, List(Value.IntConst(1L, Type.I8), okValue, zeroExportAggregateFieldValue(errTpe)), fb)
@@ -3510,8 +3592,7 @@ object LlvmBackend {
 
         val errBlock = fb.newBlock(errLabel)
         fb.setCurrent(errBlock)
-        val errFieldHandle = freshTmp(Type.I64)
-        fb.current.emitAssign(errFieldHandle, Op.Call(Type.I64, "flix_export_tag_field", List(ctxPtr, handle, Value.IntConst(0L, Type.I32))))
+        val errFieldHandle = emitExportTagFieldHandle(ctxPtr, handle, 0L, errTpe, fb)
         val errValue = emitDecodeExportHandle(ctxPtr, errFieldHandle, errTpe, fb)
         emitReleaseExportHandle(ctxPtr, handle, fb)
         val errStruct = buildExportStructValue(abiTpe, List(Value.IntConst(0L, Type.I8), zeroExportAggregateFieldValue(okTpe), errValue), fb)
@@ -4024,24 +4105,311 @@ object LlvmBackend {
         ExportHandle(handle, owned = true)
     }
 
-    private def emitOwnedImportHandleToLoweredValue(ctxPtr: Value, handle: ExportHandle, loweredTpe: SimpleType, abiTpe: ExportAbi.AbiType, fb: FunBuilder): Value = abiTpe match {
+    private def emitOwnedImportHandleToLoweredValue(ctxPtr: Value, handle: ExportHandle, loweredTpe: SimpleType, abiTpe: ExportAbi.AbiType, fb: FunBuilder): Value = {
+      val exportValue = emitDecodeExportHandle(ctxPtr, handle.handle, abiTpe, fb)
+      emitExportSurfaceToLoweredValue(ctxPtr, exportValue, loweredTpe, abiTpe, fb)
+    }
+
+    private def emitExportSurfaceToLoweredValue(ctxPtr: Value, value: Value, loweredTpe: SimpleType, abiTpe: ExportAbi.AbiType, fb: FunBuilder): Value = abiTpe match {
       case ExportAbi.AbiType.Unit =>
-        if (handle.owned) emitReleaseExportHandle(ctxPtr, handle.handle, fb)
         emitConstant(Constant.Unit, ctxPtr, fb)
 
-      case leaf @ (ExportAbi.AbiType.Bool | ExportAbi.AbiType.Int8 | ExportAbi.AbiType.Int16 |
-                   ExportAbi.AbiType.Int32 | ExportAbi.AbiType.Int64 | ExportAbi.AbiType.Float32 |
-                   ExportAbi.AbiType.Float64) =>
-        val bits = freshTmp(Type.I64)
-        fb.current.emitAssign(bits, Op.Call(Type.I64, "flix_handle_unbox_i64", List(ctxPtr, handle.handle)))
-        if (handle.owned) emitReleaseExportHandle(ctxPtr, handle.handle, fb)
-        unboxFromI64(bits, simpleTypeOfExportLeaf(leaf), fb)
+      case ExportAbi.AbiType.Bool | ExportAbi.AbiType.Int8 | ExportAbi.AbiType.Int16 |
+           ExportAbi.AbiType.Int32 | ExportAbi.AbiType.Int64 | ExportAbi.AbiType.Float32 |
+           ExportAbi.AbiType.Float64 =>
+        castValue(value, llvmTypeOf(loweredTpe), fb)
 
-      case _ =>
+      case ExportAbi.AbiType.String | ExportAbi.AbiType.Bytes =>
+        val handle = castValue(value, Type.I64, fb)
         val ptr = freshTmp(Type.Ptr)
-        fb.current.emitAssign(ptr, Op.Call(Type.Ptr, "flix_handle_get", List(ctxPtr, handle.handle)))
-        if (handle.owned) emitReleaseExportHandle(ctxPtr, handle.handle, fb)
+        fb.current.emitAssign(ptr, Op.Call(Type.Ptr, "flix_handle_get", List(ctxPtr, handle)))
+        emitReleaseExportHandle(ctxPtr, handle, fb)
         castValue(ptr, llvmTypeOf(loweredTpe), fb)
+
+      case ExportAbi.AbiType.List(elmAbiTpe) =>
+        loweredTpe match {
+          case SimpleType.Enum(sym, _) if sym.text == "List" && sym.namespace.isEmpty => ()
+          case other => throw new IllegalStateException(s"Unexpected lowered List type: '$other'.")
+        }
+        val elmLoweredTpe = portableImportLoweredType(elmAbiTpe)
+        val aggTpe = exportSurfaceTypeOf(abiTpe)
+        val len = freshTmp(Type.I64)
+        fb.current.emitAssign(len, Op.ExtractValue(Type.I64, aggTpe, value, 0))
+        val elemsPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(elemsPtr, Op.ExtractValue(Type.Ptr, aggTpe, value, 1))
+
+        val nilCaseSym = portableEnumCaseSym("List", "Nil")
+        val currentSlot = freshTmp(Type.Ptr)
+        fb.current.emitAssign(currentSlot, Op.Alloca(Type.Ptr))
+        fb.current.emitStore(emitAllocPortableTag(nilCaseSym, Nil, ctxPtr, fb), currentSlot)
+
+        val idxSlot = freshTmp(Type.Ptr)
+        fb.current.emitAssign(idxSlot, Op.Alloca(Type.I64))
+        fb.current.emitStore(len, idxSlot)
+
+        val checkLabel = freshLabel("native_import_list_check")
+        val bodyLabel = freshLabel("native_import_list_body")
+        val endLabel = freshLabel("native_import_list_end")
+        fb.current.setTerminator(Terminator.Br(checkLabel))
+
+        val checkBlock = fb.newBlock(checkLabel)
+        fb.setCurrent(checkBlock)
+        val idx = freshTmp(Type.I64)
+        fb.current.emitAssign(idx, Op.Load(Type.I64, idxSlot))
+        val more = freshTmp(Type.I1)
+        fb.current.emitAssign(more, Op.ICmp("sgt", idx, Value.IntConst(0L, Type.I64)))
+        fb.current.setTerminator(Terminator.CondBr(more, bodyLabel, endLabel))
+
+        val bodyBlock = fb.newBlock(bodyLabel)
+        fb.setCurrent(bodyBlock)
+        val idxPrev = freshTmp(Type.I64)
+        fb.current.emitAssign(idxPrev, Op.Bin("sub", Type.I64, idx, Value.IntConst(1L, Type.I64)))
+        fb.current.emitStore(idxPrev, idxSlot)
+        val currentTail = freshTmp(Type.Ptr)
+        fb.current.emitAssign(currentTail, Op.Load(Type.Ptr, currentSlot))
+        val elmExportValue = emitLoadSequenceElement(elemsPtr, idxPrev, elmAbiTpe, fb)
+        val elmLoweredValue = emitExportSurfaceToLoweredValue(ctxPtr, elmExportValue, elmLoweredTpe, elmAbiTpe, fb)
+        val consCaseSym = portableEnumCaseSym("List", "Cons")
+        val consPayloads = List(
+          (elmLoweredValue, elmLoweredTpe),
+          (currentTail, loweredTpe),
+        )
+        val nextCons = emitAllocPortableTag(consCaseSym, consPayloads, ctxPtr, fb)
+        fb.current.emitStore(nextCons, currentSlot)
+        fb.current.setTerminator(Terminator.Br(checkLabel))
+
+        val endBlock = fb.newBlock(endLabel)
+        fb.setCurrent(endBlock)
+        val out = freshTmp(Type.Ptr)
+        fb.current.emitAssign(out, Op.Load(Type.Ptr, currentSlot))
+        emitFreePtr(elemsPtr, fb)
+        out
+
+      case ExportAbi.AbiType.Array(elmAbiTpe) =>
+        loweredTpe match {
+          case SimpleType.Array(_) => ()
+          case other => throw new IllegalStateException(s"Unexpected lowered Array type: '$other'.")
+        }
+        val elmLoweredTpe = portableImportLoweredType(elmAbiTpe)
+        val aggTpe = exportSurfaceTypeOf(abiTpe)
+        val len = freshTmp(Type.I64)
+        fb.current.emitAssign(len, Op.ExtractValue(Type.I64, aggTpe, value, 0))
+        val elemsPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(elemsPtr, Op.ExtractValue(Type.Ptr, aggTpe, value, 1))
+
+        val isPtrArray = isGcRootType(elmLoweredTpe)
+        val isInt8Array = !isPtrArray && elmLoweredTpe == SimpleType.Int8
+
+        val sizeBytes =
+          if (isInt8Array) {
+            val sz = freshTmp(Type.I64)
+            fb.current.emitAssign(sz, Op.Bin("add", Type.I64, len, Value.IntConst(16L, Type.I64)))
+            sz
+          } else {
+            val elmsBytes = freshTmp(Type.I64)
+            fb.current.emitAssign(elmsBytes, Op.Bin("mul", Type.I64, len, Value.IntConst(8L, Type.I64)))
+            val sz = freshTmp(Type.I64)
+            fb.current.emitAssign(sz, Op.Bin("add", Type.I64, elmsBytes, Value.IntConst(16L, Type.I64)))
+            sz
+          }
+
+        val arrTiName = if (isPtrArray) LlvmNames.arrayPtrTypeInfoName else LlvmNames.arrayPrimTypeInfoName
+        val arrTi = Value.Global(arrTiName, Type.Ptr)
+        val arrPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(arrPtr, Op.Call(Type.Ptr, "flix_region_alloc_flex", List(ctxPtr, Value.Null(Type.Ptr), arrTi, sizeBytes)))
+
+        val lenI32 = freshTmp(Type.I32)
+        fb.current.emitAssign(lenI32, Op.Cast("trunc", Type.I32, len))
+        val lenPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(lenPtr, Op.Gep(Type.I8, arrPtr, Value.IntConst(8L, Type.I64)))
+        fb.current.emitStore(lenI32, lenPtr)
+        val elemSizePtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(elemSizePtr, Op.Gep(Type.I8, arrPtr, Value.IntConst(12L, Type.I64)))
+        fb.current.emitStore(if (isInt8Array) Value.IntConst(1L, Type.I32) else Value.IntConst(8L, Type.I32), elemSizePtr)
+        val outElemsPtr = freshTmp(Type.Ptr)
+        fb.current.emitAssign(outElemsPtr, Op.Gep(Type.I8, arrPtr, Value.IntConst(16L, Type.I64)))
+
+        val idxSlot = freshTmp(Type.Ptr)
+        fb.current.emitAssign(idxSlot, Op.Alloca(Type.I64))
+        fb.current.emitStore(Value.IntConst(0L, Type.I64), idxSlot)
+        val fillCheckLabel = freshLabel("native_import_array_fill_check")
+        val fillBodyLabel = freshLabel("native_import_array_fill_body")
+        val fillEndLabel = freshLabel("native_import_array_fill_end")
+        fb.current.setTerminator(Terminator.Br(fillCheckLabel))
+
+        val fillCheckBlock = fb.newBlock(fillCheckLabel)
+        fb.setCurrent(fillCheckBlock)
+        val idx = freshTmp(Type.I64)
+        fb.current.emitAssign(idx, Op.Load(Type.I64, idxSlot))
+        val more = freshTmp(Type.I1)
+        fb.current.emitAssign(more, Op.ICmp("slt", idx, len))
+        fb.current.setTerminator(Terminator.CondBr(more, fillBodyLabel, fillEndLabel))
+
+        val fillBodyBlock = fb.newBlock(fillBodyLabel)
+        fb.setCurrent(fillBodyBlock)
+        val elmExportValue = emitLoadSequenceElement(elemsPtr, idx, elmAbiTpe, fb)
+        val elmLoweredValue = emitExportSurfaceToLoweredValue(ctxPtr, elmExportValue, elmLoweredTpe, elmAbiTpe, fb)
+        val slotPtr =
+          if (isInt8Array) {
+            val ptr = freshTmp(Type.Ptr)
+            fb.current.emitAssign(ptr, Op.Gep(Type.I8, outElemsPtr, idx))
+            ptr
+          } else {
+            val ptr = freshTmp(Type.Ptr)
+            fb.current.emitAssign(ptr, Op.Gep(Type.I64, outElemsPtr, idx))
+            ptr
+          }
+        if (isInt8Array) {
+          fb.current.emitStore(castValue(elmLoweredValue, Type.I8, fb), slotPtr)
+        } else {
+          val payload = boxToI64(elmLoweredValue, elmLoweredTpe, fb)
+          if (isPtrArray) emitStorePtrLike(ctxPtr, slotPtr, payload, fb)
+          else fb.current.emitStore(payload, slotPtr)
+        }
+        val idxNext = freshTmp(Type.I64)
+        fb.current.emitAssign(idxNext, Op.Bin("add", Type.I64, idx, Value.IntConst(1L, Type.I64)))
+        fb.current.emitStore(idxNext, idxSlot)
+        fb.current.setTerminator(Terminator.Br(fillCheckLabel))
+
+        val fillEndBlock = fb.newBlock(fillEndLabel)
+        fb.setCurrent(fillEndBlock)
+        emitFreePtr(elemsPtr, fb)
+        arrPtr
+
+      case ExportAbi.AbiType.Tuple(elmAbiTpes) =>
+        val elmLoweredTpes = loweredTpe match {
+          case SimpleType.Tuple(elms) if elms.length == elmAbiTpes.length => elms
+          case other => throw new IllegalStateException(s"Unexpected lowered Tuple type: '$other'.")
+        }
+        val aggTpe = exportSurfaceTypeOf(abiTpe)
+        val payloads = elmAbiTpes.zip(elmLoweredTpes).zipWithIndex.map {
+          case ((elmAbiTpe, elmLoweredTpe), idx) =>
+            val field = freshTmp(exportAggregateFieldTypeOf(elmAbiTpe))
+            fb.current.emitAssign(field, Op.ExtractValue(exportAggregateFieldTypeOf(elmAbiTpe), aggTpe, value, idx))
+            val loweredField = emitExportSurfaceToLoweredValue(ctxPtr, field, elmLoweredTpe, elmAbiTpe, fb)
+            boxToI64(loweredField, elmLoweredTpe, fb)
+        }
+        val tupPtr = freshTmp(Type.Ptr)
+        val tupTi = Value.Global(LlvmNames.tupleTypeInfoName(loweredTpe.asInstanceOf[SimpleType.Tuple]), Type.Ptr)
+        fb.current.emitAssign(tupPtr, Op.Call(Type.Ptr, "flix_alloc", List(ctxPtr, tupTi)))
+        payloads.zipWithIndex.foreach {
+          case (payload, idx) => storeObjI64Slot(tupPtr, Value.IntConst(idx.toLong, Type.I64), payload, fb)
+        }
+        tupPtr
+
+      case ExportAbi.AbiType.Record(fieldAbiTpes) =>
+        val loweredFields = recordFields(loweredTpe)
+        if (loweredFields.map(_._1) != fieldAbiTpes.map(_._1)) {
+          throw new IllegalStateException(s"Mismatched lowered/export record fields for '$loweredTpe'.")
+        }
+        val aggTpe = exportSurfaceTypeOf(abiTpe)
+        val payloads = fieldAbiTpes.zip(loweredFields).zipWithIndex.map {
+          case (((_, fieldAbiTpe), (_, fieldLoweredTpe)), idx) =>
+            val field = freshTmp(exportAggregateFieldTypeOf(fieldAbiTpe))
+            fb.current.emitAssign(field, Op.ExtractValue(exportAggregateFieldTypeOf(fieldAbiTpe), aggTpe, value, idx))
+            val loweredField = emitExportSurfaceToLoweredValue(ctxPtr, field, fieldLoweredTpe, fieldAbiTpe, fb)
+            boxToI64(loweredField, fieldLoweredTpe, fb)
+        }
+        val recPtr = freshTmp(Type.Ptr)
+        val recTi = Value.Global(LlvmNames.recordTypeInfoName(loweredTpe), Type.Ptr)
+        fb.current.emitAssign(recPtr, Op.Call(Type.Ptr, "flix_alloc", List(ctxPtr, recTi)))
+        payloads.zipWithIndex.foreach {
+          case (payload, idx) => storeObjI64Slot(recPtr, Value.IntConst(idx.toLong, Type.I64), payload, fb)
+        }
+        recPtr
+
+      case ExportAbi.AbiType.Option(elmAbiTpe) =>
+        loweredTpe match {
+          case SimpleType.Enum(sym, _) if sym.text == "Option" && sym.namespace.isEmpty => ()
+          case other => throw new IllegalStateException(s"Unexpected lowered Option type: '$other'.")
+        }
+        val elmLoweredTpe = portableImportLoweredType(elmAbiTpe)
+        val aggTpe = exportSurfaceTypeOf(abiTpe)
+        val rawTag = freshTmp(Type.I8)
+        fb.current.emitAssign(rawTag, Op.ExtractValue(Type.I8, aggTpe, value, 0))
+        val isSome = freshTmp(Type.I1)
+        fb.current.emitAssign(isSome, Op.ICmp("ne", rawTag, Value.IntConst(0L, Type.I8)))
+        val someLabel = freshLabel("native_import_option_some")
+        val noneLabel = freshLabel("native_import_option_none")
+        val endLabel = freshLabel("native_import_option_end")
+        val incomings = mutable.ArrayBuffer.empty[(Value, String)]
+        fb.current.setTerminator(Terminator.CondBr(isSome, someLabel, noneLabel))
+
+        val someBlock = fb.newBlock(someLabel)
+        fb.setCurrent(someBlock)
+        val payload = freshTmp(exportAggregateFieldTypeOf(elmAbiTpe))
+        fb.current.emitAssign(payload, Op.ExtractValue(exportAggregateFieldTypeOf(elmAbiTpe), aggTpe, value, 1))
+        val loweredPayload = emitExportSurfaceToLoweredValue(ctxPtr, payload, elmLoweredTpe, elmAbiTpe, fb)
+        val someValue = emitAllocPortableTag(portableEnumCaseSym("Option", "Some"), List((loweredPayload, elmLoweredTpe)), ctxPtr, fb)
+        fb.current.setTerminator(Terminator.Br(endLabel))
+        incomings += ((someValue, someLabel))
+
+        val noneBlock = fb.newBlock(noneLabel)
+        fb.setCurrent(noneBlock)
+        val noneValue = emitAllocPortableTag(portableEnumCaseSym("Option", "None"), Nil, ctxPtr, fb)
+        fb.current.setTerminator(Terminator.Br(endLabel))
+        incomings += ((noneValue, noneLabel))
+
+        val endBlock = fb.newBlock(endLabel)
+        fb.setCurrent(endBlock)
+        val out = freshTmp(Type.Ptr)
+        endBlock.emitPhi(out, incomings.toList)
+        out
+
+      case ExportAbi.AbiType.Result(okAbiTpe, errAbiTpe) =>
+        loweredTpe match {
+          case SimpleType.Enum(sym, _) if sym.text == "Result" && sym.namespace.isEmpty => ()
+          case other => throw new IllegalStateException(s"Unexpected lowered Result type: '$other'.")
+        }
+        val okLoweredTpe = portableImportLoweredType(okAbiTpe)
+        val errLoweredTpe = portableImportLoweredType(errAbiTpe)
+        val aggTpe = exportSurfaceTypeOf(abiTpe)
+        val rawTag = freshTmp(Type.I8)
+        fb.current.emitAssign(rawTag, Op.ExtractValue(Type.I8, aggTpe, value, 0))
+        val isOk = freshTmp(Type.I1)
+        fb.current.emitAssign(isOk, Op.ICmp("ne", rawTag, Value.IntConst(0L, Type.I8)))
+        val okLabel = freshLabel("native_import_result_ok")
+        val errLabel = freshLabel("native_import_result_err")
+        val endLabel = freshLabel("native_import_result_end")
+        val incomings = mutable.ArrayBuffer.empty[(Value, String)]
+        fb.current.setTerminator(Terminator.CondBr(isOk, okLabel, errLabel))
+
+        val okBlock = fb.newBlock(okLabel)
+        fb.setCurrent(okBlock)
+        val okField = freshTmp(exportAggregateFieldTypeOf(okAbiTpe))
+        fb.current.emitAssign(okField, Op.ExtractValue(exportAggregateFieldTypeOf(okAbiTpe), aggTpe, value, 1))
+        val okLoweredValue = emitExportSurfaceToLoweredValue(ctxPtr, okField, okLoweredTpe, okAbiTpe, fb)
+        val okValue = emitAllocPortableTag(portableEnumCaseSym("Result", "Ok"), List((okLoweredValue, okLoweredTpe)), ctxPtr, fb)
+        fb.current.setTerminator(Terminator.Br(endLabel))
+        incomings += ((okValue, okLabel))
+
+        val errBlock = fb.newBlock(errLabel)
+        fb.setCurrent(errBlock)
+        val errField = freshTmp(exportAggregateFieldTypeOf(errAbiTpe))
+        fb.current.emitAssign(errField, Op.ExtractValue(exportAggregateFieldTypeOf(errAbiTpe), aggTpe, value, 2))
+        val errLoweredValue = emitExportSurfaceToLoweredValue(ctxPtr, errField, errLoweredTpe, errAbiTpe, fb)
+        val errValue = emitAllocPortableTag(portableEnumCaseSym("Result", "Err"), List((errLoweredValue, errLoweredTpe)), ctxPtr, fb)
+        fb.current.setTerminator(Terminator.Br(endLabel))
+        incomings += ((errValue, errLabel))
+
+        val endBlock = fb.newBlock(endLabel)
+        fb.setCurrent(endBlock)
+        val out = freshTmp(Type.Ptr)
+        endBlock.emitPhi(out, incomings.toList)
+        out
+    }
+
+    private def emitAllocPortableTag(caseSym: Symbol.CaseSym, payloads: List[(Value, SimpleType)], ctxPtr: Value, fb: FunBuilder): Value = {
+      val objPtr = freshTmp(Type.Ptr)
+      val tagTi = Value.Global(LlvmNames.tagTypeInfoName(caseSym), Type.Ptr)
+      fb.current.emitAssign(objPtr, Op.Call(Type.Ptr, "flix_alloc", List(ctxPtr, tagTi)))
+      val tagId = caseTagIds.getOrElse(caseSym, throw new IllegalStateException(s"Missing case tag id for '$caseSym'."))
+      storeObjI64Slot(objPtr, Value.IntConst(0L, Type.I64), Value.IntConst(tagId, Type.I64), fb)
+      payloads.zipWithIndex.foreach {
+        case ((payload, payloadTpe), idx) =>
+          storeObjI64Slot(objPtr, Value.IntConst((idx + 1).toLong, Type.I64), boxToI64(payload, payloadTpe, fb), fb)
+      }
+      objPtr
     }
 
     private def emitConvertExportSequenceToWasm(ctxPtr: Value, exportSeqPtr: Value, wasmSeqPtr: Value, len64: Value, elmTpe: ExportAbi.AbiType, fb: FunBuilder): Unit = {

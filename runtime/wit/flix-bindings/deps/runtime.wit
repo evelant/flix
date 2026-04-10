@@ -758,8 +758,11 @@ interface runtime {
   /// Return the tag id stored in a tagged enum value.
   tag-id: func(ctx: borrow<ctx>, tagged: borrow<value>) -> sym;
 
-  /// Return the tagged enum field at `idx` as an owned handle.
-  tag-field: func(ctx: borrow<ctx>, tagged: borrow<value>, idx: u32) -> value;
+  /// Return the tagged enum field at `idx` as an owned scalar handle.
+  tag-field-i64: func(ctx: borrow<ctx>, tagged: borrow<value>, idx: u32) -> value;
+
+  /// Return the tagged enum field at `idx` as an owned pointer handle.
+  tag-field-ptr: func(ctx: borrow<ctx>, tagged: borrow<value>, idx: u32) -> value;
 
   /// Count the logical elements in a Flix `List` value identified by the supplied tag ids.
   list-len: func(ctx: borrow<ctx>, xs: borrow<value>, nil-tag-id: sym, cons-tag-id: sym) -> u32;
