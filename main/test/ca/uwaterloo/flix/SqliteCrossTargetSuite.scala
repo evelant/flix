@@ -42,7 +42,7 @@ class SqliteCrossTargetSuite extends AnyFunSuite {
     )
 
   private val ExampleRoot: Path =
-    Paths.get("examples/package-manager/sqlite-cross-target").toAbsolutePath.normalize()
+    Paths.get("examples/native-backend/sqlite-cross-target").toAbsolutePath.normalize()
 
   private val BrowserHeadlessRunnerScript: Path =
     Paths.get("tools/wasm-runner-js/browser/run_headless_chrome.mjs").toAbsolutePath.normalize()

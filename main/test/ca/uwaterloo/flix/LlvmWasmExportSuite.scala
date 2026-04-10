@@ -41,7 +41,7 @@ class LlvmWasmExportSuite extends AnyFunSuite {
     )
 
   private val ExampleSourceFile: Path =
-    Paths.get("examples/package-manager/export-smoke/src/Api.flix")
+    Paths.get("examples/native-backend/export-smoke/src/Api.flix")
 
   private case class CompiledArtifacts(outDir: Path,
                                        sdkManifest: Path,

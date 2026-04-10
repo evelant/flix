@@ -47,7 +47,16 @@ class NativeRuntimeZigSuite extends AnyFunSuite {
   }
 
   private def runZigTest(source: Path, cwd: Path, zigCmd: List[String]): Unit = {
-    val cmd = zigCmd ++ List("test", source.toString)
+    val cacheDir = cwd.resolve("zig-cache").resolve(source.getFileName.toString)
+    val globalCacheDir = cwd.resolve("zig-global-cache")
+    Files.createDirectories(cacheDir)
+    Files.createDirectories(globalCacheDir)
+
+    val cmd = zigCmd ++ List(
+      "test", source.toString,
+      "--cache-dir", cacheDir.toString,
+      "--global-cache-dir", globalCacheDir.toString
+    )
     val pb = new ProcessBuilder(cmd.asJava)
     pb.directory(cwd.toFile)
     pb.redirectErrorStream(true)

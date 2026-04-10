@@ -41,7 +41,7 @@ class LlvmNativeExportSuite extends AnyFunSuite {
     )
 
   private val ExampleSourceFile: Path =
-    Paths.get("examples/package-manager/export-smoke/src/Api.flix")
+    Paths.get("examples/native-backend/export-smoke/src/Api.flix")
 
   test("llvm-native-export-static-library") {
     assume(hasZig, "zig not found on PATH (skipping LLVM-native export test)")

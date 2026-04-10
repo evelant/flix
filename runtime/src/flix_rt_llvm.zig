@@ -1290,8 +1290,24 @@ fn handshakeRequestSoft(cb: HandshakeCallbackId) u64 {
     return epoch;
 }
 
+fn handshakeCooperateBlockedSoftScanRoots(ctx: *FlixCtx, epoch: u64) void {
+    if (ctx.seen_epoch.load(.acquire) >= epoch) return;
+
+    ctx.seen_epoch.store(epoch, .release);
+    if (ctx.gc_marker) |marker| {
+        gcMarkCtxRoots(marker, ctx);
+    }
+
+    _ = g_gc_debug_scan_roots_cooperations.fetchAdd(1, .acq_rel);
+    _ = g_handshake_ack_count.fetchAdd(1, .acq_rel);
+}
+
 fn handshakeWaitEpoch(epoch: u64, self: ?*FlixCtx, comptime is_stw: bool) void {
-    // Wait for every non-blocked target context to complete the callback for this epoch.
+    // Wait for every running target context to complete the callback for this epoch.
+    // Soft root scans also scan blocked contexts from the waiter, since they may
+    // not reach a pollcheck until after the scan has completed.
+    const cb_raw = g_handshake_cb_id.load(.acquire);
+    const cb: HandshakeCallbackId = @enumFromInt(cb_raw);
     while (true) {
         var target_count: u32 = 0;
         var all_seen = true;
@@ -1303,7 +1319,12 @@ fn handshakeWaitEpoch(epoch: u64, self: ?*FlixCtx, comptime is_stw: bool) void {
                 if (self) |s| {
                     if (ctx_ptr == s) continue;
                 }
-                if (ctx_ptr.blocked.load(.acquire)) continue;
+                if (ctx_ptr.blocked.load(.acquire)) {
+                    if (!is_stw and cb == .ScanRoots) {
+                        handshakeCooperateBlockedSoftScanRoots(ctx_ptr, epoch);
+                    }
+                    continue;
+                }
                 target_count += 1;
                 if (ctx_ptr.seen_epoch.load(.acquire) < epoch) {
                     all_seen = false;
@@ -10272,6 +10293,15 @@ const SoftHandshakeScanRootsTestState = struct {
     start_epoch: u64 = 0,
 };
 
+const BlockedSoftHandshakeScanRootsTestState = struct {
+    ready: RtAtomic(bool) = .init(false),
+    blocked: RtAtomic(bool) = .init(false),
+    unblock_requested: RtAtomic(bool) = .init(false),
+    done: RtAtomic(bool) = .init(false),
+    ctx_addr: RtAtomic(usize) = .init(0),
+    root_addr: RtAtomic(usize) = .init(0),
+};
+
 fn testCtxFreeDuringHandshakeWorker(state: *HandshakeCtxFreeTestState) void {
     const ctx_ptr = flix_ctx_new();
     state.ctx_addr.store(@intFromPtr(ctx_ptr), .release);
@@ -10304,6 +10334,28 @@ fn testSoftHandshakeScanRootsWorker(state: *SoftHandshakeScanRootsTestState) voi
         _ = state.iterations.fetchAdd(1, .acq_rel);
         flix_gc_pollcheck(ctx_ptr);
     }
+
+    flix_gc_pop_roots(ctx_ptr, 1);
+    flix_ctx_free(ctx_ptr);
+    state.done.store(true, .release);
+}
+
+fn testBlockedSoftHandshakeScanRootsWorker(state: *BlockedSoftHandshakeScanRootsTestState) void {
+    const ctx_ptr = flix_ctx_new();
+    var root_ptr: ?*anyopaque = allocFlixStringFromAscii("blocked-soft-scan-root");
+    flix_gc_push_root_ptr(ctx_ptr, @ptrCast(&root_ptr));
+
+    state.ctx_addr.store(@intFromPtr(ctx_ptr), .release);
+    state.root_addr.store(@intFromPtr(root_ptr.?), .release);
+    state.ready.store(true, .release);
+
+    var guard = BlockedGuard.enter(requireCtx(ctx_ptr));
+    state.blocked.store(true, .release);
+    while (!state.unblock_requested.load(.acquire)) {
+        std.atomic.spinLoopHint();
+        std.Thread.sleep(1 * std.time.ns_per_ms);
+    }
+    guard.exitAndCooperate();
 
     flix_gc_pop_roots(ctx_ptr, 1);
     flix_ctx_free(ctx_ptr);
@@ -10381,7 +10433,6 @@ test "soft handshake scan-roots marks worker root and does not park progress" {
     marker.region_seen.ensureTotalCapacity(rt_alloc, 64) catch @panic("oom");
 
     worker_ctx.gc_marker = &marker;
-    defer worker_ctx.gc_marker = null;
     state.scan_enabled.store(true, .release);
 
     const before_iters = state.iterations.load(.acquire);
@@ -10399,11 +10450,64 @@ test "soft handshake scan-roots marks worker root and does not park progress" {
 
     try waitUntilAtomicAtLeast(u64, &state.iterations, before_iters + 10, 500);
 
+    worker_ctx.gc_marker = null;
     state.stop_requested.store(true, .release);
     try waitUntilAtomicEq(bool, &state.done, true, 500);
 
     stats = gcDebugStatsSnapshot();
     try std.testing.expect(stats.ctx_deregistrations >= 1);
+    root_meta.marked = false;
+}
+
+test "soft handshake scan-roots marks blocked worker root without waiting for unblock" {
+    if (is_wasm) return error.SkipZigTest;
+
+    gcDebugStatsReset();
+
+    var state = BlockedSoftHandshakeScanRootsTestState{};
+    const worker = try std.Thread.spawn(.{}, testBlockedSoftHandshakeScanRootsWorker, .{&state});
+    defer {
+        state.unblock_requested.store(true, .release);
+        worker.join();
+    }
+
+    try waitUntilAtomicEq(bool, &state.ready, true, 500);
+    try waitUntilAtomicEq(bool, &state.blocked, true, 500);
+
+    const worker_ctx_addr = state.ctx_addr.load(.acquire);
+    const root_addr = state.root_addr.load(.acquire);
+    try std.testing.expect(worker_ctx_addr != 0);
+    try std.testing.expect(root_addr != 0);
+
+    const worker_ctx: *FlixCtx = @ptrFromInt(worker_ctx_addr);
+    const root_meta = g_gc_objects.getPtr(root_addr) orelse @panic("missing blocked worker root object");
+    try std.testing.expect(!root_meta.marked);
+
+    var marker: GcMarker = .{ .worklist = .{}, .region_seen = .{} };
+    defer marker.worklist.deinit(rt_alloc);
+    defer marker.region_seen.deinit(rt_alloc);
+    marker.worklist.ensureTotalCapacity(rt_alloc, 64) catch @panic("oom");
+    marker.region_seen.ensureTotalCapacity(rt_alloc, 64) catch @panic("oom");
+
+    worker_ctx.gc_marker = &marker;
+
+    const epoch = handshakeRequestSoft(.ScanRoots);
+    handshakeWaitSoft(epoch, null);
+
+    const stats = gcDebugStatsSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), stats.soft_requests);
+    try std.testing.expectEqual(epoch, stats.last_soft_epoch);
+    try std.testing.expectEqual(@as(u32, 1), stats.last_soft_acks);
+    try std.testing.expectEqual(@as(u64, 1), stats.scan_roots_cooperations);
+    try std.testing.expectEqual(@as(u64, 0), stats.pollcheck_cooperations);
+    try std.testing.expectEqual(epoch, worker_ctx.seen_epoch.load(.acquire));
+    try std.testing.expect(worker_ctx.blocked.load(.acquire));
+    try std.testing.expect(root_meta.marked);
+    try std.testing.expect(marker.worklist.items.len >= 1);
+
+    worker_ctx.gc_marker = null;
+    state.unblock_requested.store(true, .release);
+    try waitUntilAtomicEq(bool, &state.done, true, 500);
     root_meta.marked = false;
 }
 
