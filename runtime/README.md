@@ -1,24 +1,23 @@
-# Flix Native Runtime Spikes (Zig)
+# Flix Native Runtime (Zig)
 
-This directory contains small, runnable spikes to de-risk the planned native runtime substrate:
+This directory contains the committed Zig runtime modules that back the experimental LLVM native/wasm backend.
 
-- Pollchecks + soft handshakes (foundation for GC coordination with `spawn`)
-- `libxev` integration (completion → resume shape)
+The runtime surface here includes:
 
-## Run
+- continuation rooting and remembered-set mechanics,
+- pollcheck / handshake coordination,
+- async wait and `libxev` integration,
+- file, process, TCP, and HTTP substrate slices,
+- and the shared `flix_rt_llvm.zig` runtime entrypoints.
+
+## Run Focused Zig Tests
 
 From repo root:
 
-- `cd runtime && zig build run-handshake`
-- `cd runtime && zig build run-xev-timer`
-- `cd runtime && zig build run-xev-http-get -- http://example.com/`
-- `cd runtime && zig build run-xev-http-wire -- http://example.com/`
-- `cd runtime && zig build run-xev-http-syscall -- http://example.com/`
+- `zig test runtime/src/continuation_roots_v0.zig`
+- `zig test runtime/src/handshake_v0.zig`
+- `zig test runtime/src/rt_xev.zig`
 
-Optional:
+The Scala regression suite in `NativeRuntimeZigSuite` stages those same modules into an isolated cache-backed test run.
 
-- `cd runtime && zig build -Doptimize=ReleaseFast run-handshake`
-- `cd runtime && zig build -Doptimize=ReleaseFast run-xev-timer`
-- `cd runtime && zig build -Doptimize=ReleaseFast run-xev-http-get -- http://example.com/`
-- `cd runtime && zig build -Doptimize=ReleaseFast run-xev-http-wire -- http://example.com/`
-- `cd runtime && zig build -Doptimize=ReleaseFast run-xev-http-syscall -- http://example.com/`
+Exploratory spike harnesses are kept out of the committed runtime surface.

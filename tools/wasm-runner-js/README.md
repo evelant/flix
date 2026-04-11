@@ -27,10 +27,6 @@ If no handler is available for an op, the runner resumes it with:
 
 - `IoError { kindCode: 12, msg: "unsupported" }` (portable `Unsupported`).
 
-## Example (used by wasm-smoke)
-
-See: `tools/wasm-smoke/browser/run_runner.mjs`.
-
 ## CLI (Node)
 
 For a quick way to run a transpiled Flix wasm component in Node (driving the cooperative scheduler):
@@ -68,7 +64,7 @@ To execute a transpiled component in a real browser:
 1. Serve the repo root (adds COOP/COEP headers for future threads work):
 
    ```bash
-   PORT=8000 node tools/wasm-smoke/browser/serve.mjs
+   PORT=8000 node tools/wasm-runner-js/browser/serve.mjs
    ```
 
 2. Open the runner page with query params:

@@ -57,7 +57,7 @@ class PortableStdlibLlvmBrowserRuntimeSuite extends AnyFunSuite {
   private val portableTestsDir = Paths.get("main/test/flix/portable")
 
   private val browserServerScript: Path =
-    Paths.get("tools/wasm-smoke/browser/serve.mjs").toAbsolutePath.normalize()
+    Paths.get("tools/wasm-runner-js/browser/serve.mjs").toAbsolutePath.normalize()
 
   private val browserHtmlPath: String =
     "/tools/wasm-runner-js/browser/run_component.html"

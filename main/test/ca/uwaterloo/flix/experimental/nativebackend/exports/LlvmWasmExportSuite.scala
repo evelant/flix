@@ -50,6 +50,53 @@ class LlvmWasmExportSuite extends AnyFunSuite {
                                        typedExportComponent: Path,
                                        typedWitDir: Path)
 
+  test("llvm-wasm-main-manifest") {
+    assume(hasZig, "zig not found on PATH (skipping LLVM-wasm export test)")
+    assume(hasWasmTools, "wasm-tools not found on PATH (skipping LLVM-wasm export test)")
+    assume(hasJco, "jco not found on PATH (skipping LLVM-wasm export test)")
+
+    val artifactName = "main-manifest"
+    val sourceFile = Files.createTempFile("flix-llvm-wasm-main-manifest-", ".flix")
+    val outDir = Files.createTempDirectory("flix-llvm-wasm-main-manifest-out-")
+    try {
+      Files.writeString(sourceFile,
+        """
+          |def main(): Unit \ IO =
+          |    println("ok")
+          |""".stripMargin,
+        StandardCharsets.UTF_8
+      )
+
+      val flix = new Flix()
+      flix.setOptions(TestOptions.copy(outputPath = outDir, artifactName = artifactName))
+      implicit val sctx: SecurityContext = SecurityContext.Unrestricted
+      flix.addFile(sourceFile)
+
+      val (optRoot, errors) = flix.check()
+      if (errors.nonEmpty) {
+        fail(CompilationMessage.formatAll(errors)(flix.getFormatter, optRoot))
+      }
+
+      flix.codeGen(optRoot.get)
+
+      val manifest = ca.uwaterloo.flix.language.phase.llvm.LlvmWasmExportWriter.manifestPath(outDir, artifactName)
+      if (!Files.exists(manifest)) {
+        fail(s"Missing wasm exports manifest: $manifest")
+      }
+
+      val manifestText = Files.readString(manifest, StandardCharsets.UTF_8)
+      assert(manifestText.contains(""""count": 1"""))
+      assert(manifestText.contains(""""isMain": true"""))
+      assert(manifestText.contains(""""isExport": false"""))
+      assert(manifestText.contains(""""arity": 0"""))
+      assert(manifestText.contains(""""params": []"""))
+      assert(manifestText.contains(""""result": "Unit""""))
+    } finally {
+      Files.deleteIfExists(sourceFile)
+      deleteRecursive(outDir)
+    }
+  }
+
   test("llvm-wasm-typed-export-bindings") {
     assume(hasZig, "zig not found on PATH (skipping LLVM-wasm export test)")
     assume(hasWasmTools, "wasm-tools not found on PATH (skipping LLVM-wasm export test)")

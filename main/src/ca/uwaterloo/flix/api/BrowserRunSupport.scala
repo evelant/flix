@@ -36,14 +36,14 @@ object BrowserRunSupport {
   private val BundledBrowserChromeRunnerResource = "/tools/wasm-runner-js/browser/run_headless_chrome.mjs"
   private val BundledRunnerModuleResource = "/tools/wasm-runner-js/runner.mjs"
   private val BundledOpfsHandlersResource = "/tools/wasm-runner-js/opfs-handlers.mjs"
-  private val BundledServeScriptResource = "/tools/wasm-smoke/browser/serve.mjs"
+  private val BundledServeScriptResource = "/tools/wasm-runner-js/browser/serve.mjs"
 
   private val DefaultBrowserRunHtml = Paths.get("tools/wasm-runner-js/browser/run_component.html").toAbsolutePath.normalize()
   private val DefaultBrowserRunModule = Paths.get("tools/wasm-runner-js/browser/run_component.mjs").toAbsolutePath.normalize()
   private val DefaultBrowserChromeRunner = Paths.get("tools/wasm-runner-js/browser/run_headless_chrome.mjs").toAbsolutePath.normalize()
   private val DefaultRunnerModule = Paths.get("tools/wasm-runner-js/runner.mjs").toAbsolutePath.normalize()
   private val DefaultOpfsHandlersModule = Paths.get("tools/wasm-runner-js/opfs-handlers.mjs").toAbsolutePath.normalize()
-  private val DefaultServeScript = Paths.get("tools/wasm-smoke/browser/serve.mjs").toAbsolutePath.normalize()
+  private val DefaultServeScript = Paths.get("tools/wasm-runner-js/browser/serve.mjs").toAbsolutePath.normalize()
 
   private case class BrowserAssets(runHtml: Path, chromeRunner: Path, serveScript: Path)
 
@@ -144,18 +144,15 @@ object BrowserRunSupport {
     val outDir = outputPath.resolve("llvm").toAbsolutePath.normalize()
     val browserDir = outDir.resolve("tools").resolve("wasm-runner-js").resolve("browser")
     val runnerDir = browserDir.getParent
-    val smokeDir = outDir.resolve("tools").resolve("wasm-smoke").resolve("browser")
-
     Files.createDirectories(browserDir)
     Files.createDirectories(runnerDir)
-    Files.createDirectories(smokeDir)
 
     val runHtml = copyLocalOrBundled(DefaultBrowserRunHtml, BundledBrowserRunHtmlResource, browserDir.resolve("run_component.html"))
     val runModule = copyLocalOrBundled(DefaultBrowserRunModule, BundledBrowserRunModuleResource, browserDir.resolve("run_component.mjs"))
     val chromeRunner = copyLocalOrBundled(DefaultBrowserChromeRunner, BundledBrowserChromeRunnerResource, browserDir.resolve("run_headless_chrome.mjs"))
     copyLocalOrBundled(DefaultRunnerModule, BundledRunnerModuleResource, runnerDir.resolve("runner.mjs"))
     copyLocalOrBundled(DefaultOpfsHandlersModule, BundledOpfsHandlersResource, runnerDir.resolve("opfs-handlers.mjs"))
-    val serveScript = copyLocalOrBundled(DefaultServeScript, BundledServeScriptResource, smokeDir.resolve("serve.mjs"))
+    val serveScript = copyLocalOrBundled(DefaultServeScript, BundledServeScriptResource, browserDir.resolve("serve.mjs"))
 
     BrowserAssets(
       runHtml = runHtml,

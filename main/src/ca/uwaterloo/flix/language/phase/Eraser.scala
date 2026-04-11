@@ -51,12 +51,13 @@ object Eraser {
     ErasedAst.Root(newDefs, newEnums, newStructs, newEffects, root.mainEntryPoint, root.entryPoints, root.sources)
   }(DebugNoOp())
 
-  private def visitDef(defn: ReducedAst.Def)(implicit ctx: SharedContext, flix: Flix): ErasedAst.Def = defn match {
+  private def visitDef(defn: ReducedAst.Def)(implicit ctx: SharedContext, root: ReducedAst.Root, flix: Flix): ErasedAst.Def = defn match {
     case ReducedAst.Def(ann, mod, sym, cparams, fparams, exp, tpe, originalTpe, loc) =>
       val eNew = visitExp(exp)
       val e = ErasedAst.Expr.ApplyAtomic(AtomicOp.Box, List(eNew), box(tpe), exp.purity, loc)
+      // The wasm def-id runtime invokes `main` through the same portable ABI classification as `@Export`.
       val exportedSignature =
-        if (ann.isExport) ExportAbi.portableExportSignature(fparams.map(_.tpe), originalTpe.tpe)
+        if (ann.isExport || root.mainEntryPoint.contains(sym)) ExportAbi.portableExportSignature(fparams.map(_.tpe), originalTpe.tpe)
         else None
       val nativeImportSignature = exp match {
         case ReducedAst.Expr.NativeImport(_, _, _, _) => NativeImportAbi.signatureOf(fparams.map(_.tpe), originalTpe.tpe)

@@ -1261,9 +1261,7 @@ object LlvmBackend {
         val caseBlock = fb.newBlock(caseLabel)
         fb.setCurrent(caseBlock)
 
-        val sig = e.defn.exportedSignature.getOrElse {
-          throw new IllegalStateException(s"Missing portable export signature for '${e.sym}'.")
-        }
+        val sig = e.signature
         val loweredParams = e.defn.cparams ::: e.defn.fparams
         if (sig.params.length > loweredParams.length) {
           throw new IllegalStateException(s"Portable export signature arity exceeds lowered arity for '${e.sym}'.")
@@ -1300,7 +1298,7 @@ object LlvmBackend {
         val callTmp = freshTmp(flixResultType)
         fb.current.emitAssign(callTmp, Op.Call(flixResultType, LlvmNames.defName(e.sym), ctxPtr :: args))
         val r0 = unwindThunkToResult(callTmp, ctxPtr, fb)
-        val r = wrapResultForWasmRuntime(r0, ctxPtr, fb, wasmRuntimeValuePayloadIsPtr(e.defn))
+        val r = wrapResultForWasmRuntime(r0, ctxPtr, fb, wasmRuntimeValuePayloadIsPtr(e.signature))
         fb.current.setTerminator(Terminator.Ret(flixResultType, r))
 
         // Fallthrough continuation (for the next check).
@@ -1460,7 +1458,7 @@ object LlvmBackend {
 
           val caseBlock = fb.newBlock(caseLabel)
           fb.setCurrent(caseBlock)
-          val r = wrapResultForWasmRuntime(r0, ctxPtr, fb, wasmRuntimeValuePayloadIsPtr(e.defn))
+          val r = wrapResultForWasmRuntime(r0, ctxPtr, fb, wasmRuntimeValuePayloadIsPtr(e.signature))
           fb.current.setTerminator(Terminator.Ret(flixResultType, r))
 
           if (idx < entries.length - 1) {
@@ -1479,11 +1477,8 @@ object LlvmBackend {
       LlvmIr.Function("flix_wasm_resume_ok_def", flixResultType, params, fb.result())
     }
 
-    private def wasmRuntimeValuePayloadIsPtr(defn: LoweredAst.Def): Boolean =
-      defn.exportedSignature match {
-        case Some(sig) => sig.result != ca.uwaterloo.flix.language.phase.ExportAbi.AbiType.Unit
-        case None => defn.unboxedType.tpe != SimpleType.Unit
-      }
+    private def wasmRuntimeValuePayloadIsPtr(sig: ExportAbi.Signature): Boolean =
+      sig.result != ExportAbi.AbiType.Unit
 
     /**
       * Resumes a suspension by throwing an exception.

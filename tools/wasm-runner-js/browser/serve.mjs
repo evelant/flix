@@ -71,6 +71,8 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(port, "127.0.0.1", () => {
-  console.log(`[wasm-smoke] serving ${ROOT_DIR} at http://127.0.0.1:${port}/`);
-  console.log(`[wasm-smoke] open: http://127.0.0.1:${port}/tools/wasm-smoke/browser/opfs.html`);
+  const addr = server.address();
+  const boundPort = typeof addr === "object" && addr ? addr.port : port;
+  console.log(`[wasm-runner] serving ${ROOT_DIR} at http://127.0.0.1:${boundPort}/`);
+  console.log(`[wasm-runner] browser runner: http://127.0.0.1:${boundPort}/tools/wasm-runner-js/browser/run_component.html`);
 });

@@ -63,14 +63,11 @@ object LlvmWasmTypedExportsWriter {
     exports.map { e =>
       val base = baseWitName(e.sym.toString)
       val witName = uniqueWitName(base, e.defId, used)
-      val sig = e.defn.exportedSignature.getOrElse {
-        throw new IllegalStateException(s"Missing portable export signature for '${e.sym}'.")
-      }
       Entry(
         witName = witName,
         symbol = e.sym.toString,
         defId = e.defId,
-        signature = sig,
+        signature = e.signature,
         resumeType = LlvmExportSuspensionAnalysis.typedResumeType(e.sym, suspensionSummaries, root),
         requestSignature = LlvmExportSuspensionAnalysis.typedRequestSignature(e.sym, suspensionSummaries, root)
       )

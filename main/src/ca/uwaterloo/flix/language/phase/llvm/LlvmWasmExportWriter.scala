@@ -19,7 +19,6 @@ package ca.uwaterloo.flix.language.phase.llvm
 import ca.uwaterloo.flix.api.Flix
 import ca.uwaterloo.flix.language.ast.LoweredAst
 import ca.uwaterloo.flix.language.ast.SourceLocation
-import ca.uwaterloo.flix.language.phase.ExportAbi
 import ca.uwaterloo.flix.util.{ArtifactNames, InternalCompilerException}
 
 import java.nio.charset.StandardCharsets
@@ -64,16 +63,9 @@ object LlvmWasmExportWriter {
     sb.append(s"""  "defs": [\n""")
 
     entries.zipWithIndex.foreach { case (e, idx) =>
-      val defn = e.defn
-      val params = defn.exportedSignature match {
-        case Some(sig) => sig.params.map(_.displayName)
-        case None => (defn.cparams ::: defn.fparams).map(p => fallbackTypeNameOf(p.tpe))
-      }
+      val params = e.signature.params.map(_.displayName)
       val arity = params.length
-      val result = defn.exportedSignature match {
-        case Some(sig) => sig.result.displayName
-        case None => fallbackTypeNameOf(defn.unboxedType.tpe)
-      }
+      val result = e.signature.result.displayName
 
       sb.append("    {\n")
       sb.append(s"""      "defId": ${e.defId},\n""")
@@ -111,9 +103,6 @@ object LlvmWasmExportWriter {
     }
     b.toString()
   }
-
-  private def fallbackTypeNameOf(tpe: ca.uwaterloo.flix.language.ast.SimpleType): String =
-    ExportAbi.portableFromSimpleType(tpe).map(_.displayName).getOrElse(tpe.toString)
 
   private def writeFile(path: Path, bytes: Array[Byte]): Unit = {
     Files.createDirectories(path.getParent)

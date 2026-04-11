@@ -6,7 +6,7 @@ The goal is not to claim JVM parity or production readiness. The goal is to show
 
 ## Warning / Disclaimer
 
-I did this by guiding AI (specifically GPT-5.4-xhigh). I am not a compiler expert, an llvm expert, a c expert, wasm expert, or a Flix expert. This was done because I think Flix has a lot of great ideas but is very limited by being tied to the JVM. I wanted to see if it was possible and learn some things along the way, which I did.
+I did this by guiding AI (specifically GPT-5.4-xhigh). I am not a compiler expert, an llvm expert, a c expert, wasm expert, a Scala expert, or a Flix expert, although I have tinkered in all of those areas. This was done because I think Flix has a lot of great ideas but I also think it is very limited by being tied to the JVM. I wanted to see if it was possible and learn some things along the way, which I did.
 
 I think it's largely solid and well tested to the best of my knowledge and available time, but if there's no interest in evaluating code written largely via LLM I completely understand.
 

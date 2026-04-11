@@ -17,6 +17,7 @@
 package ca.uwaterloo.flix.language.phase.llvm
 
 import ca.uwaterloo.flix.language.ast.{LoweredAst, Symbol}
+import ca.uwaterloo.flix.language.phase.ExportAbi
 
 /**
   * Computes the set of lowered definitions that are invokable via the wasm component runtime
@@ -34,6 +35,7 @@ object LlvmWasmDefs {
   case class Entry(defId: Long,
                    sym: Symbol.DefnSym,
                    defn: LoweredAst.Def,
+                   signature: ExportAbi.Signature,
                    isMain: Boolean,
                    isExport: Boolean)
 
@@ -56,14 +58,21 @@ object LlvmWasmDefs {
     invokableSyms.zipWithIndex.map {
       case (sym, idx) =>
         val defn = defs(sym)
+        val isMain = mainSymOpt.contains(sym)
+        val signature = defn.exportedSignature.orElse {
+          if (isMain) ExportAbi.portableExportSignature((defn.cparams ::: defn.fparams).map(_.tpe), defn.unboxedType.tpe) else None
+        }.getOrElse {
+          val kind = if (isMain) "main entrypoint" else "@Export def"
+          throw new IllegalStateException(s"Missing portable wasm invocation signature for '$sym' ($kind).")
+        }
         Entry(
           defId = idx.toLong,
           sym = sym,
           defn = defn,
-          isMain = mainSymOpt.contains(sym),
+          signature = signature,
+          isMain = isMain,
           isExport = defn.ann.isExport
         )
     }
   }
 }
-

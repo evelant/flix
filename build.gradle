@@ -123,11 +123,6 @@ jar {
         into 'tools/wasm-runner-js'
     }
 
-    from('tools/wasm-smoke/browser') {
-        include 'serve.mjs'
-        into 'tools/wasm-smoke/browser'
-    }
-
     from('tools/wasm-runner-rs') {
         include 'Cargo.toml'
         include 'Cargo.lock'

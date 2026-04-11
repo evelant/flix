@@ -38,3 +38,4 @@ tools/wasm-smoke/browser-out
 AGENTS.md
 .codex_tmp
 /docs/scratch/
+/runtime/scratch/
